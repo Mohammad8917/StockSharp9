@@ -1,0 +1,38 @@
+name: Copy official StockSharp source
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: stocksharp-source-copy
+  cancel-in-progress: false
+jobs:
+  copy-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Copy complete current source tree from official repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch master https://github.com/StockSharp/StockSharp.git /tmp/stocksharp-source
+          rsync -a --delete --exclude='.git' /tmp/stocksharp-source/ "$GITHUB_WORKSPACE/"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Destination already matches the copied source tree."
+            exit 0
+          fi
+          git commit -m "Copy official StockSharp source snapshot"
+          git push origin HEAD:main
