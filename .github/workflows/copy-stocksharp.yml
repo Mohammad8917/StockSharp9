@@ -28,6 +28,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Sync the current default-branch snapshots; this workflow does not merge or edit upstream source.
           git clone --depth 1 --branch master https://github.com/StockSharp/StockSharp.git /tmp/stocksharp-source
           rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/stocksharp-source/ "$GITHUB_WORKSPACE/"
 
@@ -43,5 +44,5 @@ jobs:
             echo "Destination already matches the copied source snapshots."
             exit 0
           fi
-          git commit -m "Sync official StockSharp source and companion repositories"
+          git commit -m "Sync complete official StockSharp source snapshots"
           git push origin HEAD:main
