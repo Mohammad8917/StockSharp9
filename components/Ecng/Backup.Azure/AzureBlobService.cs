@@ -1,0 +1,194 @@
+namespace Ecng.Backup.Azure;
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+using global::Azure.Storage.Blobs;
+using global::Azure.Storage.Blobs.Models;
+using global::Azure.Storage.Blobs.Specialized;
+
+using Ecng.Common;
+
+/// <summary>
+/// The data storage service based on Azure Blob Storage.
+/// </summary>
+public class AzureBlobService : Disposable, IBackupService
+{
+	private readonly BlobContainerClient _container;
+	private const int _bufferSize = FileSizes.MB * 4;
+
+	private Task EnsureContainerAsync(CancellationToken cancellationToken)
+		=> _container.CreateIfNotExistsAsync(cancellationToken: cancellationToken);
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="AzureBlobService"/>.
+	/// </summary>
+	/// <param name="connectionString">Storage connection string.</param>
+	/// <param name="container">Container name.</param>
+	public AzureBlobService(string connectionString, string container)
+	{
+		if (connectionString.IsEmpty())
+			throw new ArgumentNullException(nameof(connectionString));
+
+		if (container.IsEmpty())
+			throw new ArgumentNullException(nameof(container));
+
+		_container = new(connectionString, container);
+	}
+
+	bool IBackupService.CanFolders => false;
+	bool IBackupService.CanPublish => false;
+	bool IBackupService.CanExpirable => false;
+	bool IBackupService.CanPartialDownload => true;
+
+	Task IBackupService.CreateFolder(BackupEntry entry, CancellationToken cancellationToken)
+		=> Task.CompletedTask;
+
+	IAsyncEnumerable<BackupEntry> IBackupService.FindAsync(BackupEntry parent, string criteria)
+		=> FindAsyncImpl(parent, criteria);
+
+	private async IAsyncEnumerable<BackupEntry> FindAsyncImpl(BackupEntry parent, string criteria, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+	{
+		await EnsureContainerAsync(cancellationToken).NoWait();
+
+		// Append a trailing '/' so listing a folder does not also match sibling folders
+		// whose name merely starts with the same prefix (e.g. "data" vs "data-old").
+		var prefix = parent is null ? null : parent.GetFullPath().TrimEnd('/') + "/";
+
+		await foreach (var item in _container.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix, cancellationToken))
+		{
+			// Match the criteria against the leaf (entry) name only, not the full blob
+			// path, so a folder segment cannot satisfy the filter.
+			var leaf = item.Name.Substring(item.Name.LastIndexOf('/') + 1);
+
+			if (!criteria.IsEmpty() && !leaf.ContainsIgnoreCase(criteria))
+				continue;
+
+			var be = GetPath(item.Name);
+			be.LastModified = item.Properties.LastModified?.UtcDateTime ?? default;
+			be.Size = item.Properties.ContentLength ?? 0;
+			yield return be;
+		}
+	}
+
+	private static BackupEntry GetPath(string key)
+	{
+		BackupEntry entry = null;
+
+		foreach (var part in key.Split('/', StringSplitOptions.RemoveEmptyEntries))
+			entry = new() { Name = part, Parent = entry };
+
+		return entry;
+	}
+
+	async Task IBackupService.FillInfoAsync(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		await EnsureContainerAsync(cancellationToken).NoWait();
+
+		var blob = _container.GetBlobClient(entry.GetFullPath());
+		var props = await blob.GetPropertiesAsync(cancellationToken: cancellationToken).NoWait();
+
+		entry.LastModified = props.Value.LastModified.UtcDateTime;
+		entry.Size = props.Value.ContentLength;
+	}
+
+	Task IBackupService.DeleteAsync(BackupEntry entry, CancellationToken cancellationToken)
+		=> _container.DeleteBlobAsync(entry.GetFullPath(), cancellationToken: cancellationToken);
+
+	async Task IBackupService.DownloadAsync(BackupEntry entry, Stream stream, long? offset, long? length, Action<int> progress, CancellationToken cancellationToken)
+	{
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(progress);
+
+		await EnsureContainerAsync(cancellationToken).NoWait();
+
+        var blob = _container.GetBlobClient(entry.GetFullPath());
+		var response = await blob.DownloadAsync(new(offset ?? 0, length), cancellationToken: cancellationToken).NoWait();
+		await using var source = response.Value.Content;
+		var total = response.Value.ContentLength;
+
+		var buffer = new byte[_bufferSize];
+		var read = 0L;
+		var prevProgress = -1;
+
+		while (read < total)
+		{
+			var expected = (int)(total - read).Min(_bufferSize);
+			var actual = await source.ReadAsync(buffer.AsMemory(0, expected), cancellationToken).NoWait();
+
+			if (actual == 0)
+				break;
+
+			await stream.WriteAsync(buffer.AsMemory(0, actual), cancellationToken).NoWait();
+			read += actual;
+
+			var curr = (int)(read * 100L / total);
+			if (curr < 100 && curr > prevProgress)
+			{
+				progress(curr);
+				prevProgress = curr;
+			}
+		}
+
+		// The loop breaks on a premature EOF (actual == 0 with read < total); without this guard the
+		// method would then report progress(100) and return, handing the caller a truncated file
+		// indistinguishable from a complete one.
+		if (read < total)
+			throw new IOException($"Unexpected end of stream: received {read} of {total} bytes for '{entry.GetFullPath()}'.");
+
+		if (prevProgress < 100)
+			progress(100);
+	}
+
+	async Task IBackupService.UploadAsync(BackupEntry entry, Stream stream, Action<int> progress, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+		ArgumentNullException.ThrowIfNull(stream);
+		ArgumentNullException.ThrowIfNull(progress);
+
+		await EnsureContainerAsync(cancellationToken).NoWait();
+
+		var blob = _container.GetBlockBlobClient(entry.GetFullPath());
+		var buffer = new byte[_bufferSize];
+		var uploaded = 0L;
+		var prevProgress = -1;
+
+		stream.Position = 0;
+		var blockIds = new List<string>();
+		var blockNum = 0;
+
+		while (uploaded < stream.Length)
+		{
+			var expected = (int)(stream.Length - uploaded).Min(_bufferSize);
+			var actual = await stream.ReadAsync(buffer.AsMemory(0, expected), cancellationToken).NoWait();
+			if (actual == 0)
+				break;
+
+			var id = Convert.ToBase64String(BitConverter.GetBytes(blockNum));
+			await blob.StageBlockAsync(id, new MemoryStream(buffer, 0, actual, writable: false), cancellationToken: cancellationToken).NoWait();
+			blockIds.Add(id);
+			uploaded += actual;
+			blockNum++;
+
+			var curr = (int)(uploaded * 100L / stream.Length);
+			if (curr > prevProgress)
+			{
+				progress(curr);
+				prevProgress = curr;
+			}
+		}
+
+		await blob.CommitBlockListAsync(blockIds, cancellationToken: cancellationToken).NoWait();
+
+		if (prevProgress < 100)
+			progress(100);
+	}
+
+	Task<string> IBackupService.PublishAsync(BackupEntry entry, TimeSpan? expiresIn, CancellationToken cancellationToken) => throw new NotSupportedException();
+	Task IBackupService.UnPublishAsync(BackupEntry entry, CancellationToken cancellationToken) => throw new NotSupportedException();
+}

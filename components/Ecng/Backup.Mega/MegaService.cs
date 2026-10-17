@@ -1,0 +1,296 @@
+﻿namespace Ecng.Backup.Mega;
+
+using System.Runtime.CompilerServices;
+using System.Security;
+using System.Threading.Tasks;
+
+using Ecng.Backup.Mega.Native;
+
+using Ecng.Common;
+using Ecng.Collections;
+
+
+/// <summary>
+/// The data storage service based on Mega https://mega.nz/ .
+/// </summary>
+/// <param name="email">Email.</param>
+/// <param name="password">Password.</param>
+public class MegaService(string email, SecureString password) : AsyncDisposable, IBackupService
+{
+	private class ProgressHandler(Action<int> progress) : IProgress<double>
+	{
+		private readonly Action<int> _progress = progress ?? throw new ArgumentNullException(nameof(progress));
+
+		void IProgress<double>.Report(double value) => _progress((int)value);
+	}
+
+	private readonly Client _client = new();
+	private readonly string _email = email.ThrowIfEmpty(nameof(email));
+	private readonly SecureString _password = password ?? throw new ArgumentNullException(nameof(password));
+	private readonly CachedSynchronizedList<Node> _nodes = [];
+	private readonly Lock _loginGate = new();
+	// Single-flight login: the first caller starts LoginCoreAsync, the rest await the SAME task, so
+	// concurrent IBackupService calls cannot double-login or duplicate the node cache - and no lock
+	// is held across the LoginAsync/GetNodesAsync network round-trips.
+	private Task _loginTask;
+
+	// Atomically replaces the node cache so a concurrent Find never observes the empty window
+	// between Clear() and AddRange() (which lock SyncRoot independently).
+	private void ResetNodes(IEnumerable<Node> nodes)
+	{
+		using (_nodes.SyncRoot.EnterScope())
+		{
+			_nodes.Clear();
+			_nodes.AddRange(nodes);
+		}
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask DisposeManaged()
+	{
+		if (_client.IsLoggedIn)
+			await _client.LogoutAsync().NoWait();
+
+		_client.Dispose();
+		await base.DisposeManaged().NoWait();
+	}
+
+	private ValueTask<Client> EnsureLogin(CancellationToken cancellationToken)
+	{
+		if (_client.IsLoggedIn)
+			return new(_client);
+
+		Task task;
+
+		// The gate is held only to publish the shared login task - not across the network below.
+		using (_loginGate.EnterScope())
+			task = _loginTask ??= LoginCoreAsync();
+
+		return new(AwaitLogin(task, cancellationToken));
+	}
+
+	private async Task<Client> AwaitLogin(Task task, CancellationToken cancellationToken)
+	{
+		await task.WaitAsync(cancellationToken).NoWait();
+		return _client;
+	}
+
+	private async Task LoginCoreAsync()
+	{
+		try
+		{
+			await _client.LoginAsync(_email, _password.UnSecure(), default).NoWait();
+
+			ResetNodes(await _client.GetNodesAsync(default).NoWait());
+		}
+		finally
+		{
+			// In-flight dedup only: clear so a later re-login (e.g. after a logout) is not blocked
+			// by a stale completed task.
+			using (_loginGate.EnterScope())
+				_loginTask = null;
+		}
+	}
+
+	bool IBackupService.CanFolders => true;
+	bool IBackupService.CanPartialDownload => false;
+	bool IBackupService.CanPublish => true;
+	bool IBackupService.CanExpirable => false;
+
+	private Node Find(BackupEntry entry)
+	{
+		if (entry is null)
+			throw new ArgumentNullException(nameof(entry));
+
+		var folders = new List<BackupEntry>();
+
+		do
+		{
+			folders.Add(entry);
+			entry = entry.Parent;
+		}
+		while (entry is not null);
+
+		folders.Reverse();
+
+		var curr = GetRoot();
+
+		foreach (var folder in folders)
+		{
+			curr = GetChild(curr).FirstOrDefault(n => n.Name.EqualsIgnoreCase(folder.Name));
+
+			if (curr is null)
+				break;
+		}
+
+		return curr;
+	}
+
+	private Node GetRoot() => _nodes.Cache.First(n => n.Type == NodeType.Root);
+
+	private IEnumerable<Node> GetChild(Node parent)
+	{
+		if (parent is null)
+			throw new ArgumentNullException(nameof(parent));
+
+		return _nodes.Cache.Where(n => n.ParentId == parent.Id);
+	}
+
+	async Task IBackupService.CreateFolder(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+
+		var client = await EnsureLogin(cancellationToken);
+
+		var folders = new List<BackupEntry>();
+
+		do
+		{
+			folders.Add(entry);
+			entry = entry.Parent;
+		}
+		while (entry is not null);
+
+		folders.Reverse();
+
+		var needCheck = true;
+		var curr = GetRoot();
+
+		foreach (var folder in folders)
+		{
+			var name = folder.Name;
+
+			if (needCheck)
+			{
+				var found = GetChild(curr).FirstOrDefault(n => n.Name.EqualsIgnoreCase(name));
+
+				if (found is null)
+				{
+					needCheck = false;
+					curr = await client.CreateFolderAsync(curr.Id, name, cancellationToken).NoWait();
+					_nodes.Add(curr);
+				}
+				else
+					curr = found;
+			}
+			else
+			{
+				curr = await client.CreateFolderAsync(curr.Id, name, cancellationToken).NoWait();
+				_nodes.Add(curr);
+			}
+		}
+	}
+
+	async Task IBackupService.DeleteAsync(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		var client = await EnsureLogin(cancellationToken);
+
+		var node = Find(entry);
+
+		if (node is null)
+			return;
+
+		await client.DeleteAsync(node.Id, cancellationToken).NoWait();
+		_nodes.Remove(node);
+	}
+
+	async Task IBackupService.DownloadAsync(BackupEntry entry, Stream stream, long? offset, long? length, Action<int> progress, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+		ArgumentNullException.ThrowIfNull(stream);
+		ArgumentNullException.ThrowIfNull(progress);
+
+		if (offset is not null || length is not null)
+			throw new NotSupportedException("Partial download is not supported.");
+
+		var client = await EnsureLogin(cancellationToken);
+
+		var node = Find(entry) ?? throw new ArgumentOutOfRangeException(nameof(entry), "Entry not found.");
+
+		await client.DownloadAsync(node, stream, new ProgressHandler(progress), cancellationToken).NoWait();
+	}
+
+	async Task IBackupService.UploadAsync(BackupEntry entry, Stream stream, Action<int> progress, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(entry);
+		ArgumentNullException.ThrowIfNull(stream);
+		ArgumentNullException.ThrowIfNull(progress);
+
+		var client = await EnsureLogin(cancellationToken);
+
+		var parent = (entry.Parent is null ? GetRoot() : Find(entry.Parent))
+			?? throw new ArgumentOutOfRangeException(nameof(entry), "Parent entry not found.");
+
+		var node = await client.UploadAsync(parent.Id, entry.Name, stream, modificationDate: null, new ProgressHandler(progress), cancellationToken).NoWait();
+		_nodes.Add(node);
+	}
+
+	async Task IBackupService.FillInfoAsync(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		await EnsureLogin(cancellationToken);
+
+		var node = Find(entry) ?? throw new ArgumentOutOfRangeException(nameof(entry), "Entry not found.");
+
+		entry.LastModified = node.ModificationDate ?? node.CreationDate ?? default;
+		entry.Size = node.Size;
+	}
+
+	IAsyncEnumerable<BackupEntry> IBackupService.FindAsync(BackupEntry parent, string criteria)
+		=> FindAsyncImpl(parent, criteria);
+
+	private async IAsyncEnumerable<BackupEntry> FindAsyncImpl(BackupEntry parent, string criteria, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+	{
+		await EnsureLogin(cancellationToken);
+
+		var pe = parent is null ? GetRoot() : Find(parent);
+
+		if (pe is null)
+			yield break;
+
+		var child = GetChild(pe);
+
+		if (!criteria.IsEmpty())
+			child = child.Where(i => i.Name.ContainsIgnoreCase(criteria));
+
+		foreach (var item in child)
+		{
+			yield return new()
+			{
+				Name = item.Name,
+				Parent = parent,
+				LastModified = item.ModificationDate ?? item.CreationDate ?? default,
+				Size = item.Size,
+			};
+		}
+	}
+
+	async Task<string> IBackupService.PublishAsync(BackupEntry entry, TimeSpan? expiresIn, CancellationToken cancellationToken)
+	{
+		if (expiresIn is not null)
+			throw new NotSupportedException("Expiring links are not supported by MEGA export links.");
+
+		var client = await EnsureLogin(cancellationToken);
+
+		var node = Find(entry) ?? throw new ArgumentOutOfRangeException(nameof(entry), "Entry not found.");
+
+		var url = await client.PublishAsync(node, cancellationToken).NoWait();
+
+		ResetNodes(await _client.GetNodesAsync(cancellationToken).NoWait());
+
+		return url;
+	}
+
+	async Task IBackupService.UnPublishAsync(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		var client = await EnsureLogin(cancellationToken);
+
+		var node = Find(entry);
+
+		if (node is null)
+			return;
+
+		await client.UnpublishAsync(node.Id, cancellationToken).NoWait();
+
+		ResetNodes(await _client.GetNodesAsync(cancellationToken).NoWait());
+	}
+}

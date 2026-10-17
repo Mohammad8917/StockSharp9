@@ -1,0 +1,412 @@
+namespace Ecng.Backup.Amazon;
+
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Net;
+using System.Runtime.CompilerServices;
+
+using global::Amazon.Runtime;
+using global::Amazon.S3;
+using global::Amazon.S3.Model;
+
+/// <summary>
+/// The data storage service based on Amazon S3 https://aws.amazon.com/s3/ .
+/// </summary>
+public class AmazonS3Service : Disposable, IBackupService
+{
+	private readonly string _bucket;
+	private readonly IAmazonS3 _client;
+	private const int _bufferSize = FileSizes.MB * 10;
+	private readonly AWSCredentials _credentials;
+	private readonly RegionEndpoint _endpoint;
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="AmazonS3Service"/>.
+	/// </summary>
+	/// <param name="endpoint">Region address.</param>
+	/// <param name="bucket">Storage name.</param>
+	/// <param name="accessKey">Key.</param>
+	/// <param name="secretKey">Secret.</param>
+	public AmazonS3Service(string endpoint, string bucket, string accessKey, string secretKey)
+		: this(AmazonExtensions.GetEndpoint(endpoint), bucket, accessKey, secretKey)
+	{
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="AmazonS3Service"/>.
+	/// </summary>
+	/// <param name="endpoint">Region address.</param>
+	/// <param name="bucket">Storage name.</param>
+	/// <param name="accessKey">Key.</param>
+	/// <param name="secretKey">Secret.</param>
+	[CLSCompliant(false)]
+	public AmazonS3Service(RegionEndpoint endpoint, string bucket, string accessKey, string secretKey)
+	{
+		_credentials = new BasicAWSCredentials(accessKey, secretKey);
+		_endpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
+		_bucket = bucket.ThrowIfEmpty(nameof(bucket));
+		_client = new AmazonS3Client(_credentials, _endpoint);
+	}
+
+	bool IBackupService.CanFolders => false;
+	bool IBackupService.CanPublish => true;
+	bool IBackupService.CanExpirable => true;
+	bool IBackupService.CanPartialDownload => true;
+
+	IAsyncEnumerable<BackupEntry> IBackupService.FindAsync(BackupEntry parent, string criteria)
+		=> FindAsyncImpl(parent, criteria);
+
+	private async IAsyncEnumerable<BackupEntry> FindAsyncImpl(BackupEntry parent, string criteria, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+	{
+		//if (parent != null && !parent.IsDirectory)
+		//	throw new ArgumentException("{0} should be directory.".Put(parent.Name), "parent");
+
+		var prefix = parent?.GetFullPath();
+		if (!prefix.IsEmpty())
+			prefix = prefix.TrimEnd('/') + "/";
+
+		var request = new ListObjectsV2Request
+		{
+			BucketName = _bucket,
+			Prefix = prefix ?? string.Empty,
+		};
+
+		if (!criteria.IsEmpty())
+			request.Prefix = request.Prefix.IsEmpty() ? criteria : request.Prefix + "/" + criteria;
+
+		do
+		{
+			var response = await _client.ListObjectsV2Async(request, cancellationToken).NoWait();
+
+			foreach (var entry in response.S3Objects ?? [])
+			{
+				if (entry.LastModified is null || entry.Size is null)
+					continue;
+
+				var be = GetPath(entry.Key);
+
+				// Folder-marker objects (key ends with '/') have a real Size of 0, so the guard
+				// above doesn't skip them; GetPath returns null for such keys - skip them.
+				if (be is null)
+					continue;
+
+				be.LastModified = entry.LastModified.Value;
+				be.Size = entry.Size.Value;
+
+				yield return be;
+			}
+
+			foreach (var commonPrefix in response.CommonPrefixes ?? [])
+			{
+				yield return new()
+				{
+					Name = commonPrefix,
+					Parent = parent,
+				};
+			}
+
+			if (response.IsTruncated == true)
+				request.ContinuationToken = response.NextContinuationToken;
+			else
+				break;
+		}
+		while (true);
+	}
+
+	Task IBackupService.DeleteAsync(BackupEntry entry, CancellationToken cancellationToken)
+		=> _client.DeleteObjectAsync(_bucket, entry.GetFullPath(), cancellationToken);
+
+	async Task IBackupService.DownloadAsync(BackupEntry entry, Stream stream, long? offset, long? length, Action<int> progress, CancellationToken cancellationToken)
+	{
+		if (entry is null)
+			throw new ArgumentNullException(nameof(entry));
+
+		if (stream is null)
+			throw new ArgumentNullException(nameof(stream));
+
+		if (progress is null)
+			throw new ArgumentNullException(nameof(progress));
+
+		var key = entry.GetFullPath();
+
+		var request = new GetObjectRequest
+		{
+			BucketName = _bucket,
+			Key = key,
+		};
+
+		if (offset != null || length != null)
+		{
+			if (offset is null || length is null)
+				throw new NotSupportedException();
+
+			request.ByteRange = new(offset.Value, offset.Value + length.Value - 1); // inclusive end
+		}
+
+		var bytes = new byte[_bufferSize];
+		var readTotal = 0L;
+
+		var prevProgress = -1;
+
+		using (var response = await _client.GetObjectAsync(request, cancellationToken).NoWait())
+		using (var responseStream = response.ResponseStream)
+		{
+			var objLen = response.ContentLength;
+
+			while (readTotal < objLen)
+			{
+				var expected = (int)(objLen - readTotal).Min(_bufferSize);
+				var actual = await responseStream.ReadAsync(bytes.AsMemory(0, expected), cancellationToken).NoWait();
+
+				if (actual == 0)
+					break;
+
+				await stream.WriteAsync(bytes.AsMemory(0, actual), cancellationToken).NoWait();
+
+				readTotal += actual;
+
+				var currProgress = (int)(readTotal * 100L / objLen);
+
+				if (currProgress < 100 && prevProgress < currProgress)
+				{
+					progress(currProgress);
+					prevProgress = currProgress;
+				}
+			}
+		}
+
+		if (prevProgress < 100)
+			progress(100);
+	}
+
+	async Task IBackupService.UploadAsync(BackupEntry entry, Stream stream, Action<int> progress, CancellationToken cancellationToken)
+	{
+		if (entry is null)
+			throw new ArgumentNullException(nameof(entry));
+
+		if (stream is null)
+			throw new ArgumentNullException(nameof(stream));
+
+		if (progress is null)
+			throw new ArgumentNullException(nameof(progress));
+
+		var key = entry.GetFullPath();
+
+		if (stream.CanSeek && stream.Position >= stream.Length)
+		{
+			await _client.PutObjectAsync(new()
+			{
+				BucketName = _bucket,
+				Key = key,
+				InputStream = stream,
+			}, cancellationToken).NoWait();
+
+			progress(100);
+			return;
+		}
+
+		var initResponse = await _client.InitiateMultipartUploadAsync(new()
+		{
+			BucketName = _bucket,
+			Key = key,
+		}, cancellationToken).NoWait();
+
+		try
+		{
+			// S3 allows at most 10000 parts, so a fixed 10 MB part capped uploads at ~100 GB and
+			// failed (after transferring ~100 GB) for anything larger. Scale the part size up for
+			// big streams while keeping the default for small ones.
+			var partSize = (stream.Length + 9999) / 10000;
+
+			if (partSize < _bufferSize)
+				partSize = _bufferSize;
+
+			var filePosition = 0L;
+			var prevProgress = -1;
+
+			var etags = new List<PartETag>();
+
+			var partNum = 1;
+
+			while (filePosition < stream.Length)
+			{
+				var response = await _client.UploadPartAsync(new()
+				{
+					BucketName = _bucket,
+					UploadId = initResponse.UploadId,
+					PartNumber = partNum,
+					PartSize = partSize,
+					//FilePosition = filePosition,
+					InputStream = stream,
+					Key = key
+				}, cancellationToken).NoWait();
+
+				etags.Add(new(partNum, response.ETag));
+
+				filePosition += partSize;
+
+				var currProgress = (int)(filePosition.Min(stream.Length) * 100 / stream.Length);
+
+				if (currProgress > prevProgress)
+				{
+					progress(currProgress);
+					prevProgress = currProgress;
+				}
+
+				partNum++;
+			}
+
+			await _client.CompleteMultipartUploadAsync(new()
+			{
+				BucketName = _bucket,
+				UploadId = initResponse.UploadId,
+				Key = key,
+				PartETags = etags
+			}, cancellationToken).NoWait();
+
+			if (prevProgress < 100)
+				progress(100);
+		}
+		catch
+		{
+			// Abort so already-uploaded parts don't linger (invisible to ListObjects but still
+			// billed). Use no token so a cancellation that triggered this still cleans up.
+			try
+			{
+				await _client.AbortMultipartUploadAsync(new()
+				{
+					BucketName = _bucket,
+					Key = key,
+					UploadId = initResponse.UploadId,
+				}, CancellationToken.None).NoWait();
+			}
+			catch
+			{
+			}
+
+			throw;
+		}
+	}
+
+	Task IBackupService.CreateFolder(BackupEntry entry, CancellationToken cancellationToken)
+		=> throw new NotSupportedException();
+
+	async Task IBackupService.FillInfoAsync(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		var key = entry.GetFullPath();
+
+		var response = await _client.GetObjectMetadataAsync(new()
+		{
+			BucketName = _bucket,
+			Key = key,
+		}, cancellationToken).NoWait();
+
+		entry.Size = response.ContentLength;
+		entry.LastModified = response.LastModified ?? default;
+	}
+
+	async Task<string> IBackupService.PublishAsync(BackupEntry entry, TimeSpan? expiresIn, CancellationToken cancellationToken)
+	{
+		var key = entry.GetFullPath();
+
+		if (expiresIn is not null)
+		{
+			if (expiresIn.Value <= TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(expiresIn));
+
+			if (expiresIn.Value > TimeSpan.FromDays(7))
+				throw new ArgumentOutOfRangeException(nameof(expiresIn), "S3 pre-signed URLs cannot exceed 7 days.");
+
+			return _client.GetPreSignedURL(new GetPreSignedUrlRequest
+			{
+				BucketName = _bucket,
+				Key = key,
+				Verb = HttpVerb.GET,
+				Expires = DateTime.UtcNow.Add(expiresIn.Value),
+			});
+		}
+
+		try
+		{
+			var response = await _client.PutObjectAclAsync(new()
+			{
+				BucketName = _bucket,
+				Key = key,
+				ACL = S3CannedACL.PublicRead,
+			}, cancellationToken).NoWait();
+
+			if (response.HttpStatusCode != HttpStatusCode.OK)
+				throw new InvalidOperationException(response.HttpStatusCode.To<string>());
+
+			return $"https://{_bucket}.s3.{_endpoint.SystemName}.amazonaws.com/{key}";
+		}
+		catch (AmazonS3Exception ex) when (IsPublicAclNotAllowed(ex))
+		{
+			throw new InvalidOperationException("Infinite publish is not supported for this bucket/account (public ACLs are blocked). Specify expiresIn to get a pre-signed URL instead.", ex);
+		}
+	}
+
+	async Task IBackupService.UnPublishAsync(BackupEntry entry, CancellationToken cancellationToken)
+	{
+		var key = entry.GetFullPath();
+
+		try
+		{
+			var response = await _client.PutObjectAclAsync(new()
+			{
+				BucketName = _bucket,
+				Key = key,
+				ACL = S3CannedACL.Private,
+			}, cancellationToken).NoWait();
+
+			if (response.HttpStatusCode != HttpStatusCode.OK)
+				throw new InvalidOperationException(response.HttpStatusCode.To<string>());
+		}
+		catch (AmazonS3Exception ex) when (IsPublicAclNotAllowed(ex))
+		{
+			// Best-effort unpublish. Pre-signed links cannot be revoked.
+		}
+	}
+
+	private static bool IsPublicAclNotAllowed(AmazonS3Exception ex)
+	{
+		if (ex is null)
+			return false;
+
+		if (ex.ErrorCode == "AccessControlListNotSupported")
+			return true;
+
+		if (ex.ErrorCode == "AccessDenied")
+			return ex.Message?.Contains("BlockPublicAcls", StringComparison.OrdinalIgnoreCase) == true;
+
+		return false;
+	}
+
+	private static BackupEntry GetPath(string key)
+	{
+		// RemoveEmptyEntries: a key ending in '/' (AWS-console folder marker) or containing '//'
+		// would otherwise yield a BackupEntry with an empty Name, which throws on any later use.
+		var entities = key.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(p => new BackupEntry { Name = p }).ToArray();
+
+		if (entities.Length == 0)
+			return null;
+
+		BackupEntry parent = null;
+
+		foreach (var entity in entities)
+		{
+			entity.Parent = parent;
+			parent = entity;
+		}
+
+		return entities.Last();
+	}
+
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		_client.Dispose();
+		base.DisposeManaged();
+	}
+}

@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common.props" />
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="$(AWSSDKVer)" />
+    <PackageReference Include="AWSSDK.SQS" Version="$(AWSSDKVer)" />
+    <PackageReference Include="AWSSDK.SimpleNotificationService" Version="$(AWSSDKVer)" />
+    <PackageReference Include="AWSSDK.Glacier" Version="$(AWSSDKVer)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Backup\Backup.csproj" />
+  </ItemGroup>
+</Project>
