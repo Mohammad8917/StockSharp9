@@ -43,5 +43,5 @@ jobs:
             echo "Destination already matches the copied source snapshots."
             exit 0
           fi
-          git commit -m "Copy official StockSharp source and companion repositories"
+          git commit -m "Sync official StockSharp source and companion repositories"
           git push origin HEAD:main
