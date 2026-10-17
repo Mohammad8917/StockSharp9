@@ -1,5 +1,9 @@
-name: Copy official StockSharp source
+name: Copy and verify official StockSharp source
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/copy-stocksharp.yml"
   workflow_dispatch:
 permissions:
   contents: write
@@ -7,7 +11,7 @@ concurrency:
   group: stocksharp-source-copy
   cancel-in-progress: false
 jobs:
-  copy-source:
+  copy-and-verify:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -20,26 +24,69 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Copy official StockSharp core and public companion repositories
+      - name: Clone official upstream snapshots
         shell: bash
         run: |
           set -euo pipefail
-
-          # Sync the current default-branch snapshots; this workflow does not merge or edit upstream source.
-          git clone --depth 1 --branch master https://github.com/StockSharp/StockSharp.git /tmp/stocksharp-source
-          rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/stocksharp-source/ "$GITHUB_WORKSPACE/"
-
+          git clone --depth 1 --branch master https://github.com/StockSharp/StockSharp.git /tmp/StockSharp
+          printf '%s\n' "StockSharp core: $(git -C /tmp/StockSharp rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/companions
+          for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
+            git clone --depth 1 "https://github.com/StockSharp/$repo.git" "/tmp/companions/$repo"
+            printf '%s\n' "$repo: $(git -C "/tmp/companions/$repo" rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Synchronize source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/"
           mkdir -p "$GITHUB_WORKSPACE/components"
           for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
-            git clone --depth 1 "https://github.com/StockSharp/$repo.git" "/tmp/$repo"
             mkdir -p "$GITHUB_WORKSPACE/components/$repo"
-            rsync -a --delete --exclude='.git' "/tmp/$repo/" "$GITHUB_WORKSPACE/components/$repo/"
+            rsync -a --delete --exclude='.git' "/tmp/companions/$repo/" "$GITHUB_WORKSPACE/components/$repo/"
           done
-
           git add -A -f
-          if git diff --cached --quiet; then
-            echo "Destination already matches the copied source snapshots."
-            exit 0
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync complete official StockSharp source snapshots"
+            git push origin HEAD:main
+          else
+            echo "No source changes needed." >> "$GITHUB_STEP_SUMMARY"
           fi
-          git commit -m "Sync complete official StockSharp source snapshots"
-          git push origin HEAD:main
+      - name: Verify every copied file by checksum and deletion check
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          : > /tmp/verify-report.txt
+          rsync -nrc --delete --itemize-changes --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/" > /tmp/core-diff.txt
+          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' ! -path '*/.github/workflows/*' | wc -l)
+          if [ -s /tmp/core-diff.txt ]; then
+            echo "FAIL StockSharp core: differences found" | tee -a /tmp/verify-report.txt
+            cat /tmp/core-diff.txt >> /tmp/verify-report.txt
+            fail=1
+          else
+            echo "PASS StockSharp core: $core_count files; checksum and path-set match (excluding this repository's workflow directory and companion bundle)" | tee -a /tmp/verify-report.txt
+          fi
+          for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
+            rsync -nrc --delete --itemize-changes --exclude='.git' "/tmp/companions/$repo/" "$GITHUB_WORKSPACE/components/$repo/" > "/tmp/$repo-diff.txt"
+            count=$(find "/tmp/companions/$repo" -type f ! -path '*/.git/*' | wc -l)
+            if [ -s "/tmp/$repo-diff.txt" ]; then
+              echo "FAIL $repo: differences found" | tee -a /tmp/verify-report.txt
+              cat "/tmp/$repo-diff.txt" >> /tmp/verify-report.txt
+              fail=1
+            else
+              echo "PASS $repo: $count files; checksum and path-set match" | tee -a /tmp/verify-report.txt
+            fi
+          done
+          cat /tmp/verify-report.txt >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "RESULT: 100% verified for all listed upstream snapshots at the SHAs above." >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stocksharp-copy-verification
+          path: /tmp/verify-report.txt
+          if-no-files-found: ignore
