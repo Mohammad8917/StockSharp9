@@ -1,8 +1,5 @@
 name: Copy official StockSharp source
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 permissions:
   contents: write
