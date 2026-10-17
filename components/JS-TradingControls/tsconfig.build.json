@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist/esm",
+    "declaration": true,
+    "declarationMap": true,
+    "declarationDir": "dist/types",
+    "sourceMap": true
+  },
+  // Only the browser bundle uses this file, and esbuild compiles it itself. Emitting it here
+  // would publish a module that throws for anyone who imported it from npm.
+  "exclude": ["src/chart-engine.global.ts"]
+}

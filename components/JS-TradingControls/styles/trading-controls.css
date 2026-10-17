@@ -1,0 +1,2024 @@
+/* Looks for every element @stocksharp/trading-controls renders.
+ *
+ * The controls emit class names and nothing else — no inline style, no colour
+ * literal, no measurement in TypeScript. This file is the other half of that
+ * bargain, and shipping it is what lets the package render outside the
+ * application it was extracted from.
+ *
+ * It reads its colours, fonts and metrics from `--t-*` custom properties and
+ * declares none of them. `styles/theme.css` carries a working default; a host
+ * with a design system declares the same names itself and skips that file. The
+ * full list is in the README, and `tools/check-style-contract.mjs` fails if a
+ * rule here reads a property the theme does not declare.
+ *
+ * Load order matters in one direction only: a host that wants to override a
+ * rule (not just a token) must load its own stylesheet AFTER this one.
+ */
+
+/* ---------------------------------------------------------------- keyframes */
+
+/* The panel fades in as it is docked, so a restored layout does not appear as
+   a hard flash of four tables at once. */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* A price cell that changed. The background is what animates, not the text,
+   because the text is the number the user is trying to read. */
+@keyframes flashGreen {
+    0% { background: var(--t-green-flash); }
+    100% { background: transparent; }
+}
+
+@keyframes flashRed {
+    0% { background: var(--t-red-flash); }
+    100% { background: transparent; }
+}
+
+/* ------------------------------------------------------------- panel shell */
+
+/* Emitted by `makePanelRoot`. Every control is one of these, and the modifier
+   class next to it (`positions-panel`, `watchlist-panel`, …) is what a host
+   keys any per-control override off. */
+.terminal-panel {
+    background: var(--t-panel);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    animation: fadeIn 0.3s ease both;
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--t-text-dim);
+    background: var(--t-header);
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+    /* A docking host commonly uses the header as a drag handle. Without
+       user-select:none the browser starts a text selection on press and the
+       drag never takes off. */
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* An input lifted into the header (the watchlist's search box) still has to be
+   selectable, so it opts back in. */
+.panel-header input,
+.panel-header textarea {
+    user-select: auto;
+    -webkit-user-select: auto;
+}
+
+/* The body soaks up whatever the header left and scrolls when the table
+   overflows. `panel-body-with-rail` turns it into a row — table on the left,
+   action rail pinned right — and moves the overflow inward so the rail stays
+   put while the table scrolls under it. */
+.terminal-panel > .panel-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 0;
+    position: relative;
+}
+
+.terminal-panel > .panel-body.panel-body-with-rail {
+    display: flex;
+    flex-direction: row;
+    overflow: hidden;
+}
+
+.panel-body-content {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    position: relative;
+}
+
+.panel-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 6px;
+    align-items: center;
+    flex-shrink: 0;
+    background: var(--t-header);
+    border-left: 1px solid var(--t-border);
+}
+
+/* On a phone the rail is too cramped and squeezes the table further. Hide it:
+   the per-row × in orders and positions still lets the user act on a single
+   row, and a rail that only refreshes simply goes away.
+
+   Two clauses so it fires for portrait phones (≤768px wide) and for landscape
+   phones as well — one of those is ~932×430, wider than 768 but too short for
+   the desktop layout. */
+@media (max-width: 768px), (max-height: 500px) {
+    .panel-rail { display: none; }
+}
+
+/* --------------------------------------------------------------- icon button */
+
+/* Emitted by `makeIconButton`: the close, refresh, export and cancel-all
+   buttons in the panel chrome, and the per-row actions inside the tables. */
+.bt-icon-btn {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--t-border);
+    color: var(--t-text-dim);
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    padding: 0;
+    transition: all var(--t-transition);
+}
+
+.bt-icon-btn i { font-size: 12px; line-height: 1; }
+
+.bt-icon-btn:hover:not(:disabled) {
+    color: var(--t-text-bright);
+    border-color: var(--t-text-dim);
+}
+
+.bt-icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.bt-icon-btn.bt-icon-cancel:hover:not(:disabled),
+.bt-icon-btn.bt-icon-cancel-all:hover {
+    color: var(--t-red);
+    border-color: var(--t-red);
+}
+
+/* Reverse a position — amber, to read as "destructive but not a cancel". */
+.bt-icon-btn.bt-icon-reverse:hover {
+    color: var(--t-orange);
+    border-color: var(--t-orange);
+}
+
+/* The per-row action cell in the positions table: two icon buttons side by
+   side, centred. */
+.position-actions {
+    display: flex;
+    gap: 4px;
+    justify-content: center;
+}
+
+/* ------------------------------------------------------------------- tables */
+
+/* The blotter table skin — active orders, trade history, positions. The
+   watchlist is deliberately not one of these; it is denser and has its own
+   skin further down. */
+.terminal-table {
+    width: 100%;
+    font-size: 11px;
+    font-family: var(--t-mono);
+    border-collapse: collapse;
+}
+
+.terminal-table thead th {
+    padding: 4px 6px;
+    font-weight: 600;
+    color: var(--t-text-dim);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    border-bottom: 1px solid var(--t-border);
+    position: sticky;
+    top: 0;
+    background: var(--t-panel);
+    white-space: nowrap;
+}
+
+/* A column the grid declared a `value` for is sortable, and it says so by
+   stamping `data-sort`. Clicking cycles asc -> desc -> natural. */
+.terminal-table thead th[data-sort] { cursor: pointer; user-select: none; }
+.terminal-table thead th[data-sort]:hover { color: var(--t-text-bright); }
+.terminal-table thead th.sort-asc::after { content: ' \25B2'; font-size: 7px; }
+.terminal-table thead th.sort-desc::after { content: ' \25BC'; font-size: 7px; }
+
+.terminal-table tbody td {
+    padding: 4px 6px;
+    /* --t-border at half strength. Spelled as a mix rather than the resolved
+       rgba() so it follows the token into a light theme; the literal it
+       replaces stayed dark-grey on white. */
+    border-bottom: 1px solid color-mix(in srgb, var(--t-border) 50%, transparent);
+    white-space: nowrap;
+}
+
+.terminal-table tbody tr { transition: background var(--t-transition); }
+.terminal-table tbody tr:hover { background: var(--t-hover); }
+
+/* Numeric id columns (#42) — dim, monospace, tabular so they line up. */
+.terminal-table .mono-id {
+    color: var(--t-text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+/* The cash balance pinned above the positions. A pinned grid row supplies its
+   own cells with class names rather than inline styles, so its emphasis lives
+   here with the rest of the table. */
+.terminal-table tbody tr.balance-row .balance-ccy { color: var(--t-accent); font-weight: 600; }
+.terminal-table tbody tr.balance-row .balance-available { color: var(--t-text-bright); }
+.terminal-table tbody tr.balance-row .balance-locked { color: var(--t-text-dim); }
+.terminal-table tbody tr.balance-row .balance-total { color: var(--t-text-bright); font-weight: 600; }
+
+/* A cell the user can double-click to edit in place. */
+.cell-editable { cursor: pointer; border-bottom: 1px dashed var(--t-text-dim); }
+.cell-editable:hover { color: var(--t-accent); }
+
+.inline-edit-input {
+    width: 80px;
+    background: var(--t-bg);
+    border: 1px solid var(--t-accent);
+    color: var(--t-text-bright);
+    font-family: var(--t-mono);
+    font-size: 11px;
+    padding: 1px 4px;
+    outline: none;
+    border-radius: var(--t-radius);
+}
+
+/* Terminal-state rows in active orders. The blotter keeps a row for the
+   order's whole lifetime so the user can read its final state instead of
+   guessing why it vanished, and these dim it so the live rows stay prominent.
+   The tints are deliberately their own hues rather than the direction colours:
+   a filled order is not "up" and a cancelled one is not "down". */
+.terminal-table tbody tr.order-rejected td {
+    color: var(--t-text-dim);
+    background: rgba(220, 53, 69, 0.07);
+}
+
+.terminal-table tbody tr.order-cancelled td {
+    color: var(--t-text-dim);
+    background: rgba(108, 117, 125, 0.10);
+}
+
+.terminal-table tbody tr.order-filled td {
+    color: var(--t-text-dim);
+    background: rgba(40, 167, 69, 0.07);
+}
+
+/* The ? next to a rejected order's status; the reason is its tooltip. */
+.reject-reason-icon {
+    color: var(--t-warning);
+    cursor: help;
+    margin-left: 4px;
+}
+
+.reject-reason-icon:hover { color: var(--t-accent); }
+
+/* ------------------------------------------------------- direction and sign */
+
+/* These four are the only class names in this file that no control emits.
+   They come back out of the host's own `TradingPresentation.sideClass` /
+   `pnlClass`, and a control puts the answer on the cell without looking at it —
+   so the agreement is between the host and this file, with the control only
+   carrying the string between them. The names are stated as the port's
+   `PRESENTATION_CLASSES`, and `tools/check-style-contract.mjs` asserts that
+   every one of them is styled here. A host on its own palette may answer with
+   different names, and then styles those itself. */
+.pnl-positive { color: var(--t-green); font-weight: 600; }
+.pnl-negative { color: var(--t-red); font-weight: 600; }
+.side-buy { color: var(--t-green); font-weight: 600; }
+.side-sell { color: var(--t-red); font-weight: 600; }
+
+/* ------------------------------------------------------ classes from the grid */
+
+/* Two class names come out of @stocksharp/grids rather than out of a column
+   declaration, so a page that styles the controls has to style them too:
+   `grid-empty` on the cell that spans an empty table, and `visually-hidden` on
+   a header whose caption is for screen readers only (an actions column). Both
+   table skins need the first. */
+.terminal-table tbody td.grid-empty,
+.watchlist-table tbody td.grid-empty {
+    text-align: center;
+    color: var(--t-text-dim);
+}
+
+/* The grid marks selected rows (the blotters switch selection on); a tint
+   under the cells' own colours, so a red Sell stays red while marked. */
+.terminal-table tbody tr.is-selected td {
+    background: color-mix(in srgb, var(--t-accent) 16%, transparent);
+}
+
+/* Spelled the way Bootstrap spells it. A page that already loads Bootstrap has
+   this rule twice with the same meaning, which is harmless; a page that does
+   not still gets accessible headers. */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* The grid's context menu and its filter rule dialog. The grid draws them at
+   the pointer and names their parts; the controls are what put them on screen
+   (see grid-menu.ts), so their look ships here with everything else the
+   controls emit. Position and coordinates are the grid's inline business —
+   these rules only dress the box. */
+.grid-menu {
+    z-index: 100;
+    min-width: 190px;
+    padding: 4px;
+    background: var(--t-panel);
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    font-family: var(--t-font);
+    font-size: 12px;
+    color: var(--t-text);
+}
+
+.grid-menu-item {
+    padding: 5px 10px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 320px;
+}
+
+.grid-menu-item:hover { background: var(--t-hover); color: var(--t-text-bright); }
+
+.grid-menu-item.is-disabled { color: var(--t-text-dim); opacity: 0.6; cursor: default; }
+.grid-menu-item.is-disabled:hover { background: transparent; color: var(--t-text-dim); }
+
+.grid-menu-item.is-checked::before { content: '· '; color: var(--t-accent); }
+
+.grid-menu-separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--t-border);
+}
+
+.grid-filter-dialog {
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 240px;
+    padding: 10px;
+    background: var(--t-panel);
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    font-family: var(--t-font);
+    font-size: 12px;
+    color: var(--t-text);
+}
+
+.grid-filter-dialog-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--t-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.grid-filter-dialog-row { display: flex; align-items: center; gap: 6px; }
+
+.grid-filter-dialog-op,
+.grid-filter-dialog-value {
+    padding: 4px 8px;
+    background: var(--t-bg);
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    color: var(--t-text);
+    font-family: var(--t-font);
+    font-size: 12px;
+}
+
+.grid-filter-dialog-value { flex: 1; min-width: 0; }
+
+.grid-filter-dialog-op:focus,
+.grid-filter-dialog-value:focus {
+    outline: none;
+    border-color: var(--t-accent);
+}
+
+/* The set filter's pick list: every value the column holds, scrollable when
+   the column holds many. */
+.grid-filter-dialog-values {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.grid-filter-dialog-values-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+}
+
+.grid-filter-dialog-values-item:hover { background: var(--t-hover); }
+
+.grid-filter-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.grid-filter-dialog-actions button {
+    padding: 4px 12px;
+    background: transparent;
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    color: var(--t-text);
+    font-family: var(--t-font);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.grid-filter-dialog-actions button:hover { border-color: var(--t-accent); color: var(--t-accent); }
+
+.grid-filter-dialog-apply {
+    background: var(--t-accent);
+    border-color: var(--t-accent);
+    color: var(--t-accent-text);
+}
+
+.grid-filter-dialog-apply:hover { background: var(--t-accent-hover); color: var(--t-accent-text); }
+
+/* ---------------------------------------------------------------- watchlist */
+
+.watchlist-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* A row of its own rather than a child of the header, because a docking host
+   may lift it into a tab strip separately. */
+.watchlist-search-row {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+}
+
+.watchlist-search-input {
+    width: 100%;
+    background: var(--t-bg);
+    border: 1px solid var(--t-border);
+    color: var(--t-text-bright);
+    font-size: 11px;
+    font-family: var(--t-font);
+    padding: 3px 8px;
+}
+
+.watchlist-search-input:focus {
+    outline: none;
+    border-color: var(--t-accent);
+    box-shadow: 0 0 0 2px var(--t-accent-glow-soft);
+}
+
+/* Two built-in tabs plus one per instrument category, so the strip scrolls
+   rather than wraps. */
+.watchlist-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 3px 6px;
+    background: var(--t-header);
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.wl-tab {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--t-text-dim);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    font-family: var(--t-font);
+    transition: all var(--t-transition);
+    white-space: nowrap;
+}
+
+.wl-tab:hover { color: var(--t-text-bright); background: var(--t-hover); }
+
+.wl-tab.active {
+    color: var(--t-accent-text);
+    background: var(--t-accent);
+    border-color: var(--t-accent);
+}
+
+/* The list scrolls in the pane around its table: a table body cannot be a scroll container. */
+.watchlist-pane {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.watchlist-table {
+    width: 100%;
+    font-size: 11px;
+    font-family: var(--t-mono);
+    border-collapse: collapse;
+}
+
+.watchlist-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--t-panel);
+    padding: 3px 6px;
+    font-weight: 600;
+    color: var(--t-text-dim);
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 0.3px;
+    border-bottom: 1px solid var(--t-border);
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--t-font);
+    white-space: nowrap;
+}
+
+.watchlist-table thead th.ta-right { text-align: right; }
+.watchlist-table thead th:hover { color: var(--t-text-bright); }
+.watchlist-table thead th.sort-asc::after { content: ' \25B2'; font-size: 7px; }
+.watchlist-table thead th.sort-desc::after { content: ' \25BC'; font-size: 7px; }
+
+.watchlist-table tbody tr {
+    cursor: pointer;
+    transition: background var(--t-transition);
+}
+
+.watchlist-table tbody tr:hover { background: var(--t-hover); }
+.watchlist-table tbody tr.wl-current { background: var(--t-accent-glow-soft); }
+
+.watchlist-table tbody td {
+    padding: 2px 6px;
+    /* --t-border at about a third, for the same reason as the blotter rule. */
+    border-bottom: 1px solid color-mix(in srgb, var(--t-border) 35%, transparent);
+    line-height: 1.6;
+    white-space: nowrap;
+}
+
+.wl-sym-cell { display: flex; align-items: center; gap: 4px; }
+
+.wl-fav {
+    background: transparent;
+    border: none;
+    color: var(--t-border);
+    font-size: 11px;
+    padding: 0 2px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color var(--t-transition);
+}
+
+.wl-fav:hover { color: var(--t-accent-hover); }
+.wl-fav.active { color: var(--t-accent); }
+.wl-sym { color: var(--t-text-bright); font-weight: 500; }
+
+.wl-last { text-align: right; color: var(--t-text); transition: background 0.3s ease; }
+.wl-last.flash-up { animation: flashGreen 0.5s ease; }
+.wl-last.flash-down { animation: flashRed 0.5s ease; }
+
+.wl-chg { text-align: right; font-weight: 600; }
+.wl-chg.up { color: var(--t-green); }
+.wl-chg.down { color: var(--t-red); }
+
+/* --------------------------------------------------------------- order book */
+
+.orderbook-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Every setting the ladder has lives in its header, so the header packs from
+   the left and the two buttons at the end take the room that is left. */
+.orderbook-panel > .panel-header {
+    justify-content: flex-start;
+    gap: 6px;
+}
+
+.ob-symbol-label {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--t-text-bright);
+    border-bottom: 1px dashed var(--t-text-dim);
+    padding-bottom: 1px;
+}
+
+.ob-symbol-label:hover {
+    color: var(--t-accent);
+    border-bottom-color: var(--t-accent);
+}
+
+.ob-add-btn { margin-left: auto; }
+
+/* Depth, row layout, side order and the depth chart share one skin, because
+   they are one row of settings rather than four kinds of button. */
+.ob-depth-selector,
+.ob-view-selector {
+    display: flex;
+    gap: 2px;
+}
+
+.btn-ob-depth,
+.btn-ob-view,
+.btn-ob-invert,
+.btn-ob-depthtoggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    background: transparent;
+    border: 1px solid var(--t-border);
+    color: var(--t-text-dim);
+    font-family: var(--t-mono);
+    font-size: 9px;
+    line-height: 1.6;
+    padding: 0 5px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    transition: all var(--t-transition);
+}
+
+.btn-ob-view .bi,
+.btn-ob-invert .bi,
+.btn-ob-depthtoggle .bi { font-size: 11px; line-height: 1; }
+
+.btn-ob-depth:hover,
+.btn-ob-view:hover,
+.btn-ob-invert:hover,
+.btn-ob-depthtoggle:hover { color: var(--t-text); border-color: var(--t-text-dim); }
+
+.btn-ob-depth.active,
+.btn-ob-view.active,
+.btn-ob-invert.active,
+.btn-ob-depthtoggle.active {
+    background: var(--t-accent);
+    color: var(--t-accent-text);
+    border-color: var(--t-accent);
+}
+
+.spread-label { font-weight: 400; font-size: 10px; color: var(--t-text-dim); }
+
+/* The depth curve. Decoration, not interaction, so clicks fall through to the
+   ladder underneath it. */
+.ob-depth-chart {
+    display: block;
+    width: 100%;
+    height: 80px;
+    pointer-events: none;
+    background: transparent;
+}
+
+.ob-hide-depth .ob-depth-chart { display: none; }
+
+/* Captions above the levels, on the same three columns as a row so each one
+   stays over the figures it names. */
+.ob-col-headers {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    padding: 4px 8px;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--t-text-dim);
+    background: var(--t-panel);
+    border-bottom: 1px solid var(--t-border);
+}
+
+.ob-col-price { text-align: left; }
+.ob-col-qty,
+.ob-col-total { text-align: right; }
+
+.orderbook-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    font-family: var(--t-mono);
+    font-size: 11px;
+}
+
+/* Natural height, so the best ask sits just above the mid line and the best bid
+   just below it. Centring each block inside its half leaves a dead band above a
+   shallow book. */
+.orderbook-asks,
+.orderbook-bids {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    max-height: calc(50% - 12px);
+    overflow-y: auto;
+}
+
+/* One level. The volume bar sits behind the figures, absolutely positioned, so
+   its width does not compete with the grid for room; the tint behind the whole
+   row separates a wall from its neighbours. Both widths are measured per level
+   by the control and arrive as custom properties. */
+.ob-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    padding: 1px 8px;
+    line-height: 1.7;
+    position: relative;
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.ob-row.ask { background: color-mix(in srgb, var(--t-red) var(--t-ob-heat), transparent); }
+.ob-row.bid { background: color-mix(in srgb, var(--t-green) var(--t-ob-heat), transparent); }
+.ob-row:hover { background: var(--t-hover); }
+
+.ob-row .price { text-align: left; font-weight: 600; position: relative; z-index: 1; }
+.ob-row .qty { text-align: right; font-weight: 500; color: var(--t-text-dim); position: relative; z-index: 1; }
+.ob-row .total { text-align: right; font-weight: 500; color: var(--t-text-dim); position: relative; z-index: 1; }
+.ob-row.ask .price { color: var(--t-red); }
+.ob-row.bid .price { color: var(--t-green); }
+
+.ob-row .bar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: var(--t-ob-bar);
+    opacity: 0.28;
+    z-index: 0;
+    pointer-events: none;
+    transition: width 0.3s ease;
+}
+
+.ob-row.ask .bar {
+    right: 0;
+    background: linear-gradient(to left, color-mix(in srgb, var(--t-red) 55%, transparent), transparent);
+}
+
+.ob-row.bid .bar {
+    left: 0;
+    background: linear-gradient(to right, color-mix(in srgb, var(--t-green) 55%, transparent), transparent);
+}
+
+.ob-row.flash-green { animation: flashGreen 0.5s ease; }
+.ob-row.flash-red { animation: flashRed 0.5s ease; }
+
+/* A level this session has size resting on: a stripe down the outside of the
+   row, and the resting quantity inside the size cell. */
+.ob-row.own.bid { box-shadow: inset 3px 0 0 var(--t-green); }
+.ob-row.own.ask { box-shadow: inset -3px 0 0 var(--t-red); }
+
+.ob-row .own-badge {
+    display: inline-block;
+    margin: 0 4px;
+    padding: 0 4px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--t-text-bright) 8%, transparent);
+    color: var(--t-text);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.orderbook-mid {
+    position: relative;
+    text-align: center;
+    padding: 4px;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: -0.3px;
+    color: var(--t-text-bright);
+    background: var(--t-bg);
+    border-top: 1px solid var(--t-border);
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+}
+
+.ob-mid-price { font-weight: inherit; }
+
+/* The spread reads to the right of the divider while the mid price stays
+   centred on it. */
+.ob-mid-spread {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-weight: 400;
+    font-size: 10px;
+    letter-spacing: 0;
+    color: var(--t-text-dim);
+}
+
+/* Diagonal layout — the classic two-sided book. Same three columns, but the
+   size cell moves to the outside of each side with the price centred between
+   them; the cumulative column and the captions go, because neither reads
+   unambiguously once the two sides are mirrored. */
+.orderbook-panel.ob-view-diagonal .ob-row { grid-template-areas: "left center right"; }
+.orderbook-panel.ob-view-diagonal .ob-row .price { grid-area: center; text-align: center; }
+.orderbook-panel.ob-view-diagonal .ob-row.ask .qty { grid-area: left; text-align: left; }
+.orderbook-panel.ob-view-diagonal .ob-row.bid .qty { grid-area: right; text-align: right; }
+.orderbook-panel.ob-view-diagonal .ob-row .total { display: none; }
+.orderbook-panel.ob-view-diagonal .ob-col-headers { display: none; }
+
+/* Stacked is the layout the rules above already describe; naming it is what
+   lets a panel switch back out of diagonal. */
+.orderbook-panel.ob-view-stacked .ob-row { grid-template-areas: none; }
+
+/* Inverted sides — the bid block floats above the mid line. Each block reverses
+   internally as well, so the levels nearest the spread stay nearest the mid
+   line in both orders. */
+.orderbook-panel.ob-invert .orderbook-content { flex-direction: column-reverse; }
+.orderbook-panel.ob-invert .orderbook-asks,
+.orderbook-panel.ob-invert .orderbook-bids { flex-direction: column-reverse; }
+
+/* Buy-versus-sell strip along the bottom. One measured property splits it — the
+   bid half takes it, the ask half takes what is left — so the two can never
+   disagree about how much of the strip is spoken for. */
+.ob-sentiment {
+    display: flex;
+    height: 18px;
+    font-size: 10px;
+    font-weight: 600;
+    border-top: 1px solid var(--t-border);
+    overflow: hidden;
+    /* Informational, so it never squeezes the levels above it. */
+    flex: 0 0 18px;
+}
+
+.ob-sent-bid,
+.ob-sent-ask {
+    text-align: center;
+    line-height: 18px;
+    overflow: hidden;
+    white-space: nowrap;
+    color: var(--t-text-bright);
+    transition: width 0.3s ease;
+}
+
+.ob-sent-bid {
+    width: var(--t-ob-sent);
+    background: color-mix(in srgb, var(--t-green) 55%, transparent);
+}
+
+.ob-sent-ask {
+    width: calc(100% - var(--t-ob-sent));
+    background: color-mix(in srgb, var(--t-red) 55%, transparent);
+}
+
+.ob-sent-label { opacity: 0.85; margin: 0 4px; }
+
+/* Tabular figures, so a percentage ticking between 9% and 10% does not shove
+   the letter beside it sideways. */
+.ob-sent-bid-pct,
+.ob-sent-ask-pct { font-variant-numeric: tabular-nums; }
+
+/* On a phone the ladder is most of the screen, so the settings that only tune
+   it step aside and the rows tighten. What actually shortens the book is the
+   host answering a smaller `maxDepth()`; this makes the rows that remain fit. */
+@media (max-width: 768px), (max-height: 500px) {
+    .ob-depth-selector,
+    .ob-view-selector,
+    .ob-symbol-label { display: none; }
+
+    .orderbook-content { justify-content: center; }
+    .orderbook-asks,
+    .orderbook-bids { overflow-y: hidden; }
+    .orderbook-content .ob-row { line-height: 1.4; padding: 0 6px; font-size: 10px; }
+    .orderbook-content .orderbook-mid { padding: 2px 6px; font-size: 12px; }
+}
+
+/* --------------------------------------------------------------- trade feed */
+
+/* The panel is the tooltip's containing block: the bubble tooltip is placed in
+   canvas coordinates and would otherwise anchor to the page. */
+.tradefeed-panel {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+/* Market / My trades. Two panes and one canvas share the body, and which of
+   them is showing is two class names the control puts on the root — so the
+   rules below are the whole of that decision, and a narrow viewport can
+   override it further down without the control being told. */
+.tf-tab-market .tf-my,
+.tf-tab-my .tf-market,
+.tf-tab-my .tf-bubbles,
+.tf-tab-my .tf-view-toggle,
+.tf-tab-market.tf-view-bubbles .tf-market,
+.tf-tab-market.tf-view-list .tf-bubbles { display: none; }
+
+.tf-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 2px 8px;
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+}
+
+.tf-tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--t-text-dim);
+    font-family: var(--t-font);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 2px 8px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    transition: all var(--t-transition);
+}
+
+.tf-tab:hover { color: var(--t-text-bright); }
+
+.tf-tab.active {
+    color: var(--t-accent);
+    border-bottom-color: var(--t-accent);
+}
+
+/* List of prints. Scrolls on its own so the header, the tab strip and the
+   pinned-extras ribbon stay put. */
+.tradefeed-content {
+    flex: 1;
+    overflow-y: auto;
+    font-family: var(--t-mono);
+    font-size: 11px;
+    min-height: 0;
+}
+
+/* Each tape is a DataGrid over the shared table skin. The direction class the
+   host answered with sits on the row, so the price and the side inherit its
+   colour while the time and the qty state their own. The grid stamps every
+   body cell with its column key — that is what the alignments key off. */
+.tradefeed-table td[data-col="time"] { color: var(--t-text-dim); }
+.tradefeed-table td[data-col="symbol"] { color: var(--t-text-bright); font-weight: 600; font-size: 11px; }
+.tradefeed-table td[data-col="price"] { text-align: right; font-weight: 500; }
+.tradefeed-table td[data-col="quantity"] { text-align: right; color: var(--t-text-dim); }
+.tradefeed-table td[data-col="side"] { text-align: right; font-weight: 600; font-size: 10px; }
+
+/* A print that just landed (the grid's flashNewClass names it), and one well
+   above the recent average size. */
+.tradefeed-table tbody tr.flash-new { animation: flashGreen 0.6s ease; }
+.tradefeed-table tbody tr.side-sell.flash-new { animation: flashRed 0.6s ease; }
+.tradefeed-table tbody tr.large-trade td { font-size: 12px; font-weight: 600; }
+.tradefeed-table tbody tr.large-trade td[data-col="quantity"] { color: var(--t-text-bright); }
+
+/* List | bubbles, in the panel header. */
+.tradefeed-view-toggle {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: auto;
+}
+
+.tradefeed-view-toggle .tf-view-btn {
+    background: transparent;
+    border: 1px solid var(--t-border);
+    color: var(--t-text-dim);
+    padding: 1px 6px;
+    height: 18px;
+    line-height: 1;
+    font-size: 10px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    transition: all var(--t-transition);
+}
+
+.tradefeed-view-toggle .tf-view-btn:hover {
+    color: var(--t-text-bright);
+    border-color: var(--t-text-dim);
+}
+
+.tradefeed-view-toggle .tf-view-btn.active {
+    background: var(--t-accent);
+    color: var(--t-accent-text);
+    border-color: var(--t-accent);
+}
+
+/* Pinned extras — one chip per instrument this feed watches on top of the
+   page's own. Absent from the markup until there is one. */
+.tf-extras {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+}
+
+.tf-extras[hidden] { display: none; }
+
+.tf-extra-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--t-text-bright);
+    background: var(--t-hover);
+    border: 1px solid var(--t-border);
+    border-radius: 10px;
+}
+
+.tf-extra-sym { letter-spacing: 0.3px; }
+
+.tf-extra-rm {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    line-height: 1;
+    color: var(--t-text-dim);
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.tf-extra-rm i { font-size: 10px; }
+
+.tf-extra-rm:hover {
+    color: var(--t-red);
+    background: color-mix(in srgb, var(--t-red) 12%, transparent);
+}
+
+/* The bubble chart. Takes whatever height is left below the chrome, full
+   width; the control sizes its backing store to the device's pixels. */
+.tradefeed-bubbles {
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+    display: block;
+}
+
+/* Placed by the control in canvas coordinates, which is why this is the one
+   thing here carrying a `left` / `top` it does not declare. */
+.tf-bubble-tooltip {
+    position: absolute;
+    z-index: 20;
+    min-width: 120px;
+    padding: 6px 8px;
+    background: var(--t-panel);
+    border: 1px solid var(--t-border);
+    border-radius: 4px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    font-family: var(--t-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--t-text-bright);
+    pointer-events: none;
+}
+
+.tf-bubble-tooltip[hidden] { display: none; }
+.tf-bbtt-row { display: flex; justify-content: space-between; gap: 12px; }
+.tf-bbtt-label { color: var(--t-text-dim); }
+.tf-bbtt-value { font-weight: 600; }
+
+/* A phone has no room for two renderings of the same tape, or for a second
+   instrument pinned beside the first: the list wins and the rest steps aside.
+   Later in the file than the state rules above, and at the same specificity,
+   so it overrides them whatever the control's own state says. */
+@media (max-width: 768px), (max-height: 500px) {
+    .tf-tab-market.tf-view-bubbles .tf-market { display: block; }
+    .tradefeed-panel .tf-bubbles,
+    .tradefeed-panel .tf-view-toggle,
+    .tradefeed-panel .tf-extras,
+    .tradefeed-panel .tf-add-symbol-btn { display: none; }
+}
+
+/* ----------------------------------------------------------- order entry */
+
+.order-entry-content {
+    padding: 8px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    gap: 6px;
+    /* Backstop for viewports and locales whose labels push the form past the
+       height the panel was given. */
+    overflow-y: auto;
+}
+
+/* Nothing can be sent while the host says the account is out of reach. The form
+   says so by going quiet rather than by disappearing, so the numbers in it stay
+   readable. */
+.order-entry-content.oe-offline {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+/* Two pairs of type buttons, so each pair sits over the column it applies to:
+   the outer gap matches the column gap and the inner one is tighter. */
+.order-type-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.ot-pair {
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+}
+
+.btn-ot {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    background: transparent;
+    border: 1px solid var(--t-border);
+    color: var(--t-text-dim);
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    transition: all var(--t-transition);
+    font-family: var(--t-font);
+    min-width: 0;
+}
+
+.btn-ot.active { background: var(--t-accent); color: var(--t-accent-text); border-color: var(--t-accent); }
+.btn-ot:hover:not(.active) { background: var(--t-hover); color: var(--t-text); border-color: var(--t-text-dim); }
+
+.order-entry-split {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.oe-col {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px 8px;
+    background: var(--t-panel);
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    min-width: 0;
+}
+
+/* The direction shows at the edge only. The submit button carries the full
+   colour, and two saturated panels side by side read as an alarm. */
+.oe-col-buy { border-color: color-mix(in srgb, var(--t-green) 25%, transparent); }
+.oe-col-sell { border-color: color-mix(in srgb, var(--t-red) 25%, transparent); }
+
+.oe-label {
+    font-size: 10px;
+    color: var(--t-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-family: var(--t-font);
+}
+
+.oe-value {
+    font-family: var(--t-mono);
+    font-size: 11px;
+    color: var(--t-text);
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.oe-avbl,
+.oe-total,
+.oe-foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 10px;
+}
+
+.oe-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+/* A field the current order type does not use, and the take-profit block while
+   it is switched off. The control toggles this class rather than a display
+   style, so what a field looks like when it is away stays here. */
+.oe-field-hidden { display: none; }
+
+.oe-input-grp {
+    display: flex;
+    gap: 4px;
+    align-items: stretch;
+}
+
+.oe-input-grp .oe-input { flex: 1; min-width: 0; }
+
+.oe-input {
+    background: var(--t-bg);
+    border: 1px solid var(--t-border);
+    color: var(--t-text-bright);
+    font-family: var(--t-mono);
+    font-size: 12px;
+    padding: 4px 6px;
+    border-radius: var(--t-radius);
+    transition: border-color var(--t-transition);
+    width: 100%;
+    min-width: 0;
+}
+
+.oe-input:focus {
+    outline: none;
+    border-color: var(--t-accent);
+    box-shadow: 0 0 0 2px var(--t-accent-glow-soft);
+}
+
+.btn-bbo {
+    background: var(--t-bg);
+    border: 1px solid var(--t-border);
+    color: var(--t-text-dim);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 8px;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    font-family: var(--t-font);
+    transition: all var(--t-transition);
+}
+
+.btn-bbo:hover {
+    color: var(--t-accent-text);
+    background: var(--t-accent);
+    border-color: var(--t-accent);
+}
+
+.oe-pct-row {
+    display: flex;
+    gap: 3px;
+}
+
+.btn-oe-pct {
+    flex: 1;
+    padding: 2px 0;
+    font-size: 10px;
+    font-weight: 500;
+    font-family: var(--t-mono);
+    background: var(--t-bg);
+    border: 1px solid var(--t-border);
+    color: var(--t-text-dim);
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all var(--t-transition);
+}
+
+.btn-oe-pct:hover {
+    background: var(--t-hover);
+    color: var(--t-text-bright);
+}
+
+.oe-tpsl-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--t-text-dim);
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--t-font);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.oe-tpsl {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 0;
+    border-top: 1px dashed var(--t-border);
+}
+
+/* Pushed to the bottom of the column, so both buttons line up however tall the
+   two forms above them ended up. */
+.btn-oe-submit {
+    margin-top: auto;
+    flex: none;
+    padding: 10px 6px;
+    font-weight: 700;
+    font-size: 13px;
+    text-transform: uppercase;
+    border: none;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    color: var(--t-on-direction);
+    transition: all var(--t-transition);
+    font-family: var(--t-font);
+    letter-spacing: 0.3px;
+    position: relative;
+    overflow: hidden;
+}
+
+.btn-oe-submit.btn-buy { background: var(--t-green); }
+.btn-oe-submit.btn-buy:hover { background: var(--t-green-hover); box-shadow: 0 0 12px color-mix(in srgb, var(--t-green) 30%, transparent); }
+.btn-oe-submit.btn-sell { background: var(--t-red); }
+.btn-oe-submit.btn-sell:hover { background: var(--t-red-hover); box-shadow: 0 0 12px color-mix(in srgb, var(--t-red) 30%, transparent); }
+.btn-oe-submit:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-oe-submit:active { transform: scale(0.97); }
+
+/* The side a host-level gesture aimed at — a click on a book level, a chart
+   price. A ring rather than a colour change: the button already says which
+   direction it is. */
+.btn-oe-submit.btn-buy.btn-preselected { box-shadow: 0 0 0 2px var(--t-green), 0 0 12px color-mix(in srgb, var(--t-green) 30%, transparent); }
+.btn-oe-submit.btn-sell.btn-preselected { box-shadow: 0 0 0 2px var(--t-red), 0 0 12px color-mix(in srgb, var(--t-red) 30%, transparent); }
+
+.hotkey-hint {
+    font-size: 9px;
+    font-weight: 400;
+    opacity: 0.6;
+    margin-left: 4px;
+    font-family: var(--t-mono);
+}
+
+/* The order's value, and the reason it cannot be sent, in the same line: they
+   are never both true, and giving them one line keeps the button from moving
+   when a message appears. */
+.oe-estimate {
+    font-size: 10px;
+    font-family: var(--t-mono);
+    color: var(--t-text-dim);
+    min-height: 12px;
+    text-align: center;
+}
+
+.oe-estimate.oe-estimate-error { color: var(--t-red); }
+
+/* Statistics: a figure column, right-aligned and lined up on the digits so a column of
+   numbers can be compared down rather than read across. */
+.statistic-value {
+    text-align: right;
+    font-family: var(--t-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- Log monitor -------------------------------------------------------- */
+
+/* Two panes side by side: the sources, which are as wide as their names, and the messages,
+   which take everything left. Both scroll in their own right so a long log does not push the
+   tree off the panel. */
+.log-monitor-body {
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* The tree is hidden rather than dropped, so the menu can bring it back without the panel
+   being rebuilt and the selection it holds surviving the round trip. */
+.log-monitor-panel.log-sources-off .log-sources {
+    display: none;
+}
+
+.log-sources {
+    flex: 0 0 14rem;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--t-border);
+    background: var(--t-panel);
+}
+
+/* A source reads as a row, not as a button: the whole width is the target, the caption sits
+   where its depth puts it, and only the selected one is filled. */
+.log-source {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
+    color: var(--t-text);
+    font: inherit;
+    text-align: left;
+    padding: .25rem .5rem;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.log-source:hover { background: var(--t-hover); }
+
+.log-source.is-selected {
+    background: var(--t-hover);
+    color: var(--t-text-bright);
+    box-shadow: inset 2px 0 0 var(--t-accent);
+}
+
+.log-messages {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.log-toolbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: .3rem;
+    padding: .3rem .5rem;
+    border-bottom: 1px solid var(--t-border);
+    background: var(--t-header);
+}
+
+/* One letter per level, lit when that level is shown. Off is dimmed rather than hidden, so the
+   row of them reads as a set of switches and not as a shrinking list. */
+.log-level-toggle {
+    border: 1px solid var(--t-border);
+    background: var(--t-panel);
+    color: var(--t-text-dim);
+    font-family: var(--t-mono);
+    font-size: .72rem;
+    line-height: 1;
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: var(--t-radius);
+    cursor: pointer;
+    opacity: .45;
+    transition: opacity var(--t-transition), color var(--t-transition);
+}
+
+.log-level-toggle.is-on { opacity: 1; color: var(--t-text); }
+.log-level-toggle.log-level-error.is-on { color: var(--t-red); }
+.log-level-toggle.log-level-warning.is-on { color: var(--t-orange); }
+
+.log-filter {
+    flex: 1 1 auto;
+    min-width: 4rem;
+    max-width: 14rem;
+    margin-left: .3rem;
+}
+
+/* The scroll box, not the table, is the flex child. A table given `flex: 1` stretches its rows
+   to fill the space instead of leaving the space empty, which drew a one-line log as one line a
+   panel tall; and with nothing scrollable around it, a long log was simply unreachable past the
+   height of the panel. */
+.log-table-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+}
+
+/* The header stays put while the messages scroll under it - a log is read by scrolling back,
+   and a column heading that scrolls away takes the meaning of the columns with it. */
+.log-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+/* The level column is one letter wide and coloured by what it says; the message takes the rest
+   and wraps rather than being cut, because the end of an error is usually the part that names
+   the cause. */
+.log-level-col { width: 2rem; }
+
+.log-level-cell {
+    text-align: center;
+    font-family: var(--t-mono);
+    color: var(--t-text-dim);
+}
+
+.log-level-cell.log-level-error { color: var(--t-red); }
+.log-level-cell.log-level-warning { color: var(--t-orange); }
+
+.log-message-cell {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.log-row-error td { color: var(--t-red); }
+
+/* ---- Strategies dashboard ----------------------------------------------- */
+
+/* The state reads twice: a dot that carries the colour across a long list, and the word beside
+   it, because a colour cannot tell Starting from Started. */
+.strategy-state { white-space: nowrap; }
+
+.strategy-dot {
+    margin-right: .35rem;
+    color: var(--t-text-dim);
+}
+
+.strategy-state-started .strategy-dot { color: var(--t-green); }
+.strategy-state-starting .strategy-dot,
+.strategy-state-stopping .strategy-dot { color: var(--t-orange); }
+
+/* A least width in characters, so the column does not jump as a run passes through Stopping on
+   its way to Stopped, or Forming on its way to Running. Sized to the longest of those words; a
+   floor rather than a cap, so a language that words them longer still gets its room. */
+.strategy-state-text {
+    color: var(--t-text-dim);
+    display: inline-block;
+    min-width: 8ch;
+}
+
+.strategy-actions,
+.strategy-position {
+    white-space: nowrap;
+}
+
+/* A least width in digits, so the flatten button beside the figure does not move when the
+   position gains a minus sign or loses a digit. It is a floor, not a cap: a genuinely wider
+   number still gets the room it needs. */
+.strategy-position-value {
+    display: inline-block;
+    min-width: 5ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.strategy-actions .bt-icon-btn { margin-right: .1rem; }
+
+/* Flattening sits with the number it acts on, quiet until the position is worth closing. */
+.strategy-flatten-btn { margin-left: .35rem; }
+
+.strategy-online { text-align: center; color: var(--t-text-dim); }
+.strategy-online.is-on { color: var(--t-green); }
+
+.strategy-mode { min-width: 7rem; }
+
+/* The curve fills the cell it was measured for; the cell claims that width so a column of them
+   lines up whether or not a given strategy has traded yet. */
+.strategy-spark { width: 140px; padding-top: 2px; padding-bottom: 2px; }
+.strategy-spark-canvas { display: block; }
+
+/* An error is the one cell allowed to be long: it is read when something is wrong and truncating
+   it hides the part that names the cause. */
+.strategy-error {
+    color: var(--t-red);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.strategy-failed .strategy-dot { color: var(--t-red); }
+
+/* ---- Option desk -------------------------------------------------------- */
+
+/* A bar behind a figure rather than beside it: the number stays readable and the cell keeps its
+   width, so a column of them can be compared down the strip. */
+.option-bar-cell {
+    position: relative;
+    display: block;
+    text-align: right;
+}
+
+.option-bar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 1px;
+    opacity: .35;
+}
+
+.option-bar-text { position: relative; }
+
+/* Calls and puts are told apart by which side the bar is tinted; volatility is neither side's,
+   so it takes the neutral one. */
+.option-bar-call { background: var(--t-green); }
+.option-bar-put { background: var(--t-red); }
+.option-bar-iv { background: var(--t-text-dim); }
+
+.option-bid { color: var(--t-green); }
+.option-ask { color: var(--t-red); }
+
+/* The strike is the spine of the chain: it is what the eye runs down, so it is the one column
+   given weight, and the value beside it sits in the same block. */
+.option-strike {
+    text-align: center;
+    font-weight: 600;
+    color: var(--t-text-bright);
+    background: var(--t-header);
+}
+
+.option-intrinsic {
+    text-align: center;
+    color: var(--t-text-dim);
+    background: var(--t-header);
+}
+
+/* Which half is in the money, shaded rather than outlined: the boundary between the two is the
+   first thing a reader looks for and it moves with the underlying. */
+.option-itm-call td:first-child,
+.option-itm-put td:last-child { box-shadow: none; }
+
+.option-itm-call .option-strike { border-left: 2px solid var(--t-green); }
+.option-itm-put .option-strike { border-right: 2px solid var(--t-red); }
+
+/* ---- Fields the controls build themselves -------------------------------- */
+
+/* A control that ships its own panel ships its own fields. These carry Bootstrap's class names
+   because a host that has Bootstrap should keep its look, but a host that does not was getting
+   the browser's default control: a white box with a native arrow, sitting on a dark panel. The
+   rules below are what the package paints when nothing else has, and any real Bootstrap or host
+   stylesheet loaded after this one still wins. */
+.terminal-table input.form-control,
+.terminal-table select.form-control,
+.panel-body input.form-control,
+.panel-body select.form-control {
+    background: var(--t-bg);
+    color: var(--t-text);
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 2px 6px;
+    line-height: 1.4;
+}
+
+.terminal-table select.form-control,
+.panel-body select.form-control {
+    /* The native arrow is painted by the platform and cannot be themed, so it is replaced. */
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--t-text-dim) 50%),
+                      linear-gradient(135deg, var(--t-text-dim) 50%, transparent 50%);
+    background-position: right 11px center, right 6px center;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    padding-right: 20px;
+}
+
+.panel-body input.form-control::placeholder { color: var(--t-text-dim); }
+
+.terminal-table input.form-control:focus,
+.terminal-table select.form-control:focus,
+.panel-body input.form-control:focus,
+.panel-body select.form-control:focus {
+    outline: none;
+    border-color: var(--t-accent);
+    box-shadow: 0 0 0 2px var(--t-accent-glow-soft);
+}
+
+/* The tables carry their own text colour rather than inheriting the page's. A panel is dropped
+   into whatever document a host has, and one that never set a colour was rendering near-black
+   rows on a near-black panel. */
+.terminal-table { color: var(--t-text); }
+
+/* The scrollbars inside a panel, painted from the same tokens as everything else in it.
+   A control makes its own scroll containers - the body, the table, the log's source tree, the
+   watchlist pane - so a panel that brings its own background brings the bar over it too;
+   without this a themed dark panel scrolls with the operating system's light grey.
+
+   Scoped to `.terminal-panel` on purpose: a host's page keeps whatever scrollbars it has, and
+   only the boxes this package created are restyled.
+
+   Both spellings, because they are not interchangeable. `scrollbar-width` / `scrollbar-color`
+   are the standard ones and are all Firefox reads; the `::-webkit-scrollbar` pseudo-elements
+   are what WebKit and Chromium read, and they win there when both are present. */
+.terminal-panel,
+.terminal-panel * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--t-border) transparent;
+}
+
+.terminal-panel ::-webkit-scrollbar,
+.terminal-panel::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+/* Transparent rather than a colour of its own: a scroll container sits on the panel, the header
+   band or a grouped row, and a track painted one flat colour shows a seam against the other two. */
+.terminal-panel ::-webkit-scrollbar-track,
+.terminal-panel::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.terminal-panel ::-webkit-scrollbar-thumb,
+.terminal-panel::-webkit-scrollbar-thumb {
+    background: var(--t-border);
+    border-radius: var(--t-radius);
+    /* An inset border keeps the thumb off the edge of the track, so it reads as a handle in a
+       gutter rather than as a filled column. The border is the padding: it has to be
+       transparent and clipped to the content box, or it paints as a second colour. */
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+
+.terminal-panel ::-webkit-scrollbar-thumb:hover,
+.terminal-panel::-webkit-scrollbar-thumb:hover {
+    background: var(--t-text-dim);
+    background-clip: content-box;
+}
+
+/* Where two bars meet. Left unpainted it is a white square in the corner of a dark panel. */
+.terminal-panel ::-webkit-scrollbar-corner,
+.terminal-panel::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* ---- Option smile ------------------------------------------------------- */
+
+.option-smile-legend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding: 4px 10px;
+    font-size: 10px;
+    color: var(--t-text-dim);
+    border-bottom: 1px solid var(--t-border);
+    flex-shrink: 0;
+}
+
+/* What the vertical axis measures, said once in words; the gutter down the chart carries only the
+   numbers. */
+.option-smile-axis {
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+
+.option-smile-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.option-smile-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+/* The same pair the desk tells the two sides apart by, so the legend agrees with the curves the
+   host's canvas palette draws. */
+.option-smile-dot-call { background: var(--t-green); }
+.option-smile-dot-put { background: var(--t-red); }
+
+/* At the far end of the row: a reading of the market, not a key to the chart. */
+.option-smile-spot { margin-left: auto; }
+
+/* ---- Equity ------------------------------------------------------------- */
+
+/* The figure the run ended at, beside the panel's name rather than adrift between it and the
+   close button - the auto margin is what puts the header's slack on the right. Mono and
+   unspaced, because it is a number in a strip of captions; its colour arrives as the host's
+   own `pnl-positive` / `pnl-negative`. */
+.equity-last {
+    margin-right: auto;
+    padding-left: 8px;
+    font-family: var(--t-mono);
+    font-size: 12px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--t-text);
+}
+
+/* ---------------------------------------------------- optimisation heatmap */
+
+/* The panel is the tooltip's containing block: the tooltip is placed in canvas
+   coordinates and would otherwise anchor to the page. */
+.optimization-heatmap-panel {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+/* What the colours mean, beside the panel's own name. It captions the legend
+   the control draws on the canvas, and living in the chrome costs the map no
+   pixels and leaves the text selectable. */
+.heatmap-metric {
+    margin-left: auto;
+    margin-right: 8px;
+    color: var(--t-text-bright);
+    letter-spacing: 0.4px;
+}
+
+/* The map fills the body, so the body stops scrolling and becomes a column:
+   a canvas that grows to fit inside a box that grows to fit it never settles. */
+.optimization-heatmap-panel > .panel-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 6px 8px 4px;
+}
+
+/* Takes whatever height the panel has left; the control sizes its backing
+   store to the device's pixels. */
+.heatmap-canvas {
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+    display: block;
+}
+
+.heatmap-empty {
+    padding: 24px 0;
+    text-align: center;
+    color: var(--t-text-dim);
+    font-family: var(--t-font);
+    font-size: 11px;
+}
+
+.heatmap-empty[hidden] { display: none; }
+
+/* Placed by the control in canvas coordinates, which is why this is the one
+   rule here carrying a `left` / `top` it does not declare. */
+.heatmap-tooltip {
+    position: absolute;
+    z-index: 20;
+    min-width: 140px;
+    padding: 6px 8px;
+    background: var(--t-panel);
+    border: 1px solid var(--t-border);
+    border-radius: var(--t-radius);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    font-family: var(--t-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--t-text-bright);
+    pointer-events: none;
+}
+
+.heatmap-tooltip[hidden] { display: none; }
+.heatmap-tt-row { display: flex; justify-content: space-between; gap: 12px; }
+.heatmap-tt-label { color: var(--t-text-dim); }
+.heatmap-tt-value { font-weight: 600; }
+
+/* The one row that is a statement rather than a pair. */
+.heatmap-tt-best {
+    justify-content: center;
+    margin-top: 2px;
+    padding-top: 2px;
+    border-top: 1px solid var(--t-border);
+    color: var(--t-accent);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+
+/* A phone has no cursor, so the panel's only way of reading a figure off the
+   map is gone. The tooltip goes with it rather than sticking where a tap left
+   it, and the metric caption keeps the header from wrapping. */
+@media (max-width: 768px) {
+    .optimization-heatmap-panel .heatmap-tooltip { display: none; }
+    .heatmap-metric { display: none; }
+}
+
+/* ---- Optimisation surface ------------------------------------------------ */
+
+/* The chart takes the whole body. `overflow: hidden` rather than the `auto` a panel body carries
+   by default: the canvas is sized to the box it is given, so a scrollbar here would be a box the
+   canvas then resized itself out of. */
+.terminal-panel.surface-panel > .panel-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.surface-chart {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 120px;
+}
+
+/* `touch-action: none` is what makes the surface turn under a thumb. Without it the browser
+   claims the gesture for scrolling the page before the first pointermove ever arrives, and a
+   drag on a phone moves the page instead of the landscape. */
+.surface-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: grab;
+}
+
+.surface-canvas:active { cursor: grabbing; }
+
+/* What the landscape is of, beside the panel's name. */
+.surface-metric {
+    margin-left: auto;
+    margin-right: .4rem;
+    color: var(--t-text-bright);
+    font-variant-numeric: tabular-nums;
+}
+
+.surface-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--t-text-dim);
+}
+
+/* The one button in the header that is not a close: it puts the view back where it started,
+   which is the way out of a rotation a reader has lost their bearings in. */
+.surface-reset-btn { margin-right: .2rem; }
+
+/* The `hidden` attribute is nothing but `display: none` in the browser's own stylesheet, so any
+   display of ours beats it - and a panel that gives an element `display: flex` and then hides it
+   by attribute shows it regardless. Every control here hides something that way: the empty
+   message a chart shows in place of itself, a legend with nothing to list. Scoped to this
+   package's panels, so a host's own hidden elements keep whatever rules the host gave them. */
+.terminal-panel [hidden] { display: none !important; }
+
+/* A drag on a chart turns it; without this the same drag paints a text selection across the
+   panel, and the selection stays behind when the pointer goes up. */
+.surface-chart { user-select: none; -webkit-user-select: none; }
+
+/* What the pointer is over, beside the run's own figure. Dim until there is something to say,
+   so the header does not jump between two widths as the pointer enters and leaves the curve. */
+
+/* What the pointer is over, in the smile's legend: the strike and both sides at it. Pushed to
+   the end of the row so the key stays where it was when the readout appears and disappears. */
+/* ---- What the pointer is over ---------------------------------------------- */
+
+/* The three panels that draw a chart answer for the point under the pointer, and the answer sits
+   over the chart rather than in the panel header. Two reasons, and the second is the one that
+   caught us: a reading about a point belongs beside that point, and a host is free to lift a panel
+   header into a tab strip - which put the smile's strike and volatilities into a tab title.
+
+   `pointer-events: none` so the strip never swallows a drag meant for the chart under it. */
+.equity-hover,
+.option-smile-hover,
+.surface-readout {
+    position: absolute;
+    left: 8px;
+    top: 6px;
+    z-index: 2;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    font-size: 11px;
+    text-shadow: 0 0 3px var(--t-panel);
+}
+
+.equity-hover { color: var(--t-text-dim); }
+.option-smile-hover { color: var(--t-text-bright); }
+.surface-readout { color: var(--t-text-bright); }
+
+/* ---- The two chart panels ------------------------------------------------ */
+
+/* Both hold @stocksharp/chart rather than a canvas of their own, so the container is what the
+   engine measures: it needs a definite size, and `position: relative` so the message that stands
+   in for an empty chart can sit over it. The body does not scroll: the engine sizes itself to the
+   box it is given, so a scrollbar here would be a box it then resized itself out of. */
+.equity-chart,
+.option-smile-chart {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 120px;
+    min-width: 0;
+}
+
+.terminal-panel.equity-panel > .panel-body,
+.terminal-panel.option-smile-panel > .panel-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Over the chart rather than in the flow, so an empty run does not change the box the engine
+   was given to measure. */
+.equity-empty,
+.option-smile-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: var(--t-text-dim);
+    pointer-events: none;
+}
+
+/* The way back out of a zoom. A reader who has looked closely at one stretch needs one gesture
+   to see the whole run again, and hunting the double-click is not it. */
+.equity-reset-btn,
+.option-smile-reset-btn { margin-right: .2rem; }

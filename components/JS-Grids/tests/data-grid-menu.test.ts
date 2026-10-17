@@ -1,0 +1,320 @@
+// The context menu the grid offers out of the box, and the seam a host overrides
+// it through.
+//
+// Everywhere else this package hands chrome to the host -- the column picker's
+// dialog is the host's markup, its buttons, its modal library. The menu is the
+// exception, and the reason is worth stating: positioning a list at a pointer,
+// dismissing it on the next click and on Escape, and keeping it inside the window
+// is the same hundred lines in every host, and none of them are about tables.
+//
+// So what is tested here is that the default is useful without any host code, and
+// that a host can still take the whole thing over -- including refusing it.
+import assert from 'node:assert/strict';
+import { beforeEach, describe, it } from 'node:test';
+
+import { DataGrid, type GridMenuContext } from '../src/data-grid';
+import { GridContextMenu, type GridMenuItem } from '../src/context-menu';
+import { FakeElement, asDom, fakeDocument, fireOnDocument, installFakeDocument } from './fake-dom';
+
+installFakeDocument();
+
+interface Row { id: number; symbol: string; qty: number; }
+
+const ROWS: Row[] = [
+    { id: 1, symbol: 'AAPL', qty: 10 },
+    { id: 2, symbol: 'BTC', qty: -5 },
+];
+
+function makeGrid(extra: Record<string, unknown> = {}) {
+    const head = new FakeElement('thead');
+    const body = new FakeElement('tbody');
+    const grid = new DataGrid<Row>({
+        head: asDom(head),
+        body: asDom(body),
+        columns: [
+            { key: 'id', header: 'ID', exportable: true, value: r => r.id },
+            { key: 'symbol', header: 'Symbol', exportable: true, value: r => r.symbol },
+            { key: 'qty', header: 'Qty', exportable: true, value: r => r.qty },
+        ],
+        defaultSort: null,
+        rowKey: r => String(r.id),
+        emptyText: 'No rows',
+        contextMenu: true,
+        ...extra,
+    });
+    grid.setRows(ROWS);
+    return { grid, head, body };
+}
+
+/// A right-click on the cell at (row, column), the way a browser reports it.
+function rightClick(body: FakeElement, rowIndex: number, colIndex: number) {
+    const td = body.children[rowIndex].children[colIndex];
+    let prevented = false;
+    body.dispatchEvent({
+        type: 'contextmenu',
+        target: td,
+        clientX: 10,
+        clientY: 20,
+        preventDefault: () => { prevented = true; },
+    } as never);
+    return prevented;
+}
+
+const openMenu = () => fakeDocument.body.children.find(el => el.className.includes('grid-menu'));
+
+// One fake document serves the whole file, so a menu a test leaves open would still
+// be there for the next one. A browser has the same rule and its own answer: the
+// next click anywhere dismisses it.
+beforeEach(() => fireOnDocument({ type: 'mousedown' }));
+const labels = (menu: FakeElement) => menu.children.map(el => el.textContent);
+
+describe('DataGrid context menu', () => {
+    it('is absent until asked for', () => {
+        const { body } = makeGrid({ contextMenu: false });
+
+        rightClick(body, 0, 1);
+
+        assert.equal(openMenu(), undefined);
+    });
+
+    it('opens on a cell and offers what applies to it', () => {
+        const { body } = makeGrid();
+
+        const prevented = rightClick(body, 0, 1);
+
+        // The browser menu has to be suppressed, or both appear at once.
+        assert.equal(prevented, true);
+        const menu = openMenu()!;
+        assert.match(labels(menu).join('|'), /Sort ascending/);
+        assert.match(labels(menu).join('|'), /Group by this column/);
+        assert.match(labels(menu).join('|'), /Filter by this value: AAPL/);
+        assert.match(labels(menu).join('|'), /Copy row/);
+    });
+
+    it('survives the mousedown that precedes the click on an item', () => {
+        const { grid, body } = makeGrid();
+
+        rightClick(body, 0, 1);
+        const item = openMenu()!.children.find(el => el.textContent === 'Group by this column')!;
+
+        // A real pointer presses before it clicks, and the dismiss listener runs in the
+        // capture phase -- so a menu that closes on any mousedown removes the item
+        // before the click can reach it, and every entry silently does nothing. The
+        // synthetic click these tests used to send on its own never saw it.
+        fireOnDocument({ type: 'mousedown', target: item });
+        assert.notEqual(openMenu(), undefined, 'pressing inside the menu must not close it');
+
+        item.dispatchEvent({ type: 'click', target: item });
+        assert.equal(grid.groupedBy(), 'symbol');
+    });
+
+    it('acts on the grid when an item is chosen, and closes first', () => {
+        const { grid, body } = makeGrid();
+
+        rightClick(body, 0, 1);
+        const item = openMenu()!.children.find(el => el.textContent === 'Group by this column')!;
+        item.dispatchEvent({ type: 'click', target: item });
+
+        assert.equal(grid.groupedBy(), 'symbol');
+        assert.equal(openMenu(), undefined);
+    });
+
+    it('offers ungrouping once grouped, in place of grouping', () => {
+        const { grid, body } = makeGrid();
+        grid.groupBy('symbol');
+
+        rightClick(body, 1, 1);   // a data row under the group header
+
+        const shown = labels(openMenu()!).join('|');
+        assert.match(shown, /Ungroup/);
+        assert.doesNotMatch(shown, /Group by this column/);
+    });
+
+    it('dims what cannot be done rather than hiding it', () => {
+        const { grid, body } = makeGrid();
+
+        rightClick(body, 0, 1);
+        const menu = openMenu()!;
+        const disabled = menu.children.filter(el => el.className.includes('is-disabled')).map(el => el.textContent);
+        // No sort is set and nothing is hidden. No column here declares a filter, so
+        // the filter lines are absent rather than present and dimmed -- a table that
+        // cannot be filtered should not carry the vocabulary of filtering.
+        assert.deepEqual(disabled.sort(), ['Clear sort', 'Show all columns']);
+
+        // A dimmed line does nothing when clicked.
+        const clear = menu.children.find(el => el.textContent === 'Clear sort')!;
+        clear.dispatchEvent({ type: 'click', target: clear });
+        assert.equal(openMenu(), menu, 'a disabled item should not even close the menu');
+
+        grid.sort.set('symbol', 'asc');
+        fireOnDocument({ type: 'mousedown' });
+        rightClick(body, 0, 1);
+        const now = openMenu()!.children.filter(el => el.className.includes('is-disabled')).map(el => el.textContent);
+        assert.ok(!now.includes('Clear sort'));
+    });
+
+    it('will not let the last column be hidden', () => {
+        const { grid, body } = makeGrid();
+        grid.hideColumn('id');
+        grid.hideColumn('qty');
+
+        rightClick(body, 0, 0);
+
+        const hide = openMenu()!.children.find(el => el.textContent === 'Hide column')!;
+        assert.ok(hide.className.includes('is-disabled'));
+    });
+
+    it('closes on a click elsewhere and on Escape', () => {
+        const { body } = makeGrid();
+
+        rightClick(body, 0, 1);
+        fireOnDocument({ type: 'mousedown' });
+        assert.equal(openMenu(), undefined);
+
+        rightClick(body, 0, 1);
+        fireOnDocument({ type: 'keydown', key: 'Escape' } as never);
+        assert.equal(openMenu(), undefined);
+
+        // A key that is not Escape leaves it alone.
+        rightClick(body, 0, 1);
+        fireOnDocument({ type: 'keydown', key: 'a' } as never);
+        assert.notEqual(openMenu(), undefined);
+        fireOnDocument({ type: 'mousedown' });
+    });
+
+    it('lets a host add to the items, keeping the grid own ones', () => {
+        const { body } = makeGrid({
+            contextMenu: {
+                items: (context: GridMenuContext<Row>, defaults: GridMenuItem[]) =>
+                    [{ label: `Cancel #${context.row?.id}`, run: () => {} }, {}, ...defaults],
+            },
+        });
+
+        rightClick(body, 0, 1);
+
+        const shown = labels(openMenu()!);
+        assert.equal(shown[0], 'Cancel #1');
+        assert.ok(shown.includes('Sort ascending'));
+    });
+
+    it('lets a host refuse the menu for a click', () => {
+        const { body } = makeGrid({ contextMenu: { items: () => [] } });
+
+        const prevented = rightClick(body, 0, 1);
+
+        assert.equal(openMenu(), undefined);
+        // Nothing suppressed, so the browser's own menu appears -- which is the point
+        // of returning nothing rather than a menu with no items in it.
+        assert.equal(prevented, false);
+    });
+
+    it('takes the wording from the host', () => {
+        const { body } = makeGrid({ contextMenu: { labels: { sortAsc: 'По возрастанию' } } });
+
+        rightClick(body, 0, 1);
+
+        assert.ok(labels(openMenu()!).includes('По возрастанию'));
+    });
+
+    it('copies the whole selection, and says how many rows that is', () => {
+        const { grid, body } = makeGrid({ selection: 'multi' });
+        grid.setSelection(['1', '2']);
+
+        rightClick(body, 0, 1);
+        // The count is in the label because "Copy row" over a selection of two would
+        // be a lie about what the click is about to do.
+        const item = openMenu()!.children.find(el => (el.textContent || '').startsWith('Copy selected'))!;
+        assert.equal(item.textContent, 'Copy selected rows (2)');
+
+        fakeDocument.clipboard = '';
+        item.dispatchEvent({ type: 'click', target: item });
+
+        const lines = fakeDocument.clipboard.split(String.fromCharCode(10));
+        assert.equal(lines.length, 2);
+        assert.ok(lines[0].includes('AAPL'));
+        assert.ok(lines[1].includes('BTC'));
+    });
+
+    it('copies just the row under the pointer when nothing is selected', () => {
+        const { body } = makeGrid({ selection: 'multi' });
+
+        rightClick(body, 1, 1);
+        const item = openMenu()!.children.find(el => el.textContent === 'Copy row')!;
+        fakeDocument.clipboard = '';
+        item.dispatchEvent({ type: 'click', target: item });
+
+        assert.equal(fakeDocument.clipboard.includes('BTC'), true);
+        assert.equal(fakeDocument.clipboard.includes(String.fromCharCode(10)), false);
+    });
+
+    it('filters by the value under the pointer, naming it the way the cell does', () => {
+        // Its own grid: a side column held as 0/1 and read as Buy/Sell -- the shape
+        // every enum column has. Adding it to the shared one would change what the
+        // tests about filters and hidden columns are even asking.
+        const head = new FakeElement('thead');
+        const body = new FakeElement('tbody');
+        const grid = new DataGrid<Row>({
+            head: asDom(head),
+            body: asDom(body),
+            columns: [
+                { key: 'id', header: 'ID', exportable: true, value: r => r.id },
+                {
+                    key: 'side', header: 'Side', exportable: true, filter: 'set',
+                    value: r => (r.qty > 0 ? 0 : 1),
+                    text: r => (r.qty > 0 ? 'Buy' : 'Sell'),
+                },
+            ],
+            defaultSort: { col: 'id', dir: 'asc' },
+            rowKey: r => String(r.id),
+            emptyText: 'No rows',
+            contextMenu: true,
+        });
+        grid.setRows(ROWS);
+
+        rightClick(body, 0, 1);   // the side cell of the first row
+
+        const item = openMenu()!.children.find(el => (el.textContent || '').startsWith('Filter by this value'))!;
+        // Named by the label, because that is what the user sees in the cell.
+        assert.equal(item.textContent, 'Filter by this value: Buy');
+
+        item.dispatchEvent({ type: 'click', target: item });
+
+        // ...and filtering by the value, because that is what the column holds. Taking
+        // the label for both compared "Buy" against 0 and left the table empty.
+        assert.deepEqual(grid.filters(), { side: { op: 'anyOf', values: ['0'] } });
+        assert.deepEqual(grid.displayRows().map(r => r.id), [1]);
+    });
+});
+
+describe('GridContextMenu', () => {
+    it('shows one menu at a time for the page', () => {
+        const first = new GridContextMenu();
+        const second = new GridContextMenu();
+
+        first.open([{ label: 'a', run: () => {} }], 0, 0);
+        second.open([{ label: 'b', run: () => {} }], 0, 0);
+
+        assert.equal(first.isOpen, false);
+        assert.equal(second.isOpen, true);
+        assert.equal(fakeDocument.body.children.filter(el => el.className.includes('grid-menu')).length, 1);
+        second.close();
+    });
+
+    it('draws a separator for an item with no label', () => {
+        const menu = new GridContextMenu();
+
+        menu.open([{ label: 'a', run: () => {} }, {}, { label: 'b', run: () => {} }], 0, 0);
+
+        const el = openMenu()!;
+        assert.equal(el.children[1].className, 'grid-menu-separator');
+        menu.close();
+    });
+
+    it('opens nothing for an empty list', () => {
+        const menu = new GridContextMenu();
+
+        menu.open([], 0, 0);
+
+        assert.equal(menu.isOpen, false);
+    });
+});

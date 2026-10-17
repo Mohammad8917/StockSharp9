@@ -1,0 +1,10 @@
+node_modules/
+dist/
+tests/_dist/
+*.log
+
+# npm pack output
+*.tgz
+
+# Chrome's profile for the screenshot tool, made and removed per run
+.tmp-chrome/

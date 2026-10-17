@@ -1,0 +1,334 @@
+import type { DiagramDocument } from '../core/model.js';
+import type {
+    DiagramRuntimeState,
+    DiagramSelection,
+    DiagramSnapshot,
+    DiagramViewState,
+} from '../core/state.js';
+import type { DiagramNode, Link, Port, PortDirection } from './types.js';
+
+/** What the fullscreen button calls itself, in the host page's language. */
+export interface DiagramFullscreenLabels {
+    enter: string;
+    exit: string;
+}
+
+export interface DiagramOptions {
+    div: HTMLElement;
+    catalog: import('./catalog.js').StockSharpCatalog;
+    /** Show the built-in top-right fullscreen request button. Defaults to true. */
+    showFullscreenButton?: boolean;
+    /**
+     * Show a button that asks the host to save the diagram. Defaults to false: the control writes
+     * no files, so the button is worth showing only where a host listens for `exportRequested`.
+     */
+    showDownloadButton?: boolean;
+    /** Tooltip/aria text for that button. Defaults to English. */
+    downloadLabel?: string;
+    /**
+     * Show the built-in context menu on right-click. Defaults to true, because the control
+     * suppresses the browser's own menu regardless. Turn it off to draw your own from
+     * `contextMenuRequested`, which is emitted either way.
+     */
+    showContextMenu?: boolean;
+    /** Tooltip/aria text for that button. Defaults to English. */
+    fullscreenLabels?: DiagramFullscreenLabels;
+    overviewContainer?: HTMLElement | null;
+    zoomLabel?: HTMLElement | null;
+    /** Optional system clipboard adapter. Pass null to force memory-only clipboard. */
+    clipboard?: DiagramClipboard | null;
+    /** Snap pointer-dragged nodes to the grid. Defaults to true. */
+    gridSnap?: boolean;
+    /** Positive world-space grid step. Defaults to 28. */
+    gridSize?: number;
+    /**
+     * Leave page scrolling to the page: a plain wheel scrolls it and only Ctrl/Meta+wheel zooms, and a
+     * one-finger vertical swipe scrolls it on touch screens. Defaults to false, where the diagram keeps
+     * every wheel and touch gesture for itself - right for an editor, wrong for a picture on a long page.
+     * Fullscreen (see setFullscreenState) suspends it, since the diagram then covers the page.
+     */
+    pageScroll?: boolean;
+}
+
+export interface DiagramGridSettings {
+    enabled: boolean;
+    size: number;
+}
+
+export interface DiagramPoint {
+    x: number;
+    y: number;
+}
+
+export interface DiagramNodeBounds extends DiagramPoint {
+    width: number;
+    height: number;
+}
+
+export type DiagramScreenshotScope = 'viewport' | 'content';
+
+export interface DiagramScreenshotOptions {
+    /** Current viewport or the complete graph bounds. Defaults to viewport. */
+    scope?: DiagramScreenshotScope;
+    /** World-to-CSS-pixel scale for content export. Defaults to 1. */
+    scale?: number;
+    /** CSS-pixel padding around content export. Defaults to 32. */
+    padding?: number;
+    /** Output pixel density. Defaults to the current device pixel ratio. */
+    pixelRatio?: number;
+    /** Optional export-only background override. */
+    background?: string;
+    /** Defaults to true. */
+    includeGrid?: boolean;
+    /** Defaults to the current value for viewport and false for content. */
+    includeOverview?: boolean;
+    /** Defaults to true for viewport and false for content. */
+    includeSelection?: boolean;
+    /** Include debugger and error state. Defaults to true. */
+    includeRuntimeState?: boolean;
+}
+
+export interface DiagramClipboard {
+    readText(): Promise<string>;
+    writeText(value: string): Promise<void>;
+}
+
+export interface DiagramThemeOptions {
+    diagramBackground?: string;
+    overviewBackground?: string;
+    gridColor?: string;
+    linkMaxLightness?: number;
+    /** When true, colour links by their source socket type; the default (false) draws every link in the
+     *  neutral grey so a scheme reads uniformly. Sockets stay type-coloured either way. */
+    typedLinkColors?: boolean;
+    overviewBorderColor?: string;
+    overviewViewportColor?: string;
+    overviewViewportFill?: string;
+}
+
+export type NodeErrorKind = 'runtime' | 'load';
+
+export interface NodeErrorOptions {
+    kind?: NodeErrorKind;
+    animate?: boolean;
+}
+
+export interface DiagramLoadOptions {
+    /** Transient per-node errors discovered while restoring a scheme. */
+    nodeErrors?: Readonly<Record<string, string>>;
+}
+
+export interface DocumentLoadFailedPayload {
+    message: string;
+    error: Error;
+}
+
+export interface FullscreenChangedPayload {
+    fullscreen: boolean;
+}
+
+/** Requested host layout state. The component never enters fullscreen itself. */
+export interface FullscreenRequestedPayload {
+    fullscreen: boolean;
+}
+
+export type ContextCommand =
+    | 'undo' | 'redo'
+    | 'cut' | 'copy' | 'paste'
+    | 'open' | 'delete'
+    | 'exportDocument' | 'exportPng' | 'exportSvg'
+    | 'overview'
+    | 'properties' | 'help';
+
+/**
+ * Names a submenu rather than something to run. Deliberately outside ContextCommand:
+ * `executeContextCommand` takes commands, and a submenu label has nothing to execute.
+ */
+export type ContextCommandGroup = 'export';
+
+export interface ContextCommandPayload {
+    command: ContextCommand;
+    nodes: DiagramNode[];
+    links: Link[];
+}
+
+export interface ContextCommandState {
+    command: ContextCommand;
+    enabled: boolean;
+    /**
+     * Present only on commands that toggle something, and then it is the current state --
+     * `overview` is the one today. A menu draws these with a tick rather than as two separate
+     * show/hide entries, which would leave one of them dead at all times.
+     */
+    checked?: boolean;
+}
+
+/** A submenu: its own enabled state, plus the items to show when it opens. */
+export interface ContextCommandGroupState {
+    group: ContextCommandGroup;
+    enabled: boolean;
+    commands: ContextCommandState[];
+}
+
+/**
+ * One entry of the menu, in the order it should be drawn. Discriminate on `group`:
+ * an entry that has it is a submenu, an entry that does not is a command.
+ */
+export type ContextMenuItemState = ContextCommandState | ContextCommandGroupState;
+
+/** What an export request asks the host to produce. */
+export type ExportFormat = 'document' | 'png' | 'svg';
+
+/**
+ * The user picked something from the export submenu. Like `nodeProperties`, this is a
+ * request and nothing more: the control does not write files or open dialogs, so the
+ * host fulfils it with `saveDocument()`, `takeScreenshot()` or `takeSvg()` and its own
+ * options for scope, padding and background.
+ */
+export interface ExportRequestedPayload {
+    format: ExportFormat;
+}
+
+export interface ContextMenuRequestedPayload {
+    x: number;
+    y: number;
+    node: DiagramNode | null;
+    link: Link | null;
+    port: Port | null;
+    portDirection: PortDirection | null;
+    commands: ContextMenuItemState[];
+}
+
+export interface NodeSelectedPayload {
+    node: DiagramNode;
+    selected: boolean;
+}
+
+export interface NodeHoverPayload {
+    node: DiagramNode;
+    hovering: boolean;
+}
+
+export interface PortSelectedPayload {
+    node: DiagramNode;
+    port: Port;
+    direction: PortDirection;
+}
+
+export interface PortHoverPayload extends PortSelectedPayload {
+    hovering: boolean;
+}
+
+export type PortClickAction = 'leftClick' | 'rightClick';
+
+export interface PortClickedPayload extends PortSelectedPayload {
+    action: PortClickAction;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+}
+
+export interface LinkSelectedPayload {
+    link: Link;
+    selected: boolean;
+}
+
+export interface LinkHoverPayload {
+    link: Link;
+    hovering: boolean;
+}
+
+export interface NodeMovedPayload {
+    node: DiagramNode;
+}
+
+export interface NodeChangePayload {
+    nodes: DiagramNode[];
+}
+
+export interface LinkChangePayload {
+    links: Link[];
+}
+
+export interface LinkRelinkedPayload {
+    link: Link;
+    previous: Link;
+}
+
+export interface LoadFinishedPayload {
+    nodes: DiagramNode[];
+    links: Link[];
+}
+
+export interface LinkValidationPayload {
+    fromNode: DiagramNode;
+    fromPort: Port;
+    toNode: DiagramNode;
+    toPort: Port;
+    allowed: boolean;
+    reason: LinkValidationReason;
+}
+
+export type LinkValidationReason =
+    | 'allowed'
+    | 'missing-link'
+    | 'missing-node'
+    | 'missing-port'
+    | 'same-node'
+    | 'invalid-direction'
+    | 'incompatible-type'
+    | 'duplicate-link'
+    | 'source-limit'
+    | 'target-limit'
+    | 'host-rejected';
+
+export interface LinkValidationResult {
+    allowed: boolean;
+    reason: LinkValidationReason;
+}
+
+export interface LinkValidatorArgs {
+    fromNode: DiagramNode;
+    fromPort: Port;
+    toNode: DiagramNode;
+    toPort: Port;
+}
+
+export type LinkValidator = (args: LinkValidatorArgs) => boolean;
+
+export interface DiagramEvents {
+    nodeAdded: NodeChangePayload;
+    nodeRemoved: NodeChangePayload;
+    linkAdded: LinkChangePayload;
+    linkRemoved: LinkChangePayload;
+    linkRelinked: LinkRelinkedPayload;
+    nodeMoved: NodeMovedPayload;
+    nodeSelected: NodeSelectedPayload;
+    nodeHover: NodeHoverPayload;
+    portSelected: PortSelectedPayload;
+    portClicked: PortClickedPayload;
+    portHover: PortHoverPayload;
+    linkSelected: LinkSelectedPayload;
+    linkHover: LinkHoverPayload;
+    linkValidation: LinkValidationPayload;
+    loadFinished: LoadFinishedPayload;
+    contextCommand: ContextCommandPayload;
+    contextMenuRequested: ContextMenuRequestedPayload;
+    exportRequested: ExportRequestedPayload;
+    undoRequested: NodeChangePayload & LinkChangePayload;
+    redoRequested: NodeChangePayload & LinkChangePayload;
+    nodeEdit: NodeChangePayload;
+    nodeProperties: NodeChangePayload;
+    nodeOpen: NodeChangePayload;
+    nodeHelp: NodeChangePayload;
+    zoomChanged: DiagramSnapshot<DiagramViewState>;
+    viewChanged: DiagramSnapshot<DiagramViewState>;
+    selectionChanged: DiagramSnapshot<DiagramSelection>;
+    runtimeStateChanged: { state: DiagramSnapshot<DiagramRuntimeState> };
+    undoStackChanged: { canUndo: boolean; canRedo: boolean };
+    documentLoaded: { document: DiagramDocument };
+    documentLoadFailed: DocumentLoadFailedPayload;
+    fullscreenRequested: FullscreenRequestedPayload;
+    fullscreenChanged: FullscreenChangedPayload;
+}

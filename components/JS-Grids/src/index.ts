@@ -1,0 +1,45 @@
+export { DataGrid, GridPinnedPlacements } from './data-grid.js';
+
+export type {
+    GridColumn,
+    GridExportData,
+    GridFilter,
+    GridFilterKind,
+    GridFilterOp,
+    GridMenuContext,
+    GridMenuLabels,
+    GridMenuOptions,
+    GridOptions,
+    GridPinnedCell,
+    GridPinnedPlacement,
+    GridPinnedRow,
+    GridSelectionMode,
+    GridState,
+    GridValueOption,
+} from './data-grid.js';
+
+export { SortDirections, TableSort } from './table-sort.js';
+
+export type { SortDir, SortSpec } from './table-sort.js';
+
+export { ColumnSettings } from './column-settings.js';
+
+export type {
+    ColumnLayoutStore,
+    ColumnPickerClasses,
+    ColumnSettingsDialog,
+    ColumnSettingsOptions,
+} from './column-settings.js';
+
+// The grid exports through this, and a host that has a sheet to write but no grid
+// to write it from (a server-rendered list, a chart's underlying series) can reach
+// it on its own rather than reimplementing a workbook writer.
+export { TableExport } from './table-export.js';
+
+/// The menu the grid offers on a right-click. Exported so a host that supplies its
+/// own items can still reuse the chrome, or open one from a button of its own.
+export { GridContextMenu, type GridMenuClasses, type GridMenuItem } from './context-menu.js';
+
+/// The popup the menu opens to build a filter rule. Exported so a host can open it
+/// from a control of its own -- a funnel in a header, a toolbar button.
+export { GridFilterDialog, type GridFilterDialogClasses, type GridFilterDialogLabels } from './filter-dialog.js';

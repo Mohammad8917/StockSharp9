@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": false,
+    "emitDeclarationOnly": true,
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  // Build-only, and not part of the package's surface — see tsconfig.build.json.
+  "exclude": ["src/chart-engine.global.ts"]
+}

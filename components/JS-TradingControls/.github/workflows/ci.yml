@@ -1,0 +1,37 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      # The one failure a passing test suite cannot see: everything here is
+      # checked from source, so a dist that does not resolve its own imports
+      # looks healthy until an adopter imports it.
+      - name: The built ESM entry loads
+        run: node -e "import('./dist/esm/index.js').then(m => console.log('dist/esm/index.js loaded,', Object.keys(m).length, 'exports'))"
+
+      - name: Check package contents
+        run: npm pack --dry-run

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+<link rel="icon" type="image/x-icon" href="./favicon.ico" />
+<title>sstradingcontrols · StockSharp JS Trading Controls</title>
+<!-- Stylesheet order is load-bearing: dockview.css gives the dock its structure,
+     theme.css declares the --t-* tokens, trading-controls.css reads them, and
+     demo.css comes last so the page can re-point the palette and restyle the
+     dockview chrome through its --dv-* custom properties. -->
+<link rel="stylesheet" href="../node_modules/dockview-core/dist/styles/dockview.css" />
+<link rel="stylesheet" href="../node_modules/@stocksharp/chart/styles/chart-ui.css" />
+<link rel="stylesheet" href="../styles/theme.css" />
+<link rel="stylesheet" href="../styles/trading-controls.css" />
+<link rel="stylesheet" href="./demo.css" />
+</head>
+<body>
+
+<header class="demo-header">
+  <span class="brand">sstradingcontrols <span class="sub">· StockSharp JS Trading Controls</span></span>
+  <nav class="demo-nav">
+    <a href="./index.html" data-board-link="terminal">Terminal</a>
+    <a href="./strategies.html" data-board-link="strategies">Strategies</a>
+    <a href="./optimization.html" data-board-link="optimization">Optimization</a>
+  </nav>
+  <span class="spacer"></span>
+  <button id="tickBtn" class="tbtn" type="button">Simulate a tick</button>
+  <button id="autoBtn" class="tbtn" type="button"><span class="dot"></span> Auto ticks</button>
+  <button id="resetBtn" class="tbtn" type="button">Reset data</button>
+  <button id="layoutBtn" class="tbtn" type="button">Reset layout</button>
+  <button id="catalogBtn" class="tbtn" type="button">Catalog: 10 instruments</button>
+  <button id="themeBtn" class="tbtn" type="button">&#9788; Light</button>
+  <button id="langBtn" class="tbtn" type="button">中文</button>
+</header>
+
+<!-- The whole board is one dockview: every panel below the header is either a
+     control from the published dist/sstradingcontrols.js bundle, the SSChart
+     candlestick chart, or the demo's own host-port log. Drag a tab to rearrange,
+     drag a sash to resize — the docking is the same dockview-core the StockSharp
+     web terminal runs. -->
+<div id="dockHost" class="dock-host" data-board="terminal"></div>
+
+<!-- Filled by TickerSink.publish(), which the primary watchlist calls after every
+     render — so filtering or re-sorting the watchlist changes this strip. -->
+<footer class="demo-statusbar">
+  <span class="status-left">demo host · no server, no network</span>
+  <div id="ticker" class="ticker" aria-label="Watchlist ticker"></div>
+  <span id="statusClock" class="status-right"></span>
+</footer>
+
+<script src="../dist/sstradingcontrols.js"></script>
+<script src="../node_modules/dockview-core/dist/dockview-core.min.noStyle.js"></script>
+<script src="../node_modules/@stocksharp/indicators/dist/ssindicators.js"></script>
+<script src="../node_modules/@stocksharp/chart/dist/sschart.js"></script>
+<script src="../node_modules/@stocksharp/chart/dist/sschartui.js"></script>
+<script src="./i18n.js"></script>
+<script src="./demo.js"></script>
+</body>
+</html>
