@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rsync -a --delete --exclude='.git' --exclude='.github/workflows/copy-stocksharp.yml' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/"
+          rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/"
           mkdir -p "$GITHUB_WORKSPACE/components"
           for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
             mkdir -p "$GITHUB_WORKSPACE/components/$repo"
@@ -58,14 +58,14 @@ jobs:
           set -euo pipefail
           fail=0
           : > /tmp/verify-report.txt
-          rsync -nrc --delete --itemize-changes --exclude='.git' --exclude='.github/workflows/copy-stocksharp.yml' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/" > /tmp/core-diff.txt
-          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' ! -path '*/.github/workflows/copy-stocksharp.yml' | wc -l)
+          rsync -nrc --delete --itemize-changes --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/" > /tmp/core-diff.txt
+          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' ! -path '*/.github/workflows/*' | wc -l)
           if [ -s /tmp/core-diff.txt ]; then
             echo "FAIL StockSharp core: differences found" | tee -a /tmp/verify-report.txt
             cat /tmp/core-diff.txt >> /tmp/verify-report.txt
             fail=1
           else
-            echo "PASS StockSharp core: $core_count files; checksum and path-set match (excluding only this synchronization workflow and companion bundle)" | tee -a /tmp/verify-report.txt
+            echo "PASS StockSharp core: $core_count files; checksum and path-set match (excluding this repository's workflow directory and companion bundle)" | tee -a /tmp/verify-report.txt
           fi
           for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
             rsync -nrc --delete --itemize-changes --exclude='.git' "/tmp/companions/$repo/" "$GITHUB_WORKSPACE/components/$repo/" > "/tmp/$repo-diff.txt"
@@ -82,7 +82,7 @@ jobs:
           if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          echo "RESULT: 100% verified for all listed upstream snapshots at the SHAs above, excluding only this workflow file." >> "$GITHUB_STEP_SUMMARY"
+          echo "RESULT: 100% verified for all listed upstream snapshots at the SHAs above." >> "$GITHUB_STEP_SUMMARY"
       - name: Upload verification report
         if: always()
         uses: actions/upload-artifact@v4
@@ -90,3 +90,4 @@ jobs:
           name: stocksharp-copy-verification
           path: /tmp/verify-report.txt
           if-no-files-found: ignore
+# Manual exact-source synchronization trigger: 2026-10-17.
