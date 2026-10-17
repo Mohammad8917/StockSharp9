@@ -32,7 +32,7 @@ jobs:
           rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/stocksharp-source/ "$GITHUB_WORKSPACE/"
 
           mkdir -p "$GITHUB_WORKSPACE/components"
-          for repo in Connectors Ecng AlgoTrading JS-Charts doc; do
+          for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
             git clone --depth 1 "https://github.com/StockSharp/$repo.git" "/tmp/$repo"
             mkdir -p "$GITHUB_WORKSPACE/components/$repo"
             rsync -a --delete --exclude='.git' "/tmp/$repo/" "$GITHUB_WORKSPACE/components/$repo/"
