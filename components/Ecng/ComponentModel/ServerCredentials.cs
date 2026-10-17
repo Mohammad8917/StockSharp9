@@ -1,0 +1,101 @@
+namespace Ecng.ComponentModel;
+
+using System.Security;
+
+/// <summary>
+/// The class that contains a login and password.
+/// </summary>
+public class ServerCredentials : NotifiableObject, IAsyncPersistable
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="ServerCredentials"/>.
+	/// </summary>
+	public ServerCredentials()
+	{
+	}
+
+	private string _email;
+
+	/// <summary>
+	/// Email.
+	/// </summary>
+	public string Email
+	{
+		get => _email;
+		set
+		{
+			if (_email == value)
+				return;
+
+			_email = value;
+			NotifyChanged();
+		}
+	}
+
+	private SecureString _password;
+
+	/// <summary>
+	/// Password.
+	/// </summary>
+	public SecureString Password
+	{
+		get => _password;
+		set
+		{
+			if (_password.IsEqualTo(value))
+				return;
+
+			_password = value;
+			NotifyChanged();
+		}
+	}
+
+	private SecureString _token;
+
+	/// <summary>
+	/// Token.
+	/// </summary>
+	public SecureString Token
+	{
+		get => _token;
+		set
+		{
+			if (_token.IsEqualTo(value))
+				return;
+
+			_token = value;
+			NotifyChanged();
+		}
+	}
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		Email = storage.GetValue<string>(nameof(Email));
+		Password = storage.GetValue<SecureString>(nameof(Password));
+		Token = storage.GetValue<SecureString>(nameof(Token));
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage
+			.Set(nameof(Email), Email)
+			.Set(nameof(Password), Password)
+			.Set(nameof(Token), Token);
+
+		return Task.CompletedTask;
+	}
+}

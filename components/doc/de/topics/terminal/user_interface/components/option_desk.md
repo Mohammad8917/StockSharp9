@@ -1,0 +1,13 @@
+# Optionsdesk
+
+Die Komponente **Optionsdesk** ist eine Tabelle mit den wichtigsten Parametern der ausgewählten Optionen für den Basiswert.
+
+Um den Optionsdesk anzuzeigen, müssen Sie den Basiswert und die benötigten Optionen auswählen.
+
+Zusätzlich können Sie einen Filter für das genaue Ablaufdatum der Optionen sowie Filter für minimale/maximale Strikes angeben.
+
+![Terminal Optionsboard 00](../../../../images/terminal_option_desk_00.png)
+
+## Empfohlene Inhalte
+
+[Smile-Volatilität](smile_volatility.md)

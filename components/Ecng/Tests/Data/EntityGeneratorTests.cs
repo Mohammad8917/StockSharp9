@@ -1,0 +1,917 @@
+#if NET10_0_OR_GREATER
+
+namespace Ecng.Tests.Data;
+
+using Ecng.Serialization;
+
+[TestClass]
+public class EntityGeneratorTests : BaseTestClass
+{
+	[TestMethod]
+	public void EntityAttribute_Name()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOrderEntity));
+
+		schema.TableName.AssertEqual("Ecng_Orders");
+	}
+
+	[TestMethod]
+	public void EntityAttribute_NoCache()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOrderEntity));
+
+		schema.NoCache.AssertTrue();
+	}
+
+	[TestMethod]
+	public void EntityAttribute_NoCacheFalse()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestProductEntity));
+
+		schema.NoCache.AssertFalse();
+	}
+
+	[TestMethod]
+	public void NoEntityAttribute_FallsBackToClassName()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestPlainEntity));
+
+		schema.TableName.AssertEqual("GenTestPlainEntity");
+	}
+
+	[TestMethod]
+	public void GeneratedSchema_HasCorrectColumns()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOrderEntity));
+
+		schema.Identity.AssertNotNull();
+		schema.Identity.Name.AssertEqual("Id");
+
+		var colNames = schema.Columns.Select(c => c.Name).ToArray();
+		colNames.AssertContains("Symbol");
+		colNames.AssertContains("Price");
+	}
+
+	[TestMethod]
+	public void EntitySchema_ViaInterface()
+	{
+		IDbPersistable entity = new GenTestOrderEntity();
+		var schema = entity.Schema;
+
+		schema.AssertNotNull();
+		schema.TableName.AssertEqual("Ecng_Orders");
+		schema.AssertSame(SchemaRegistry.Get(typeof(GenTestOrderEntity)));
+	}
+
+	[TestMethod]
+	public void EntitySchema_ViaInterface_Plain()
+	{
+		IDbPersistable entity = new GenTestPlainEntity();
+		var schema = entity.Schema;
+
+		schema.AssertNotNull();
+		schema.TableName.AssertEqual("GenTestPlainEntity");
+	}
+
+	#region ColumnAttribute in generated schema
+
+	[TestMethod]
+	public void Generated_ColumnAttr_MaxLength()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnAttrEntity));
+		var col = schema.Columns.First(c => c.Name == "Name");
+
+		col.MaxLength.AssertEqual(128);
+	}
+
+	[TestMethod]
+	public void Generated_ColumnAttr_IsNullable()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnAttrEntity));
+		var col = schema.Columns.First(c => c.Name == "Description");
+
+		col.IsNullable.AssertTrue();
+	}
+
+	[TestMethod]
+	public void Generated_ColumnAttr_Both()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnAttrEntity));
+		var col = schema.Columns.First(c => c.Name == "Tag");
+
+		col.IsNullable.AssertTrue();
+		col.MaxLength.AssertEqual(64);
+	}
+
+	[TestMethod]
+	public void Generated_NoAttr_String_NotNullable()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnAttrEntity));
+		var col = schema.Columns.First(c => c.Name == "Plain");
+
+		col.IsNullable.AssertFalse();
+		col.MaxLength.AssertEqual(0);
+	}
+
+	[TestMethod]
+	public void Generated_NullableValueType_IsNullable()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnAttrEntity));
+		var col = schema.Columns.First(c => c.Name == "NullableInt");
+
+		col.IsNullable.AssertTrue();
+	}
+
+	[TestMethod]
+	public void Generated_ValueType_NotNullable()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnAttrEntity));
+		var col = schema.Columns.First(c => c.Name == "RequiredInt");
+
+		col.IsNullable.AssertFalse();
+	}
+
+	#endregion
+
+	#region Enum properties
+
+	[TestMethod]
+	public void Generated_Enum_ClrTypeIsUnderlyingInt()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestEnumEntity));
+		var col = schema.Columns.First(c => c.Name == "Status");
+
+		col.ClrType.AssertEqual(typeof(int));
+		col.IsNullable.AssertFalse();
+	}
+
+	[TestMethod]
+	public void Generated_NullableEnum_ClrTypeIsUnderlyingInt()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestEnumEntity));
+		var col = schema.Columns.First(c => c.Name == "NullableStatus");
+
+		col.ClrType.AssertEqual(typeof(int));
+		col.IsNullable.AssertTrue();
+	}
+
+	#endregion
+
+	#region Identity type
+
+	[TestMethod]
+	public void Generated_Identity_IntType()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestIntIdEntity));
+
+		schema.Identity.AssertNotNull();
+		schema.Identity.Name.AssertEqual("Id");
+		schema.Identity.ClrType.AssertEqual(typeof(int));
+	}
+
+	[TestMethod]
+	public void Generated_Identity_GuidType()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestGuidIdEntity));
+
+		schema.Identity.AssertNotNull();
+		schema.Identity.Name.AssertEqual("Id");
+		schema.Identity.ClrType.AssertEqual(typeof(Guid));
+	}
+
+	[TestMethod]
+	public void Generated_RelationSingle_GuidRef_ClrTypeIsGuid()
+	{
+		// Long-identity entity referencing a Guid-identity entity
+		var schema = SchemaRegistry.Get(typeof(GenTestLongRefGuidEntity));
+		var col = schema.Columns.First(c => c.Name == "GuidRef");
+
+		col.ClrType.AssertEqual(typeof(Guid));
+	}
+
+	[TestMethod]
+	public void Generated_RelationSingle_LongRef_ClrTypeIsLong()
+	{
+		// Guid-identity entity referencing a long-identity entity
+		var schema = SchemaRegistry.Get(typeof(GenTestGuidIdEntity));
+		var col = schema.Columns.First(c => c.Name == "Order");
+
+		col.ClrType.AssertEqual(typeof(long));
+	}
+
+	#endregion
+
+	#region Nullable inner schema propagation
+
+	[TestMethod]
+	public void Generated_NullableInnerSchema_ColumnsAreNullable()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestNullableInnerEntity));
+
+		var street = schema.Columns.First(c => c.Name == "AddressStreet");
+		var city = schema.Columns.First(c => c.Name == "AddressCity");
+
+		street.IsNullable.AssertTrue();
+		city.IsNullable.AssertTrue();
+	}
+
+	[TestMethod]
+	public void Generated_NullMid_NullBranchPropagates4Levels()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestNullMidEntity));
+
+		// L2.Top — outer is NOT NULL → NOT NULL
+		schema.Columns.First(c => c.Name == "DataTop").IsNullable.AssertFalse();
+
+		// NullBranch subtree — [Column(IsNullable = true)] at L2.NullBranch → all NULL
+		schema.Columns.First(c => c.Name == "DataNullBranchMid").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataNullBranchL4Deep").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataNullBranchL4Count").IsNullable.AssertTrue();
+
+		// SolidBranch subtree — no nullable marker → all NOT NULL
+		schema.Columns.First(c => c.Name == "DataSolidBranchMid").IsNullable.AssertFalse();
+		schema.Columns.First(c => c.Name == "DataSolidBranchL4Deep").IsNullable.AssertFalse();
+		schema.Columns.First(c => c.Name == "DataSolidBranchL4Count").IsNullable.AssertFalse();
+	}
+
+	[TestMethod]
+	public void Generated_NullCantCancel_OuterWins()
+	{
+		// Outer [Column(IsNullable = true)] + inner [Column(IsNullable = false)]
+		// Outer wins — column must be nullable because container can be null.
+		var schema = SchemaRegistry.Get(typeof(GenTestNullCantCancelEntity));
+
+		schema.Columns.First(c => c.Name == "DataForced").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataNormal").IsNullable.AssertTrue();
+	}
+
+	[TestMethod]
+	public void Generated_NullRoot_Entire4LevelTreeNullable()
+	{
+		// Root is nullable → everything is nullable, including SolidBranch
+		var schema = SchemaRegistry.Get(typeof(GenTestNullRootEntity));
+
+		schema.Columns.First(c => c.Name == "DataTop").IsNullable.AssertTrue();
+
+		schema.Columns.First(c => c.Name == "DataNullBranchMid").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataNullBranchL4Deep").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataNullBranchL4Count").IsNullable.AssertTrue();
+
+		schema.Columns.First(c => c.Name == "DataSolidBranchMid").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataSolidBranchL4Deep").IsNullable.AssertTrue();
+		schema.Columns.First(c => c.Name == "DataSolidBranchL4Count").IsNullable.AssertTrue();
+	}
+
+	#endregion
+
+	#region [ColumnOverride] — generated schema
+
+	[TestMethod]
+	public void Generated_ColumnOverride_OverridesInnerNullability()
+	{
+		// Outer [Column(IsNullable = true)] makes all inner nullable,
+		// but [ColumnOverride("Secret", IsNullable = false)] overrides Secret to NOT NULL.
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnOverrideEntity));
+
+		// Auth.Key — outer nullable, no override → NULL
+		schema.Columns.First(c => c.Name == "AuthKey").IsNullable.AssertTrue();
+
+		// Auth.Secret — [ColumnOverride] forces NOT NULL
+		schema.Columns.First(c => c.Name == "AuthSecret").IsNullable.AssertFalse();
+	}
+
+	[TestMethod]
+	public void Generated_ColumnOverride_WithNameOverride()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnOverrideWithNameEntity));
+
+		// Auth.Key — outer nullable, no override → NULL
+		schema.Columns.First(c => c.Name == "AuthKey").IsNullable.AssertTrue();
+
+		// Auth.Secret → renamed to "ApiToken" via NameOverride, forced NOT NULL via ColumnOverride
+		schema.Columns.Any(c => c.Name == "AuthSecret").AssertFalse(
+			"Secret should be renamed to ApiToken");
+
+		var apiToken = schema.Columns.First(c => c.Name == "ApiToken");
+		apiToken.IsNullable.AssertFalse();
+	}
+
+	[TestMethod]
+	public void Generated_ColumnOverride_PrecisionScale()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnOverridePrecisionEntity));
+
+		string Describe(string name)
+		{
+			var col = schema.Columns.First(c => c.Name == name);
+			return $"{col.IsNullable}|{col.Precision}|{col.Scale}";
+		}
+
+		Describe("MoneyAmount").AssertEqual("False|18|2");
+		Describe("MoneyFee").AssertEqual("True|20|6");
+		Describe("MoneyRate").AssertEqual("False|10|0");
+		Describe("MoneyTax").AssertEqual("False|0|3");
+		Describe("MoneyPrice").AssertEqual("True|12|4");
+	}
+
+	[TestMethod]
+	public void Generated_EntityLevelColumnOverride_PrecisionScale()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnOverrideInheritedEntity));
+
+		var balance = schema.Columns.First(c => c.Name == "Balance");
+		balance.Precision.AssertEqual(18);
+		balance.Scale.AssertEqual(2);
+
+		var reserved = schema.Columns.First(c => c.Name == "Reserved");
+		reserved.Precision.AssertEqual(0);
+		reserved.Scale.AssertEqual(0);
+	}
+
+	[TestMethod]
+	public void Generated_ColumnOverride_MaxLength()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnOverrideLengthEntity));
+
+		string Describe(string name)
+		{
+			var col = schema.Columns.First(c => c.Name == name);
+			return $"{col.IsNullable}|{col.MaxLength}";
+		}
+
+		Describe("TextTag").AssertEqual("False|64");
+		Describe("TextCode").AssertEqual("True|50");
+		Describe("TextNote").AssertEqual("True|200");
+		Describe("TextBody").AssertEqual($"False|{ColumnAttribute.Max}");
+		Describe("TextHash").AssertEqual("False|32");
+	}
+
+	[TestMethod]
+	public void Generated_EntityLevelColumnOverride_MaxLength()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestColumnOverrideInheritedLengthEntity));
+
+		schema.Columns.First(c => c.Name == "Label").MaxLength.AssertEqual(32);
+		schema.Columns.First(c => c.Name == "Remark").MaxLength.AssertEqual(0);
+	}
+
+	#endregion
+
+	#region Finding #1: Identity IsUnique/IsIndex
+
+	[TestMethod]
+	public void Generated_Identity_HasIsUnique()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOrderEntity));
+
+		schema.Identity.AssertNotNull();
+		schema.Identity.IsUnique.AssertTrue();
+	}
+
+	[TestMethod]
+	public void Generated_Identity_HasIsIndex()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOrderEntity));
+
+		schema.Identity.AssertNotNull();
+		schema.Identity.IsIndex.AssertTrue();
+	}
+
+	[TestMethod]
+	public void Generated_Identity_AppearsInUniqueColumns()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOrderEntity));
+
+		schema.UniqueColumns.Any(c => c.Name == schema.Identity.Name).AssertTrue(
+			"Identity must appear in UniqueColumns for cache invalidation to work");
+	}
+
+	#endregion
+
+	#region Join entities (no Identity, Save/Load only)
+
+	[TestMethod]
+	public void JoinEntity_TwoFk_Save_StoresFkIds()
+	{
+		var entity = new GenTestTwoFkJoin
+		{
+			Order = new GenTestOrderEntity { Id = 42 },
+			Product = new GenTestProductEntity { Id = 7 },
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<long?>("Order").AssertEqual(42L);
+		storage.GetValue<long?>("Product").AssertEqual(7L);
+	}
+
+	[TestMethod]
+	public void JoinEntity_TwoFk_Save_NullRef_StoresNull()
+	{
+		var entity = new GenTestTwoFkJoin
+		{
+			Order = null,
+			Product = null,
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<long?>("Order").AssertEqual(null);
+		storage.GetValue<long?>("Product").AssertEqual(null);
+	}
+
+	[TestMethod]
+	public void JoinEntity_SimpleProps_Save()
+	{
+		var entity = new GenTestSimplePropJoin
+		{
+			Name = "test-tag",
+			Score = 99,
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<string>("Name").AssertEqual("test-tag");
+		storage.GetValue<int>("Score").AssertEqual(99);
+	}
+
+	[TestMethod]
+	public void JoinEntity_Enum_Save_StoresAsUnderlying()
+	{
+		var entity = new GenTestEnumJoin
+		{
+			Status = GenTestStatus.Deleted,
+			NullableStatus = GenTestStatus.Active,
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<int>("Status").AssertEqual((int)GenTestStatus.Deleted);
+		storage.GetValue<int?>("NullableStatus").AssertEqual((int)GenTestStatus.Active);
+	}
+
+	[TestMethod]
+	public void JoinEntity_Enum_Save_NullableNull()
+	{
+		var entity = new GenTestEnumJoin
+		{
+			Status = GenTestStatus.Active,
+			NullableStatus = null,
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<int>("Status").AssertEqual((int)GenTestStatus.Active);
+		storage.GetValue<int?>("NullableStatus").AssertEqual(null);
+	}
+
+	[TestMethod]
+	public void JoinEntity_Mixed_Save()
+	{
+		var entity = new GenTestMixedJoin
+		{
+			Order = new GenTestOrderEntity { Id = 100 },
+			Label = "important",
+			Status = GenTestStatus.Inactive,
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<long?>("Order").AssertEqual(100L);
+		storage.GetValue<string>("Label").AssertEqual("important");
+		storage.GetValue<int>("Status").AssertEqual((int)GenTestStatus.Inactive);
+	}
+
+	[TestMethod]
+	public void JoinEntity_GuidFk_Save()
+	{
+		var guid = Guid.NewGuid();
+		var entity = new GenTestGuidFkJoin
+		{
+			GuidRef = new GenTestGuidIdEntity { Id = guid },
+			LongRef = new GenTestOrderEntity { Id = 55 },
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		storage.GetValue<Guid?>("GuidRef").AssertEqual(guid);
+		storage.GetValue<long?>("LongRef").AssertEqual(55L);
+	}
+
+	[TestMethod]
+	public void JoinEntity_NotRegisteredInSchemaRegistry()
+	{
+		// Join entities should NOT be pre-registered by the generator's SchemaInitializer.
+		// TryGet checks only pre-registered schemas, not the reflection fallback.
+		SchemaRegistry.TryGet(typeof(GenTestTwoFkJoin), out _).AssertFalse();
+		SchemaRegistry.TryGet(typeof(GenTestSimplePropJoin), out _).AssertFalse();
+		SchemaRegistry.TryGet(typeof(GenTestEnumJoin), out _).AssertFalse();
+		SchemaRegistry.TryGet(typeof(GenTestMixedJoin), out _).AssertFalse();
+		SchemaRegistry.TryGet(typeof(GenTestGuidFkJoin), out _).AssertFalse();
+	}
+
+	[TestMethod]
+	public void JoinEntity_AbstractBase_NotGenerated()
+	{
+		// The abstract base should not get generated Save/Load.
+		// Calling Save on abstract base (via concrete subclass with no own props cast) should be a no-op.
+		var storage = new SettingsStorage();
+		((GenTestBaseJoinEntity)new GenTestTwoFkJoin()).Save(storage);
+
+		// If the generated Save works correctly, it calls base.Save first (no-op) then stores FK values.
+		// The storage should contain FK keys from the concrete class, proving
+		// base.Save was a no-op and didn't throw.
+		storage.ContainsKey("Order").AssertTrue();
+	}
+
+	#endregion
+
+	#region RelationSingle inside InnerSchema
+
+	[TestMethod]
+	public void InnerSchemaWithRelationSingle_Save_FlattensWithFkSuffix()
+	{
+		var entity = new GenTestEntityWithRelationSingleInsideInnerSchema
+		{
+			Id = 1,
+			Note = "n",
+			ShippingAddress = new GenTestAddressWithFk
+			{
+				Street = "S",
+				City = "C",
+				DeliveredBy = new GenTestOrderEntity { Id = 42 },
+			},
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		// Inner schema flattens column names with the prefix; the FK lands as
+		// the parent-prefixed column with the navigation member's name.
+		storage.GetValue<string>("ShippingAddressStreet").AssertEqual("S");
+		storage.GetValue<string>("ShippingAddressCity").AssertEqual("C");
+		storage.GetValue<long>("ShippingAddressDeliveredBy").AssertEqual(42L);
+	}
+
+	#endregion
+
+	#region Finding #3: generated [RelationSingle] columns must set ReferencedEntityType
+
+	/// <summary>
+	/// Regression test for generated [RelationSingle] columns: ensures the generated FK
+	/// column sets <see cref="SchemaColumn.ReferencedEntityType"/> to the navigation
+	/// property's entity type, matching the reflection path
+	/// (<c>ReferencedEntityType = prop.PropertyType</c>, SchemaRegistry.cs:219) so the
+	/// SchemaMigrator keeps the FK constraint.
+	/// (Was: EntityGenerator.EmitMetaColumns emitted only Name/ClrType/nullability and
+	/// left ReferencedEntityType null, Data.Entities.Generator\EntityGenerator.cs:721.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_RelationSingle_LongRef_SetsReferencedEntityType()
+	{
+		// GenTestGuidIdEntity.Order is [RelationSingle] -> GenTestOrderEntity.
+		var schema = SchemaRegistry.Get(typeof(GenTestGuidIdEntity));
+		var col = schema.Columns.First(c => c.Name == "Order");
+
+		AreEqual(typeof(GenTestOrderEntity), col.ReferencedEntityType);
+	}
+
+	/// <summary>
+	/// Regression test (same area as above): ensures the generated FK column for a
+	/// reference to a Guid-identity entity carries its referenced entity type
+	/// (ReferencedEntityType == typeof(GenTestGuidIdEntity)).
+	/// (Was: generator did not emit ReferencedEntityType,
+	/// Data.Entities.Generator\EntityGenerator.cs:721.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_RelationSingle_GuidRef_SetsReferencedEntityType()
+	{
+		// GenTestLongRefGuidEntity.GuidRef is [RelationSingle] -> GenTestGuidIdEntity.
+		var schema = SchemaRegistry.Get(typeof(GenTestLongRefGuidEntity));
+		var col = schema.Columns.First(c => c.Name == "GuidRef");
+
+		AreEqual(typeof(GenTestGuidIdEntity), col.ReferencedEntityType);
+	}
+
+	/// <summary>
+	/// Regression test for the inner-schema path: ensures EmitMetaColumnsRecursive emits
+	/// ReferencedEntityType for a [RelationSingle] living inside a flattened inner schema,
+	/// matching the reflection path (FlattenInnerSchema -> SchemaRegistry.cs:219), so the
+	/// flattened "ShippingAddressDeliveredBy" column references GenTestOrderEntity.
+	/// (Was: the inner-schema path did not emit ReferencedEntityType,
+	/// Data.Entities.Generator\EntityGenerator.cs:776.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_RelationSingle_InsideInnerSchema_SetsReferencedEntityType()
+	{
+		// GenTestAddressWithFk.DeliveredBy is [RelationSingle] -> GenTestOrderEntity,
+		// flattened into the parent column "ShippingAddressDeliveredBy".
+		var schema = SchemaRegistry.Get(typeof(GenTestEntityWithRelationSingleInsideInnerSchema));
+		var col = schema.Columns.First(c => c.Name == "ShippingAddressDeliveredBy");
+
+		AreEqual(typeof(GenTestOrderEntity), col.ReferencedEntityType);
+	}
+
+	#endregion
+
+	#region Finding #6: null inner-schema object must survive a Save/LoadAsync round-trip
+
+	/// <summary>
+	/// Regression test for nullable inner-schema round-trip: ensures a null
+	/// [Column(IsNullable = true)] inner property (all flattened columns saved as NULL)
+	/// loads back as null instead of being reconstructed as a non-null instance with
+	/// default members. EmitLoadInnerSchema emits a null-check branch that sets the
+	/// property to null when every flattened column is NULL.
+	/// (Was: EmitLoadInnerSchema emitted <c>prop = new InnerType { ... }</c> unconditionally,
+	/// materializing a non-null instance, Data.Entities.Generator\EntityGenerator.cs:404.)
+	/// </summary>
+	[TestMethod]
+	public async Task Generated_NullableInnerSchema_NullRoundTripsToNull()
+	{
+		var entity = new GenTestNullableInnerEntity
+		{
+			Id = 1,
+			Address = null,
+			Code = "c",
+		};
+
+		var storage = new SettingsStorage();
+		entity.Save(storage);
+
+		var loaded = new GenTestNullableInnerEntity();
+		await loaded.LoadAsync(storage, null, CancellationToken);
+
+		AreEqual("c", loaded.Code);
+		// The nullable inner object was saved as null, so it must load back as null.
+		IsNull(loaded.Address, "A null nullable inner schema must survive the Save/LoadAsync round-trip");
+	}
+
+	#endregion
+
+	#region Finding #3: [ForeignKey] id column must set ReferencedEntityType
+
+	/// <summary>
+	/// Regression test: a plain id column annotated with [ForeignKey(typeof(X))] must produce a
+	/// generated schema column whose ReferencedEntityType is X, matching the reflection path
+	/// (ReferencedEntityType = fkAttr.ReferencedType, SchemaRegistry.cs:473) so the SchemaMigrator
+	/// keeps the FK constraint.
+	/// (Was: EmitMetaColumns never read [ForeignKey], Data.Entities.Generator\EntityGenerator.cs:656.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_ForeignKeyColumn_SetsReferencedEntityType()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestForeignKeyColumnEntity));
+		var col = schema.Columns.First(c => c.Name == "OrderId");
+
+		AreEqual(typeof(GenTestOrderEntity), col.ReferencedEntityType);
+	}
+
+	#endregion
+
+	#region Finding #4: [Index]/[Unique] must populate SchemaColumn.Indexes
+
+	/// <summary>
+	/// Regression test: a property-level [Index] must populate SchemaColumn.Indexes, matching the
+	/// reflection path (CollectIndexes, SchemaRegistry.cs:272), not only the IsIndex boolean.
+	/// (Was: generator emitted only IsUnique/IsIndex, Data.Entities.Generator\EntityGenerator.cs:664.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_IndexProperty_PopulatesIndexes()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestIndexEntity));
+		var col = schema.Columns.First(c => c.Name == "Email");
+
+		(col.Indexes.Count > 0).AssertTrue("A [Index] property must carry a SchemaColumnIndex");
+	}
+
+	/// <summary>
+	/// Regression test: a type-level composite [Unique(nameof(A), nameof(B))] must populate
+	/// SchemaColumn.Indexes with a unique participation on every named column, matching the
+	/// reflection path's type-level index expansion (SchemaRegistry.cs:355).
+	/// (Was: generator never read the type-level [Index]/[Unique],
+	/// Data.Entities.Generator\EntityGenerator.cs:664.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_CompositeUnique_PopulatesIndexesOnAllColumns()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestIndexEntity));
+
+		var login = schema.Columns.First(c => c.Name == "Login");
+		var tenant = schema.Columns.First(c => c.Name == "Tenant");
+
+		login.Indexes.Any(i => i.IsUnique).AssertTrue("Composite [Unique] must mark Login as a unique-index participant");
+		tenant.Indexes.Any(i => i.IsUnique).AssertTrue("Composite [Unique] must mark Tenant as a unique-index participant");
+	}
+
+	#endregion
+
+	#region Finding #5: overridden property must yield a single column
+
+	/// <summary>
+	/// Regression test: a property overridden in a derived entity must produce exactly one schema
+	/// column, mirroring the reflection path's name-based dedup
+	/// (SchemaRegistry.GetOrderedProperties, base wins, SchemaRegistry.cs:298).
+	/// (Was: GetAllHierarchyProperties collected overrides twice,
+	/// Data.Entities.Generator\EntityGenerator.cs:830.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_OverriddenProperty_ProducesSingleColumn()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestOverrideEntity));
+
+		schema.Columns.Count(c => c.Name == "Shared").AssertEqual(1,
+			"An overridden property must not be emitted once per hierarchy declaration");
+	}
+
+	#endregion
+
+	#region Finding #7: [Column(Precision/Scale)] must reach the generated schema
+
+	/// <summary>
+	/// Regression test: [Column(Precision = N, Scale = M)] on a decimal property must be carried
+	/// into the generated schema column (SchemaColumn.Precision/Scale), or the DB column silently
+	/// falls back to the dialect default precision.
+	/// (Was: GetColumnAttribute read only IsNullable/MaxLength,
+	/// Data.Entities.Generator\EntityGenerator.cs:1098.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_ColumnPrecisionScale_AreEmitted()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestPrecisionEntity));
+		var col = schema.Columns.First(c => c.Name == "Amount");
+
+		col.Precision.AssertEqual(18);
+		col.Scale.AssertEqual(8);
+	}
+
+	#endregion
+
+	#region Finding #8: filtered unique indexes and subclassed [Index] attributes
+
+	/// <summary>
+	/// Regression test: a type-level [NonEmptyUnique] must reach the generated schema as a unique
+	/// participation carrying the Condition its constructor computed. The generator matched
+	/// attributes by exact class name, so every subclass of [Index]/[Unique] was skipped and the
+	/// filtered unique index was never created by SchemaSync.
+	/// (Was: BuildTypeIndexLookup/GetColumnIndexes compared AttributeClass.Name,
+	/// Data.Entities.Generator\EntityGenerator.cs:1240/1309.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_NonEmptyUnique_ReachesTheSchemaWithItsCondition()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestFilteredIndexEntity));
+		var key = schema.Columns.First(c => c.Name == "IdempotencyKey");
+
+		var ix = key.Indexes.FirstOrDefault(i => i.Name == "UX_GenFiltered_Tenant_Key");
+
+		ix.AssertNotNull("[NonEmptyUnique] must reach the generated schema");
+		ix.IsUnique.AssertTrue("[NonEmptyUnique] is a unique index");
+		ix.Condition.AssertEqual("{IdempotencyKey} <> ''");
+	}
+
+	/// <summary>
+	/// Regression test: the scope column of the same composite must carry the participation too,
+	/// so the index spans both columns.
+	/// </summary>
+	[TestMethod]
+	public void Generated_NonEmptyUnique_SpansEveryNamedColumn()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestFilteredIndexEntity));
+		var tenant = schema.Columns.First(c => c.Name == "Tenant");
+
+		tenant.Indexes.Count(i => i.Name == "UX_GenFiltered_Tenant_Key").AssertEqual(1,
+			"The scope column must participate in the filtered unique index");
+	}
+
+	/// <summary>
+	/// Regression test: an explicit Condition on a plain [Unique] must be emitted as well. The
+	/// generator recognised the attribute but built SchemaColumnIndex without its fourth argument,
+	/// so the WHERE clause was dropped even for the attributes it did see.
+	/// (Was: three-argument SchemaColumnIndex emission,
+	/// Data.Entities.Generator\EntityGenerator.cs:1262/1317.)
+	/// </summary>
+	[TestMethod]
+	public void Generated_ExplicitCondition_ReachesTheSchema()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestFilteredIndexEntity));
+		var external = schema.Columns.First(c => c.Name == "ExternalId");
+
+		var ix = external.Indexes.FirstOrDefault(i => i.Name == "UX_GenFiltered_Tenant_External");
+
+		ix.AssertNotNull("[Unique(Condition = ...)] must reach the generated schema");
+		ix.Condition.AssertEqual("{ExternalId} <> ''");
+	}
+
+	/// <summary>
+	/// Regression test: the same subclassed attribute declared on a property.
+	/// </summary>
+	[TestMethod]
+	public void Generated_PropertyLevelNonEmptyUnique_ReachesTheSchemaWithItsCondition()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestFilteredColumnEntity));
+		var token = schema.Columns.First(c => c.Name == "Token");
+
+		token.IsUnique.AssertTrue("A property-level [NonEmptyUnique] is a unique column");
+
+		var ix = token.Indexes.FirstOrDefault();
+
+		ix.AssertNotNull("A property-level [NonEmptyUnique] must reach the generated schema");
+		ix.IsUnique.AssertTrue();
+		ix.Condition.AssertEqual("{Token} <> ''");
+	}
+
+	/// <summary>
+	/// The generated schema and the reflection schema are two implementations of the same
+	/// declaration, and only the generated one is served at runtime — a divergence between them is
+	/// invisible until the database is missing an index. Compare the index metadata of both for
+	/// every entity the generator produced here, so any future attribute the generator learns to
+	/// read (or forgets to) is caught by this one test rather than by a per-attribute test.
+	/// </summary>
+	[TestMethod]
+	[DataRow(typeof(GenTestFilteredIndexEntity))]
+	[DataRow(typeof(GenTestFilteredColumnEntity))]
+	[DataRow(typeof(GenTestIndexEntity))]
+	public void GeneratedSchema_IndexMetadata_MatchesReflection(Type entityType)
+	{
+		static string Describe(Schema schema)
+			=> schema.Columns
+				.OrderBy(c => c.Name, StringComparer.Ordinal)
+				.Select(c => $"{c.Name}|{c.IsUnique}|{c.IsIndex}|" + c.Indexes
+					.OrderBy(i => i.Name, StringComparer.Ordinal).ThenBy(i => i.Order)
+					.Select(i => $"({i.Name},{i.Order},{i.IsUnique},{i.Condition})")
+					.JoinComma())
+				.JoinN();
+
+		var generated = SchemaRegistry.Get(entityType);
+		var reflected = SchemaRegistry.CreateFromReflection(entityType);
+
+		Describe(generated).AssertEqual(Describe(reflected),
+			$"Generated and reflected index metadata diverge for {entityType.Name}");
+	}
+
+	/// <summary>
+	/// A date or a time of day is a flat column, not something to descend into. The
+	/// generator keeps its own list of the types it may treat that way, so a type missing
+	/// from it is emitted as an inner schema and the column disappears.
+	/// </summary>
+	[TestMethod]
+	public void Generated_DateOnlyAndTimeOnly_AreFlatColumns()
+	{
+		var schema = SchemaRegistry.Get(typeof(GenTestScheduleEntity));
+
+		var day = schema.Columns.First(c => c.Name == "Day");
+		day.ClrType.AssertEqual(typeof(DateOnly));
+		day.IsNullable.AssertFalse();
+
+		var until = schema.Columns.First(c => c.Name == "Until");
+		until.ClrType.AssertEqual(typeof(DateOnly?));
+		until.IsNullable.AssertTrue();
+
+		var opensAt = schema.Columns.First(c => c.Name == "OpensAt");
+		opensAt.ClrType.AssertEqual(typeof(TimeOnly));
+		opensAt.IsNullable.AssertFalse();
+
+		var closesAt = schema.Columns.First(c => c.Name == "ClosesAt");
+		closesAt.ClrType.AssertEqual(typeof(TimeOnly?));
+		closesAt.IsNullable.AssertTrue();
+	}
+
+	/// <summary>
+	/// The same comparison as the index one, over the column types themselves: the two
+	/// paths must agree on what each property becomes, or the schema depends on which one
+	/// happened to build it.
+	/// </summary>
+	[TestMethod]
+	[DataRow(typeof(GenTestScheduleEntity))]
+	[DataRow(typeof(GenTestColumnAttrEntity))]
+	[DataRow(typeof(GenTestPrecisionEntity))]
+	[DataRow(typeof(GenTestColumnOverridePrecisionEntity))]
+	[DataRow(typeof(GenTestColumnOverrideInheritedEntity))]
+	[DataRow(typeof(GenTestColumnOverrideLengthEntity))]
+	[DataRow(typeof(GenTestColumnOverrideInheritedLengthEntity))]
+	public void GeneratedSchema_ColumnTypes_MatchReflection(Type entityType)
+	{
+		static string Describe(Schema schema)
+			=> schema.Columns
+				.OrderBy(c => c.Name, StringComparer.Ordinal)
+				.Select(c => $"{c.Name}|{c.ClrType}|{c.IsNullable}|{c.MaxLength}|{c.Precision}|{c.Scale}")
+				.JoinN();
+
+		var generated = SchemaRegistry.Get(entityType);
+		var reflected = SchemaRegistry.CreateFromReflection(entityType);
+
+		Describe(generated).AssertEqual(Describe(reflected),
+			$"Generated and reflected column types diverge for {entityType.Name}");
+	}
+
+	#endregion
+}
+
+#endif

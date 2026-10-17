@@ -1,0 +1,104 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="common_versions.props" />
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net10.0</TargetFrameworks>
+
+    <RootNamespace>Ecng.$(MSBuildProjectName)</RootNamespace>
+    <AssemblyName>Ecng.$(MSBuildProjectName)</AssemblyName>
+    <AssemblyTitle>Ecng.$(MSBuildProjectName)</AssemblyTitle>
+    <Product>Ecng system framework</Product>
+    <Description>Ecng system framework</Description>
+    <Company>StockSharp LP</Company>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <IsSourcesAllow>false</IsSourcesAllow>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="
+        '$(MSBuildProjectName)' == 'Interop.Windows'
+      ">
+    <TargetFrameworks>net6.0-windows;net10.0-windows</TargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="
+        '$(MSBuildProjectName)' == 'Tests' or
+        '$(MSBuildProjectName)' == 'UnitTesting'
+      ">
+    <TargetFrameworks>net6.0;net10.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="
+        '$(MSBuildProjectName)' == 'Nuget' or
+        '$(MSBuildProjectName)' == 'Data.ORM'
+      ">
+    <TargetFrameworks>net10.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="
+        $(MSBuildProjectName.StartsWith('Backup')) or
+        $(MSBuildProjectName.StartsWith('Compilation')) or
+        $(MSBuildProjectName.StartsWith('Excel.')) or
+        '$(MSBuildProjectName)' == 'Net.Udp'
+      ">
+    <TargetFrameworks>net6.0;net10.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="
+        '$(MSBuildProjectName)' == 'Net.HPSocket' or
+        '$(MSBuildProjectName)' == 'StringSearch' or
+        '$(MSBuildProjectName)' == 'Tests'
+      ">
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="
+        $(MSBuildProjectName.EndsWith('.Generator'))
+      ">
+    <TargetFrameworks>netstandard2.0</TargetFrameworks>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(StockSharpTargets)' != ''">
+    <TargetFrameworks>$(StockSharpTargets)</TargetFrameworks>
+  </PropertyGroup>
+
+  <!-- Release had none, and without a pdb there is no .snupkg to publish beside the package. -->
+  <PropertyGroup>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
+  <!-- Keeps the build machine's paths out of the published pdb; sources come from GitHub instead. -->
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <ItemGroup Condition=" '$(MSBuildProjectName)' != 'Tests' ">
+    <AssemblyAttribute Include="System.Reflection.AssemblyCopyrightAttribute">
+      <_Parameter1>Copyright @ StockSharp 2010 - $([System.DateTime]::Now.ToString(yyyy))</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyTrademarkAttribute">
+      <_Parameter1>StockSharp</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Condition=" !$(DefineConstants.Contains('CLS_DISABLE')) " Include="System.CLSCompliantAttribute">
+      <_Parameter1>true</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Resources.NeutralResourcesLanguageAttribute">
+      <_Parameter1>en-US</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <ItemGroup Condition="$(MSBuildProjectName.EndsWith('.Generator'))">
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="$(MsCodeAnalysisVer)" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="$(MsCodeAnalysisAnalyzersVer)" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!--<ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)IsExternalInit.cs" Link="Properties\IsExternalInit.cs" />
+  </ItemGroup>-->
+</Project>

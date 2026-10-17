@@ -1,0 +1,23 @@
+> [!CAUTION]
+> **The BitZ exchange has shut down. The connector no longer works; the documentation is retained for reference only.**
+
+# Adapter initialization BitZ
+
+The code below demonstrates how to initialize the [BitZMessageAdapter](xref:StockSharp.BitZ.BitZMessageAdapter) and send it to [Connector](xref:StockSharp.Algo.Connector).
+
+```cs
+			Connector Connector = new Connector();				
+			...				
+			var messageAdapter = new BitZMessageAdapter(Connector.TransactionIdGenerator)
+			{
+				Key = "<Your API Key>".To<SecureString>(),
+				Secret = "<Your API Secret>".To<SecureString>(),
+			};
+			Connector.Adapter.InnerAdapters.Add(messageAdapter);
+			...	
+							
+```
+
+## Recommended content
+
+[Connection settings window](../../../graphical_user_interface/connection_settings_window.md)

@@ -1,0 +1,297 @@
+namespace Ecng.ComponentModel;
+
+using System.Buffers;
+
+/// <summary>
+/// Thread-safe memory pool for reusing <see cref="Memory{T}"/> memories of specific sizes.
+/// </summary>
+public class ByteMemoryPool : MemoryPool<byte>
+{
+	/// <summary>
+	/// Types of pool limit exceed events reported via <see cref="LimitExceed"/>.
+	/// </summary>
+	public enum LimitTypes
+	{
+		/// <summary>
+		/// Total cached buffers count reached <see cref="MaxCount"/>.
+		/// </summary>
+		Total,
+
+		/// <summary>
+		/// Buffers count for a particular size reached <see cref="MaxPerLength"/>.
+		/// </summary>
+		PerLength,
+	}
+
+	private struct MemoryOwner(ByteMemoryPool parent, Memory<byte> memory) : IMemoryOwner<byte>, IReasonDisposable
+	{
+		private volatile int _disposed;
+		private readonly ByteMemoryPool _parent = parent ?? throw new ArgumentNullException(nameof(parent));
+
+		private readonly Memory<byte> _memory = memory;
+		public readonly Memory<byte> Memory
+		{
+			get
+			{
+				if (_disposed != 0)
+					throw new ObjectDisposedException(Reason);
+
+				return _memory;
+			}
+		}
+
+		public string Reason { get; private set; }
+
+		void IDisposable.Dispose()
+			=> Dispose(nameof(IDisposable.Dispose));
+
+		public bool Dispose(string reason)
+		{
+			if (Interlocked.Exchange(ref _disposed, 1) != 0)
+				return false;
+
+			Reason = reason;
+
+			var (result, limit) = _parent.Free(_memory);
+
+			if (limit is LimitTypes l)
+				_parent.LimitExceed?.Invoke(l);
+
+			return true;
+		}
+	}
+
+	private volatile bool _disposed;
+	private volatile bool _limitExceeded;
+	private readonly Lock _lock = new();
+	private readonly Dictionary<int, Queue<Memory<byte>>> _pool = [];
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="ByteMemoryPool"/> class with the specified maximum buffer size.
+	/// </summary>
+	/// <param name="maxBufferSize">The maximum size of the buffer that can be rented from the pool.</param>
+	public ByteMemoryPool(int maxBufferSize = ushort.MaxValue)
+	{
+		if (maxBufferSize < 1)
+			throw new ArgumentOutOfRangeException(nameof(maxBufferSize), maxBufferSize, "Invalid value.".Localize());
+
+		MaxBufferSize = maxBufferSize;
+	}
+
+	/// <summary>
+	/// Occurs when the pool cannot cache more buffers due to reaching a limit.
+	/// </summary>
+	public event Action<LimitTypes> LimitExceed;
+
+	/// <inheritdoc />
+	public override int MaxBufferSize { get; }
+
+	private int _defaultSize = FileSizes.KB * 10;
+
+	/// <summary>
+	/// The default size of the memory to rent when no specific size is requested.
+	/// </summary>
+	public int DefaultSize
+	{
+		get => _defaultSize;
+		set
+		{
+			if (value < 1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, "Invalid value.".Localize());
+
+			_defaultSize = value;
+		}
+	}
+
+	private int _maxPerLength = 100;
+
+	/// <summary>
+	/// Gets or sets the maximum number of memories to store for each size.
+	/// </summary>
+	public int MaxPerLength
+	{
+		get => _maxPerLength;
+		set
+		{
+			if (value < 1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, "Invalid value.".Localize());
+
+			_maxPerLength = value;
+		}
+	}
+
+	private int _maxCount = 1000;
+
+	/// <summary>
+	/// Gets or sets the maximum number of memories to store for each size.
+	/// </summary>
+	public int MaxCount
+	{
+		get => _maxCount;
+		set
+		{
+			if (value < 1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, "Invalid value.".Localize());
+
+			_maxCount = value;
+		}
+	}
+
+	private int _totalCount;
+
+	/// <summary>
+	/// Gets the total number of memories currently stored in the pool across all sizes.
+	/// </summary>
+	public int TotalCount => _totalCount;
+
+	// long-backed so the running total can exceed int.MaxValue without overflowing
+	// (the public TotalBytes is long; large pools of 64KB+ buffers can pass 2GB).
+	private long _totalBytes;
+
+	/// <summary>
+	/// Gets the total number of bytes currently stored in the pool across all sizes.
+	/// </summary>
+	public long TotalBytes => _totalBytes;
+
+	/// <inheritdoc />
+	public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
+	{
+		if (minBufferSize == -1)
+			minBufferSize = DefaultSize;
+		else if (minBufferSize < 1 || minBufferSize > MaxBufferSize)
+			throw new ArgumentOutOfRangeException(nameof(minBufferSize), minBufferSize, "Invalid value.".Localize());
+
+		static int round(int size)
+		{
+			if (size == 1)
+				return 1;
+			else if (size < 1)
+				throw new ArgumentOutOfRangeException(nameof(size), size, "Invalid value.".Localize());
+
+			// Check for potential overflow before operations
+			if (size > (1 << 30))  // Max safe power of 2 for int
+				return int.MaxValue;
+
+			size--;
+
+			size |= size >> 1;
+			size |= size >> 2;
+			size |= size >> 4;
+			size |= size >> 8;
+			size |= size >> 16;
+
+			return size + 1;
+		}
+
+		var size = round(minBufferSize);
+
+		if (size < minBufferSize)
+			throw new InvalidOperationException(size.ToString());
+		else if (size > MaxBufferSize)
+			size = MaxBufferSize;
+
+		using (_lock.EnterScope())
+		{
+			if (_disposed)
+				throw new ObjectDisposedException(nameof(ByteMemoryPool));
+
+			if (_pool.TryGetValue(size, out var bag) && bag.Count > 0)
+			{
+				var memory = bag.Dequeue();
+
+				_totalCount--;
+				_totalBytes -= memory.Length;
+
+				if (bag.Count == 0 && _pool.Count > 100)
+					_pool.Remove(size);
+
+				return new MemoryOwner(this, memory);
+			}
+		}
+		
+		return new MemoryOwner(this, new(new byte[size]));
+	}
+
+	private enum FreeResult
+	{
+		Success,
+		LimitExceeded,
+		OverLimit
+	}
+
+	private (FreeResult res, LimitTypes? limit) Free(Memory<byte> memory)
+	{
+		if (memory.IsEmpty)
+			return default;
+
+		using (_lock.EnterScope())
+		{
+			if (_disposed)
+				return default;
+
+			if (_totalCount >= MaxCount)
+			{
+				if (!_limitExceeded)
+				{
+					_limitExceeded = true;
+					return (FreeResult.LimitExceeded, LimitTypes.Total);
+				}
+
+				return (FreeResult.OverLimit, default);
+			}
+
+			var memLength = memory.Length;
+			var bag = _pool.SafeAdd(memLength);
+
+			if (bag.Count >= MaxPerLength)
+			{
+				if (!_limitExceeded)
+				{
+					_limitExceeded = true;
+					return (FreeResult.LimitExceeded, LimitTypes.PerLength);
+				}
+
+				return (FreeResult.OverLimit, default);
+			}
+
+			bag.Enqueue(memory);
+
+			_totalCount++;
+			_totalBytes += memory.Length;
+
+			_limitExceeded = false;
+		}
+
+		return default;
+	}
+
+	/// <summary>
+	/// Clears the pool, removing all stored memories.
+	/// </summary>
+	public void Clear()
+	{
+		using (_lock.EnterScope())
+		{
+			_pool.Clear();
+
+			_totalCount = 0;
+			_totalBytes = 0;
+		}
+	}
+
+	/// <inheritdoc />
+	protected override void Dispose(bool disposing)
+	{
+		if (disposing)
+		{
+			using (_lock.EnterScope())
+			{
+				if (_disposed)
+					return;
+
+				_disposed = true;
+				Clear();
+			}
+		}
+	}
+}

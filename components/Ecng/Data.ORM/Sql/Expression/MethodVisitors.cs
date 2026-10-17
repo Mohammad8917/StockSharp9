@@ -1,0 +1,2202 @@
+﻿namespace Ecng.Data.Sql;
+
+using Ecng.Data.Sql.Model;
+
+abstract class MethodVisitor(IEnumerable<MemberInfo> members)
+{
+	public IEnumerable<MemberInfo> Members { get; } = members.ToArray();
+
+	public abstract void Visit(ExpressionQueryTranslator translator, Expression expression);
+}
+
+abstract class MethodVisitor<T>(string name) : MethodVisitor(typeof(T).GetMember(name))
+{
+}
+
+abstract class DateAddVisitor<T>(string name, string firstArg) : MethodVisitor<T>(name)
+{
+	private readonly string _firstArg = firstArg;
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+		var mce = (MethodCallExpression)expression;
+
+		// Capture amount sub-expression into a temporary query
+		var amountQuery = new Query();
+		translator.Context.Curr = amountQuery;
+		translator.Visit(mce.Arguments[0]);
+
+		// Capture source sub-expression into a temporary query
+		var sourceQuery = new Query();
+		translator.Context.Curr = sourceQuery;
+		translator.Visit(mce.Object);
+
+		// Restore and emit dialect-aware DATEADD
+		translator.Context.Curr = q;
+		q.AddAction((d, sb) => d.AppendDateAdd(sb, _firstArg, amountQuery.Render(d), sourceQuery.Render(d)));
+	}
+}
+
+class DateTimeNowVisitor : MethodVisitor<DateTime>
+{
+	public DateTimeNowVisitor()
+		: base(nameof(DateTime.Now))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.Now();
+}
+
+class DateTimeUtcNowVisitor : MethodVisitor<DateTime>
+{
+	public DateTimeUtcNowVisitor()
+		: base(nameof(DateTime.UtcNow))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.UtcNow();
+}
+
+class DateTimeTodayVisitor : MethodVisitor<DateTime>
+{
+	public DateTimeTodayVisitor()
+		: base(nameof(DateTime.Today))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr
+				.Convert()
+				.OpenBracket()
+					.Raw("date")
+					.Comma()
+					.Now()
+				.CloseBracket();
+}
+
+class DateTimeOffsetNowVisitor : MethodVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetNowVisitor()
+		: base(nameof(DateTimeOffset.Now))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.SysNow();
+}
+
+class DateTimeOffsetUtcNowVisitor : MethodVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetUtcNowVisitor()
+		: base(nameof(DateTime.UtcNow))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.SysUtcNow();
+}
+
+class DateTimeAddYearsVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddYearsVisitor()
+		: base(nameof(DateTime.AddYears), "year")
+	{
+	}
+}
+
+class DateTimeAddMonthsVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddMonthsVisitor()
+		: base(nameof(DateTime.AddMonths), "month")
+	{
+	}
+}
+
+class DateTimeAddDaysVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddDaysVisitor()
+		: base(nameof(DateTime.AddDays), "day")
+	{
+	}
+}
+
+class DateTimeAddHoursVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddHoursVisitor()
+		: base(nameof(DateTime.AddHours), "hour")
+	{
+	}
+}
+
+class DateTimeAddMinutesVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddMinutesVisitor()
+		: base(nameof(DateTime.AddMinutes), "minute")
+	{
+	}
+}
+
+class DateTimeAddSecondsVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddSecondsVisitor()
+		: base(nameof(DateTime.AddSeconds), "second")
+	{
+	}
+}
+
+class DateTimeAddMillisecondsVisitor : DateAddVisitor<DateTime>
+{
+	public DateTimeAddMillisecondsVisitor()
+		: base(nameof(DateTime.AddMilliseconds), "millisecond")
+	{
+	}
+}
+
+class DateTimeOffsetAddYearsVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddYearsVisitor()
+		: base(nameof(DateTimeOffset.AddYears), "year")
+	{
+	}
+}
+
+class DateTimeOffsetAddMonthsVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddMonthsVisitor()
+		: base(nameof(DateTimeOffset.AddMonths), "month")
+	{
+	}
+}
+
+class DateTimeOffsetAddDaysVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddDaysVisitor()
+		: base(nameof(DateTimeOffset.AddDays), "day")
+	{
+	}
+}
+
+class DateTimeOffsetAddHoursVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddHoursVisitor()
+		: base(nameof(DateTimeOffset.AddHours), "hour")
+	{
+	}
+}
+
+class DateTimeOffsetAddMinutesVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddMinutesVisitor()
+		: base(nameof(DateTimeOffset.AddMinutes), "minute")
+	{
+	}
+}
+
+class DateTimeOffsetAddSecondsVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddSecondsVisitor()
+		: base(nameof(DateTimeOffset.AddSeconds), "second")
+	{
+	}
+}
+
+class DateTimeOffsetAddMillisecondsVisitor : DateAddVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetAddMillisecondsVisitor()
+		: base(nameof(DateTimeOffset.AddMilliseconds), "millisecond")
+	{
+	}
+}
+
+abstract class DateConvertVisitor<T>(string name, string firstArg) : MethodVisitor<T>(name)
+{
+	private readonly string _firstArg = firstArg;
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.Convert()
+			.OpenBracket()
+			.Raw(_firstArg)
+			.Comma();
+
+		var me = (MemberExpression)expression;
+		translator.Visit(me.Expression);
+
+		q.CloseBracket();
+	}
+}
+
+class DateTimeDateVisitor : DateConvertVisitor<DateTime>
+{
+	public DateTimeDateVisitor()
+		: base(nameof(DateTime.Date), "date")
+	{
+	}
+}
+
+class DateTimeTimeOfDayVisitor : DateConvertVisitor<DateTime>
+{
+	public DateTimeTimeOfDayVisitor()
+		: base(nameof(DateTime.TimeOfDay), "time")
+	{
+	}
+}
+
+class DateTimeOffsetDateVisitor : DateConvertVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetDateVisitor()
+		: base(nameof(DateTimeOffset.Date), "date")
+	{
+	}
+}
+
+class DateTimeOffsetTimeOfDayVisitor : DateConvertVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetTimeOfDayVisitor()
+		: base(nameof(DateTimeOffset.TimeOfDay), "time")
+	{
+	}
+}
+
+abstract class DatePartVisitor<T>(string name, string firstArg) : MethodVisitor<T>(name)
+{
+	private readonly string _firstArg = firstArg;
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.AddAction((d, sb) => d.AppendDatePartOpen(sb, _firstArg));
+
+		var me = (MemberExpression)expression;
+		translator.Visit(me.Expression);
+
+		q.AddAction((d, sb) => d.AppendDatePartClose(sb));
+	}
+}
+
+class DateTimeYearVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeYearVisitor()
+		: base(nameof(DateTime.Year), "year")
+	{
+	}
+}
+
+class DateTimeMonthVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeMonthVisitor()
+		: base(nameof(DateTime.Month), "month")
+	{
+	}
+}
+
+class DateTimeDayVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeDayVisitor()
+		: base(nameof(DateTime.Day), "day")
+	{
+	}
+}
+
+class DateTimeHourVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeHourVisitor()
+		: base(nameof(DateTime.Hour), "hour")
+	{
+	}
+}
+
+class DateTimeMinuteVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeMinuteVisitor()
+		: base(nameof(DateTime.Minute), "minute")
+	{
+	}
+}
+
+class DateTimeSecondVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeSecondVisitor()
+		: base(nameof(DateTime.Second), "second")
+	{
+	}
+}
+
+class DateTimeMillisecondVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeMillisecondVisitor()
+		: base(nameof(DateTime.Millisecond), "millisecond")
+	{
+	}
+}
+
+class DateTimeDayOfYearVisitor : DatePartVisitor<DateTime>
+{
+	public DateTimeDayOfYearVisitor()
+		: base(nameof(DateTime.DayOfYear), "dayofyear")
+	{
+	}
+}
+
+// DateOnly carries the date parts and TimeOnly the time parts, each on its own type.
+// Without a visitor the member is not recognised as a date part at all and the path
+// resolver folds it into a column name.
+
+class DateOnlyYearVisitor : DatePartVisitor<DateOnly>
+{
+	public DateOnlyYearVisitor()
+		: base(nameof(DateOnly.Year), "year")
+	{
+	}
+}
+
+class DateOnlyMonthVisitor : DatePartVisitor<DateOnly>
+{
+	public DateOnlyMonthVisitor()
+		: base(nameof(DateOnly.Month), "month")
+	{
+	}
+}
+
+class DateOnlyDayVisitor : DatePartVisitor<DateOnly>
+{
+	public DateOnlyDayVisitor()
+		: base(nameof(DateOnly.Day), "day")
+	{
+	}
+}
+
+class DateOnlyDayOfYearVisitor : DatePartVisitor<DateOnly>
+{
+	public DateOnlyDayOfYearVisitor()
+		: base(nameof(DateOnly.DayOfYear), "dayofyear")
+	{
+	}
+}
+
+class TimeOnlyHourVisitor : DatePartVisitor<TimeOnly>
+{
+	public TimeOnlyHourVisitor()
+		: base(nameof(TimeOnly.Hour), "hour")
+	{
+	}
+}
+
+class TimeOnlyMinuteVisitor : DatePartVisitor<TimeOnly>
+{
+	public TimeOnlyMinuteVisitor()
+		: base(nameof(TimeOnly.Minute), "minute")
+	{
+	}
+}
+
+class TimeOnlySecondVisitor : DatePartVisitor<TimeOnly>
+{
+	public TimeOnlySecondVisitor()
+		: base(nameof(TimeOnly.Second), "second")
+	{
+	}
+}
+
+class TimeOnlyMillisecondVisitor : DatePartVisitor<TimeOnly>
+{
+	public TimeOnlyMillisecondVisitor()
+		: base(nameof(TimeOnly.Millisecond), "millisecond")
+	{
+	}
+}
+
+class DateTimeOffsetYearVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetYearVisitor()
+		: base(nameof(DateTimeOffset.Year), "year")
+	{
+	}
+}
+
+class DateTimeOffsetMonthVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetMonthVisitor()
+		: base(nameof(DateTimeOffset.Month), "month")
+	{
+	}
+}
+
+class DateTimeOffsetDayVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetDayVisitor()
+		: base(nameof(DateTimeOffset.Day), "day")
+	{
+	}
+}
+
+class DateTimeOffsetHourVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetHourVisitor()
+		: base(nameof(DateTimeOffset.Hour), "hour")
+	{
+	}
+}
+
+class DateTimeOffsetMinuteVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetMinuteVisitor()
+		: base(nameof(DateTimeOffset.Minute), "minute")
+	{
+	}
+}
+
+class DateTimeOffsetSecondVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetSecondVisitor()
+		: base(nameof(DateTimeOffset.Second), "second")
+	{
+	}
+}
+
+class DateTimeOffsetMillisecondVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetMillisecondVisitor()
+		: base(nameof(DateTimeOffset.Millisecond), "millisecond")
+	{
+	}
+}
+
+class DateTimeOffsetDayOfYearVisitor : DatePartVisitor<DateTimeOffset>
+{
+	public DateTimeOffsetDayOfYearVisitor()
+		: base(nameof(DateTimeOffset.DayOfYear), "dayofyear")
+	{
+	}
+}
+
+class StringEmptyVisitor : MethodVisitor<string>
+{
+	public StringEmptyVisitor()
+		: base(nameof(string.Empty))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.AddAction((d, sb) => sb.Append($"{d.UnicodePrefix}''"));
+}
+
+class StringLengthVisitor : MethodVisitor<string>
+{
+	public StringLengthVisitor()
+		: base(nameof(string.Length))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.Len()
+			.OpenBracket();
+
+		var me = (MemberExpression)expression;
+		translator.Visit(me.Expression);
+
+		q.CloseBracket();
+	}
+}
+
+class StringUpperVisitor : MethodVisitor<string>
+{
+	public StringUpperVisitor()
+		: base(nameof(string.ToUpper))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.Upper()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.CloseBracket();
+	}
+}
+
+class StringLowerVisitor : MethodVisitor<string>
+{
+	public StringLowerVisitor()
+		: base(nameof(string.ToLower))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.Lower()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.CloseBracket();
+	}
+}
+
+class StringTrimVisitor : MethodVisitor<string>
+{
+	public StringTrimVisitor()
+		: base(nameof(string.Trim))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.AddAction((d, sb) => d.AppendTrimOpen(sb));
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.AddAction((d, sb) => d.AppendTrimClose(sb));
+	}
+}
+
+class StringLTrimVisitor : MethodVisitor<string>
+{
+	public StringLTrimVisitor()
+		: base(nameof(string.TrimStart))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.LTrim()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.CloseBracket();
+	}
+}
+
+class StringRTrimVisitor : MethodVisitor<string>
+{
+	public StringRTrimVisitor()
+		: base(nameof(string.TrimEnd))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.RTrim()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.CloseBracket();
+	}
+}
+
+class StringSubstringVisitor : MethodVisitor<string>
+{
+	public StringSubstringVisitor()
+		: base(nameof(string.Substring))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.SubString()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.Comma();
+
+		translator.Visit(mce.Arguments[0]);
+
+		q.Raw(" + 1");
+		q.Comma();
+
+		if (mce.Method.GetParameters().Length == 1)
+		{
+			q.Len().OpenBracket();
+			translator.Visit(mce.Object);
+			q.CloseBracket();
+		}
+		else
+			translator.Visit(mce.Arguments[1]);
+
+		q.CloseBracket();
+	}
+}
+
+abstract class EnumerableVisitor<T>(string name) : MethodVisitor(typeof(Enumerable).GetMember(name).OfType<MethodInfo>().Where(m => m.GetGenericArguments().Length == 1).Select(m => m.Make(typeof(T))))
+{
+}
+
+abstract class EnumerableFirstLastVisitor<T>(bool isLast, string name) : EnumerableVisitor<T>(name)
+{
+	private readonly bool _isLast = isLast;
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.SubString()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Comma();
+
+		if (_isLast)
+		{
+			q.Len().OpenBracket();
+			translator.Visit(mce.Arguments[0]);
+			q.CloseBracket();
+		}
+		else
+			q.Raw("1");
+
+		q.Comma();
+		q.Raw("1");
+
+		q.CloseBracket();
+	}
+}
+
+abstract class CharEnumerableVisitor(bool isLast, string name) : EnumerableFirstLastVisitor<char>(isLast, name)
+{
+}
+
+class StringFirstVisitor : CharEnumerableVisitor
+{
+	public StringFirstVisitor()
+		: base(false, nameof(Enumerable.First))
+	{
+	}
+}
+
+class StringFirstOrDefaultVisitor : CharEnumerableVisitor
+{
+	public StringFirstOrDefaultVisitor()
+		: base(false, nameof(Enumerable.FirstOrDefault))
+	{
+	}
+}
+
+class StringLastVisitor : CharEnumerableVisitor
+{
+	public StringLastVisitor()
+		: base(true, nameof(Enumerable.Last))
+	{
+	}
+}
+
+class StringLastOrDefaultVisitor : CharEnumerableVisitor
+{
+	public StringLastOrDefaultVisitor()
+		: base(true, nameof(Enumerable.LastOrDefault))
+	{
+	}
+}
+
+class StringConcatVisitor : MethodVisitor<string>
+{
+	public StringConcatVisitor()
+		: base(nameof(string.Concat))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		var idx = 0;
+
+		foreach (var arg in mce.Arguments)
+		{
+			translator.Visit(arg);
+
+			idx++;
+
+			if (idx < mce.Arguments.Count)
+				q.Concat();
+		}
+
+		q.CloseBracket();
+	}
+}
+
+class StringIsNullOrEmptyVisitor : MethodVisitor<string>
+{
+	public StringIsNullOrEmptyVisitor()
+		: base(nameof(string.IsNullOrEmpty))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		
+		translator.Visit(mce.Arguments[0]);
+		q.Is().Null();
+
+		q.Or();
+		translator.Visit(mce.Arguments[0]);
+		q.Like().AddAction((d, sb) => sb.Append($"{d.UnicodePrefix}''"));
+
+		q.CloseBracket();
+	}
+}
+
+class StringIsNullOrWhiteSpaceVisitor : MethodVisitor<string>
+{
+	public StringIsNullOrWhiteSpaceVisitor()
+		: base(nameof(string.IsNullOrWhiteSpace))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+
+		translator.Visit(mce.Arguments[0]);
+		q.Is().Null();
+
+		q.Or();
+		translator.Visit(mce.Arguments[0]);
+		q.Equal().AddAction((d, sb) => sb.Append($"{d.UnicodePrefix}''"));
+
+		q.CloseBracket();
+	}
+}
+
+class StringHelperIsEmptyVisitor : MethodVisitor
+{
+	public StringHelperIsEmptyVisitor()
+		: base(typeof(StringHelper).GetMember(nameof(StringHelper.IsEmpty))
+			.OfType<MethodInfo>()
+			.Where(m => m.GetParameters().Length == 1))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+
+		translator.Visit(mce.Arguments[0]);
+		q.Is().Null();
+
+		q.Or();
+		translator.Visit(mce.Arguments[0]);
+		q.Like().AddAction((d, sb) => sb.Append($"{d.UnicodePrefix}''"));
+
+		q.CloseBracket();
+	}
+}
+
+class StringHelperIsEmptyOrWhiteSpaceVisitor : MethodVisitor
+{
+	public StringHelperIsEmptyOrWhiteSpaceVisitor()
+		: base(typeof(StringHelper).GetMember(nameof(StringHelper.IsEmptyOrWhiteSpace))
+			.OfType<MethodInfo>()
+			.Where(m => m.GetParameters().Length == 1))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+
+		translator.Visit(mce.Arguments[0]);
+		q.Is().Null();
+
+		q.Or();
+		translator.Visit(mce.Arguments[0]);
+		q.Equal().AddAction((d, sb) => sb.Append($"{d.UnicodePrefix}''"));
+
+		q.CloseBracket();
+	}
+}
+
+class StringIndexOfVisitor : MethodVisitor<string>
+{
+	public StringIndexOfVisitor()
+		: base(nameof(string.IndexOf))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q
+			.OpenBracket()
+			.CharIndex()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+
+		foreach (var arg in mce.Arguments)
+		{
+			translator.Visit(arg);
+			q.Comma();
+		}
+
+		translator.Visit(mce.Object);
+
+		q
+			.CloseBracket()
+			.Raw(" - 1")
+			.CloseBracket();
+	}
+}
+
+class StringReplaceVisitor : MethodVisitor<string>
+{
+	public StringReplaceVisitor()
+		: base(nameof(string.Replace))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q
+			.Replace()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		foreach (var arg in mce.Arguments)
+		{
+			q.Comma();
+			translator.Visit(arg);
+		}
+
+		q.CloseBracket();
+	}
+}
+
+class StringEqualsVisitor : MethodVisitor<string>
+{
+	public StringEqualsVisitor()
+		: base(nameof(string.Equals))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.Equal();
+
+		translator.Visit(mce.Arguments[0]);
+
+		q.CloseBracket();
+	}
+}
+
+class StringCompareToVisitor : MethodVisitor<string>
+{
+	public StringCompareToVisitor()
+		: base(nameof(string.CompareTo))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		q.Raw("case when ");
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.Equal();
+
+		translator.Visit(mce.Arguments[0]);
+
+		q.Raw(" then 0 else 1 end");
+
+		q.CloseBracket();
+	}
+}
+
+class StringCompareVisitor : MethodVisitor<string>
+{
+	public StringCompareVisitor()
+		: base(nameof(string.Compare))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		q.Raw("case when ");
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Equal();
+
+		translator.Visit(mce.Arguments[1]);
+
+		q.Raw(" then 0 else 1 end");
+
+		q.CloseBracket();
+	}
+}
+
+/// <summary>
+/// Emits a LIKE predicate anchored by wildcards around the needle. The needle is
+/// text the caller is searching for, not a pattern, so its metacharacters are
+/// neutralised and the predicate declares <see cref="SqlLike.EscapeChar"/>. The
+/// needle is only known once the statement runs — it is a bound parameter or
+/// another column — which is why the escaping is left to the database.
+/// </summary>
+/// <param name="name">Method name. Only the single-string overload is registered: the
+/// StringComparison overloads cannot be honoured by LIKE, and translating them as if
+/// the comparison were absent would silently answer a different question.</param>
+/// <param name="wildcardBefore">Match any text before the needle.</param>
+/// <param name="wildcardAfter">Match any text after the needle.</param>
+abstract class StringLikeVisitor(string name, bool wildcardBefore, bool wildcardAfter)
+	: MethodVisitor(typeof(string).GetMember(name)
+		.OfType<MethodInfo>()
+		.Where(m => m.GetParameters() is [{ ParameterType: var p }] && p == typeof(string)))
+{
+	private readonly bool _wildcardBefore = wildcardBefore;
+	private readonly bool _wildcardAfter = wildcardAfter;
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.LikeLiteral(() => translator.Visit(mce.Arguments[0]), _wildcardBefore, _wildcardAfter);
+
+		q.CloseBracket();
+	}
+}
+
+class StringContainsVisitor : StringLikeVisitor
+{
+	public StringContainsVisitor()
+		: base(nameof(string.Contains), wildcardBefore: true, wildcardAfter: true)
+	{
+	}
+}
+
+class StringStartsWithVisitor : StringLikeVisitor
+{
+	public StringStartsWithVisitor()
+		: base(nameof(string.StartsWith), wildcardBefore: false, wildcardAfter: true)
+	{
+	}
+}
+
+class StringEndsWithVisitor : StringLikeVisitor
+{
+	public StringEndsWithVisitor()
+		: base(nameof(string.EndsWith), wildcardBefore: true, wildcardAfter: false)
+	{
+	}
+}
+
+class SequenceEqualVisitor<T> : MethodVisitor
+{
+	private static IEnumerable<MemberInfo> GetMembers(string name)
+	{
+		var found = typeof(MemoryExtensions).GetMember(name).Concat(typeof(Queryable).GetMember(name)).Concat(typeof(Enumerable).GetMember(name)).OfType<MethodInfo>().Where(m => m.GetGenericArguments().Length == 1);
+
+		if (!typeof(T).GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEquatable<>)))
+		{
+			found = found.Where(m => m.GetParameters().Length == 3);
+		}
+
+		return found.Select(m => m.Make(typeof(T)));
+	}
+
+	public SequenceEqualVisitor()
+		: base(GetMembers(nameof(MemoryExtensions.SequenceEqual)))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+
+		translator.Visit(mce.Arguments[0].TryHandleImplicit());
+		q.Equal();
+		translator.Visit(mce.Arguments[1].TryHandleImplicit());
+
+		q.CloseBracket();
+	}
+}
+
+abstract class ByteEnumerableVisitor(bool isLast, string name) : EnumerableFirstLastVisitor<byte>(isLast, name)
+{
+}
+
+class ByteArrayFirstVisitor : ByteEnumerableVisitor
+{
+	public ByteArrayFirstVisitor()
+		: base(false, nameof(Enumerable.First))
+	{
+	}
+}
+
+class ByteArrayFirstOrDefaultVisitor : ByteEnumerableVisitor
+{
+	public ByteArrayFirstOrDefaultVisitor()
+		: base(false, nameof(Enumerable.FirstOrDefault))
+	{
+	}
+}
+
+class ByteArrayLastVisitor : ByteEnumerableVisitor
+{
+	public ByteArrayLastVisitor()
+		: base(true, nameof(Enumerable.Last))
+	{
+	}
+}
+
+class ByteArrayLastOrDefaultVisitor : ByteEnumerableVisitor
+{
+	public ByteArrayLastOrDefaultVisitor()
+		: base(true, nameof(Enumerable.LastOrDefault))
+	{
+	}
+}
+
+class ByteArrayContainsVisitor : EnumerableVisitor<byte>
+{
+	public ByteArrayContainsVisitor()
+		: base(nameof(Enumerable.Contains))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q
+			.OpenBracket()
+			.CharIndex()
+			.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+
+		translator.Visit(mce.Arguments[1]);
+		q.Comma();
+		translator.Visit(mce.Arguments[0]);
+
+		q
+			.CloseBracket()
+			.Raw(" > 0")
+			.CloseBracket();
+	}
+}
+
+class GuidNewGuidVisitor : MethodVisitor<Guid>
+{
+	public GuidNewGuidVisitor()
+		: base(nameof(Guid.NewGuid))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.NewId();
+}
+
+class RandVisitor : MethodVisitor<Random>
+{
+	public RandVisitor()
+		: base(nameof(Random.NextDouble))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Context.Curr.Rand();
+}
+
+class EnumHasFlagVisitor : MethodVisitor<Enum>
+{
+	public EnumHasFlagVisitor()
+		: base(nameof(Enum.HasFlag))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Object);
+
+		q.BitwiseAnd();
+
+		translator.Visit(mce.Arguments[0]);
+
+		q.CloseBracket();
+
+		q.Equal();
+
+		translator.Visit(mce.Arguments[0]);
+
+		q.CloseBracket();
+	}
+}
+
+abstract class SqlFunctionVisitor(string name) : MethodVisitor(typeof(SqlFunctions).GetMember(name))
+{
+}
+
+class LikeVisitor : SqlFunctionVisitor
+{
+	public LikeVisitor()
+		: base(nameof(SqlFunctions.Like))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Like();
+
+		translator.Visit(mce.Arguments[1]);
+
+		q.CloseBracket();
+	}
+}
+
+class LikeEscapedVisitor : SqlFunctionVisitor
+{
+	public LikeEscapedVisitor()
+		: base(nameof(SqlFunctions.LikeEscaped))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Like();
+
+		translator.Visit(mce.Arguments[1]);
+
+		q.Escape(SqlLike.EscapeChar);
+
+		q.CloseBracket();
+	}
+}
+
+class IfNullVisitor : SqlFunctionVisitor
+{
+	public IfNullVisitor()
+		: base(nameof(SqlFunctions.IfNull))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.IsNull();
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Comma();
+
+		translator.Visit(mce.Arguments[1]);
+
+		q.CloseBracket();
+	}
+}
+
+class IsNullVisitor<T> : MethodVisitor
+{
+	public IsNullVisitor()
+		: base(typeof(NullableHelper).GetMember(nameof(NullableHelper.IsNull)).OfType<MethodInfo>().Where(m => m.GetGenericArguments().Length == 1).Select(m => m.Make(typeof(T))))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Is().Null().CloseBracket();
+	}
+}
+
+class IsNullFuncVisitor<T> : MethodVisitor
+{
+	public IsNullFuncVisitor()
+		: base(typeof(SqlFunctions).GetMember(nameof(SqlFunctions.IsNull)).OfType<MethodInfo>().Select(m => m.Make(typeof(T))))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		q.IsNull().OpenBracket();
+
+		var mce = (MethodCallExpression)expression;
+		translator.Visit(mce.Arguments[0]);
+
+		q.Comma();
+
+		translator.Visit(mce.Arguments[1]);
+
+		q.CloseBracket();
+	}
+}
+
+class MathVisitor : MethodVisitor
+{
+	public MathVisitor()
+		: base(typeof(Math).GetMembers())
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+
+		if (mce.Method.Name is nameof(Math.Max) or nameof(Math.Min))
+		{
+			VisitMaxMin(translator, mce);
+			return;
+		}
+
+		if (mce.Method.Name == nameof(Math.Truncate))
+		{
+			VisitRound(translator, mce.Arguments[0], null, MidpointRounding.ToZero);
+			return;
+		}
+
+		if (mce.Method.Name == nameof(Math.Round) && mce.Arguments[^1].Type == typeof(MidpointRounding))
+		{
+			VisitRound(translator, mce.Arguments[0], mce.Arguments.Count == 3 ? mce.Arguments[1] : null, GetRounding(mce.Arguments[^1]));
+			return;
+		}
+
+		var q = translator.Context.Curr;
+
+		q.Raw(mce.Method.Name).OpenBracket();
+
+		var idx = 0;
+
+		foreach (var arg in mce.Arguments)
+		{
+			translator.Visit(arg);
+
+			idx++;
+
+			if (idx < mce.Arguments.Count)
+				q.Comma();
+		}
+
+		if (mce.Method.Name == nameof(Math.Round) && mce.Method.GetParameters().Length == 1)
+		{
+			q.Comma().Raw("0");
+		}
+
+		q.CloseBracket();
+	}
+
+	private static MidpointRounding GetRounding(Expression mode)
+	{
+		if (mode is ConstantExpression constant)
+			return (MidpointRounding)constant.Value;
+
+		if (mode is MemberExpression member && ClosureMaterializer.TryEvaluate(member, out var value))
+			return (MidpointRounding)value;
+
+		throw new NotSupportedException("The rounding mode must be known when the query is translated.");
+	}
+
+	private static void VisitRound(ExpressionQueryTranslator translator, Expression value, Expression digits, MidpointRounding mode)
+	{
+		var valueQuery = translator.Capture(() => translator.VisitOperand(value));
+
+		// Zero digits is a whole number, which FLOOR and CEILING can round to.
+		var digitsQuery = digits is null or ConstantExpression { Value: 0 }
+			? null
+			: translator.Capture(() => translator.VisitOperand(digits));
+
+		translator.Context.Curr.AddAction((dialect, builder) =>
+			dialect.AppendRound(builder, valueQuery.Render(dialect), digitsQuery?.Render(dialect), mode));
+	}
+
+	private static void VisitMaxMin(ExpressionQueryTranslator translator, MethodCallExpression mce)
+	{
+		var isMax = mce.Method.Name == nameof(Math.Max);
+
+		// Picking the larger value is a comparison, so decimals stored as text are compared as numbers.
+		var isDecimal = mce.Type == typeof(decimal);
+
+		Query VisitArgument(Expression argument)
+			=> translator.Capture(() =>
+			{
+				if (isDecimal)
+					translator.VisitDecimalComparisonOperand(argument);
+				else
+					translator.VisitOperand(argument);
+			});
+
+		var left = VisitArgument(mce.Arguments[0]);
+		var right = VisitArgument(mce.Arguments[1]);
+
+		translator.Context.Curr.AddAction((dialect, builder) =>
+		{
+			if (isMax)
+				dialect.AppendGreatest(builder, left.Render(dialect), right.Render(dialect));
+			else
+				dialect.AppendLeast(builder, left.Render(dialect), right.Render(dialect));
+		});
+	}
+}
+
+class TimeSpanPartVisitor : MethodVisitor
+{
+	public TimeSpanPartVisitor()
+		: base(typeof(TimeSpan).GetProperties())
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		var me = (MemberExpression)expression;
+
+		var part = GetDatePart(me.Member.Name);
+
+		// Capture the two date operands into temporary queries, then defer to the
+		// dialect at render time — DATEDIFF has no portable syntax (SqlServer uses
+		// DATEDIFF, PostgreSQL EXTRACT(EPOCH ...), SQLite julianday()). For a
+		// (left - right) subtraction, DATEDIFF(part, start, end) == end - start, so
+		// start = right and end = left.
+		var startQuery = new Query();
+		var endQuery = new Query();
+
+		if (me.Expression is BinaryExpression be)
+		{
+			translator.Context.Curr = startQuery;
+			translator.Visit(be.Right);
+
+			translator.Context.Curr = endQuery;
+			translator.Visit(be.Left);
+		}
+		else
+		{
+			translator.Context.Curr = endQuery;
+			translator.Visit(me.Expression);
+		}
+
+		translator.Context.Curr = q;
+		q.AddAction((d, sb) => d.AppendDateDiff(sb, part, startQuery.Render(d), endQuery.Render(d)));
+	}
+
+	private static string GetDatePart(string member)
+	{
+		return member switch
+		{
+			nameof(TimeHelper.TotalYears) => "year",
+			nameof(TimeHelper.TotalMonths) => "month",
+			nameof(TimeHelper.TotalWeeks) => "week",
+			nameof(TimeSpan.TotalDays) => "day",
+			nameof(TimeSpan.TotalHours) => "hour",
+			nameof(TimeSpan.TotalMinutes) => "minute",
+			nameof(TimeSpan.TotalSeconds) => "second",
+			nameof(TimeSpan.TotalMilliseconds) => "millisecond",
+			_ => throw new ArgumentOutOfRangeException(nameof(member))
+		};
+	}
+}
+
+abstract class EnumerableAndQueryableVisitor(string name) : MethodVisitor(typeof(Enumerable).GetMember(name).Concat(typeof(Queryable).GetMember(name)).OfType<MethodInfo>().Where(m => !m.IsGenericMethodDefinition))
+{
+}
+
+abstract class EnumerableAndQueryableVisitor<T>(string name) : MethodVisitor(typeof(Enumerable).GetMember(name).Concat(typeof(Queryable).GetMember(name)).OfType<MethodInfo>().Where(m => m.GetGenericArguments().Length == 1).Select(m => m.Make(typeof(T))))
+{
+	protected Type ItemType => GetType().GetGenericArguments()[0];
+}
+
+// Selector overloads like Max<TSource,TResult>(IEnumerable<TSource>,
+// Func<TSource,TResult>) have TWO generic args, so the single-arg base
+// above never registers them and `g.Max(x => x.Field)` over a grouping
+// fell through to "method not supported". Registering the open generic
+// definition (keying is by GetGenericMethodDefinition) makes the dispatch
+// find the visitor; the closed type args here are irrelevant.
+abstract class EnumerableAndQueryable2Visitor<T>(string name) : MethodVisitor(typeof(Enumerable).GetMember(name).Concat(typeof(Queryable).GetMember(name)).OfType<MethodInfo>().Where(m => m.GetGenericArguments().Length == 2).Select(m => m.Make(typeof(T), typeof(T))))
+{
+}
+
+class CountVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	public CountVisitor()
+		: base(nameof(Queryable.Count))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+
+		var mce = (MethodCallExpression)expression;
+
+		if (mce.Arguments.Count > 0 && mce.Arguments[0].NodeType != ExpressionType.Parameter)
+		{
+			translator.Visit(mce.Arguments[0]);
+		}
+		else
+			q.Count().OpenBracket().Star().CloseBracket();
+	}
+}
+
+/// <param name="func">Writes the aggregate's name.</param>
+/// <param name="comparesValues">The aggregate picks a value by comparing (MAX, MIN), so decimals stored as text are cast to numbers first.</param>
+abstract class BaseGroupFuncVisitor(Func<Query, Query> func, bool comparesValues)
+{
+	private readonly Func<Query, Query> _func = func;
+	private readonly bool _comparesValues = comparesValues;
+
+	public void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+		var mce = (MethodCallExpression)expression;
+
+		var isInline = mce.Arguments.Count == 2;
+		var castDecimal = _comparesValues && mce.Type.IsDecimal();
+
+		if (isInline)
+		{
+			_func(q).OpenBracket();
+
+			if (castDecimal)
+				q.OpenDecimalComparisonCast();
+
+			translator.Visit(mce.Arguments[0]);
+			translator.Visit(mce.Arguments[1]);
+
+			if (castDecimal)
+				q.CloseDecimalComparisonCast();
+
+			q.CloseBracket();
+			return;
+		}
+
+		translator.VisitWrapped((b, q) =>
+		{
+			// The aggregate must wrap only the projected column of the sub-query. Columns
+			// referenced in the sub-query's WHERE predicate must stay un-aggregated: wrapping
+			// e.g. a bit predicate column in MAX produces invalid SQL ("Operand data type bit
+			// is invalid for max operator" on SQL Server). Skip the wrap while visiting WHERE.
+			if (translator.Context.IsWhere)
+				return;
+
+			if (b)
+			{
+				_func(q).OpenBracket();
+
+				if (castDecimal)
+					q.OpenDecimalComparisonCast();
+			}
+			else
+			{
+				if (castDecimal)
+					q.CloseDecimalComparisonCast();
+
+				q.CloseBracket();
+			}
+		}, () => translator.Visit(mce.Arguments[0]));
+	}
+}
+
+class MaxVisitorVisitor : BaseGroupFuncVisitor
+{
+	public MaxVisitorVisitor()
+		: base(q => q.Max(), true)
+	{
+	}
+}
+
+class MaxVisitor : EnumerableAndQueryableVisitor
+{
+	private readonly MaxVisitorVisitor _visitor = new();
+
+	public MaxVisitor()
+		: base(nameof(Enumerable.Max))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class MaxVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	private readonly MaxVisitorVisitor _visitor = new();
+
+	public MaxVisitor()
+		: base(nameof(Queryable.Max))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class MaxSelectorVisitor<T> : EnumerableAndQueryable2Visitor<T>
+{
+	private readonly MaxVisitorVisitor _visitor = new();
+
+	public MaxSelectorVisitor()
+		: base(nameof(Enumerable.Max))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class MinVisitorVisitor : BaseGroupFuncVisitor
+{
+	public MinVisitorVisitor()
+		: base(q => q.Min(), true)
+	{
+	}
+}
+
+class MinSelectorVisitor<T> : EnumerableAndQueryable2Visitor<T>
+{
+	private readonly MinVisitorVisitor _visitor = new();
+
+	public MinSelectorVisitor()
+		: base(nameof(Enumerable.Min))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class MinVisitor : EnumerableAndQueryableVisitor
+{
+	private readonly MinVisitorVisitor _visitor = new();
+
+	public MinVisitor()
+		: base(nameof(Enumerable.Min))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class MinVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	private readonly MinVisitorVisitor _visitor = new();
+
+	public MinVisitor()
+		: base(nameof(Queryable.Min))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class AvgVisitorVisitor : BaseGroupFuncVisitor
+{
+	public AvgVisitorVisitor()
+		: base(q => q.Avg(), false)
+	{
+	}
+}
+
+class AvgVisitor : EnumerableAndQueryableVisitor
+{
+	private readonly AvgVisitorVisitor _visitor = new();
+
+	public AvgVisitor()
+		: base(nameof(Enumerable.Average))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class AvgVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	private readonly AvgVisitorVisitor _visitor = new();
+
+	public AvgVisitor()
+		: base(nameof(Enumerable.Average))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class SumVisitorVisitor : BaseGroupFuncVisitor
+{
+	public SumVisitorVisitor()
+		: base(q => q.Sum(), false)
+	{
+	}
+}
+
+class SumVisitor : EnumerableAndQueryableVisitor
+{
+	private readonly SumVisitorVisitor _visitor = new();
+
+	public SumVisitor()
+		: base(nameof(Enumerable.Sum))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class SumVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	private readonly SumVisitorVisitor _visitor = new();
+
+	public SumVisitor()
+		: base(nameof(Enumerable.Sum))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> _visitor.Visit(translator, expression);
+}
+
+class NullableValueVisitor<T> : MethodVisitor
+{
+	public NullableValueVisitor()
+		: base(typeof(Nullable<>).GetMember(nameof(Nullable<int>.Value)))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+		=> translator.Visit(((MemberExpression)expression).Expression);
+}
+
+class DecimalCastVisitor : MethodVisitor
+{
+	// Digits of the largest value of each integer type decimal converts from implicitly.
+	private static readonly Dictionary<Type, int> _precisions = new()
+	{
+		[typeof(byte)] = 3,
+		[typeof(sbyte)] = 3,
+		[typeof(short)] = 5,
+		[typeof(ushort)] = 5,
+		[typeof(char)] = 5,
+		[typeof(int)] = 10,
+		[typeof(uint)] = 10,
+		[typeof(long)] = 19,
+		[typeof(ulong)] = 20,
+	};
+
+	public DecimalCastVisitor()
+		: base(typeof(decimal).GetMethods(BindingFlags.Public | BindingFlags.Static).Where(mi => mi.Name == "op_Implicit"))
+	{
+	}
+
+	/// <summary>
+	/// True when <paramref name="expression"/> is an integer converted to <see cref="decimal"/>.
+	/// </summary>
+	public static bool IsConversion(Expression expression, out Expression operand)
+	{
+		if (expression is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked, Method: { } method } convert &&
+			method.TryGetVisitor(out var visitor) && visitor is DecimalCastVisitor)
+		{
+			operand = convert.Operand;
+			return true;
+		}
+
+		operand = null;
+		return false;
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var precision = _precisions[expression.Type.GetUnderlyingType() ?? expression.Type];
+
+		void AppendType(Query query)
+			=> query.AddAction((dialect, builder) => builder.Append(dialect.GetIntegerToDecimalCastSqlType(precision)));
+
+		// A pending wrapper is an aggregate written around the column where it is emitted (a sub-query's
+		// MAX/SUM/AVG), so the conversion goes there too and stays inside the aggregate. Anywhere else the
+		// converted value is cast as a whole: an integer quotient is converted, not its operands.
+		if (translator.WrapColumn.Count > 0)
+		{
+			translator.VisitWrapped((b, q) =>
+			{
+				if (b)
+					q.Cast().OpenBracket();
+				else
+				{
+					q.As();
+					AppendType(q);
+					q.CloseBracket();
+				}
+			}, () => translator.Visit(expression));
+		}
+		else
+		{
+			translator.Context.Curr.Cast().OpenBracket();
+			translator.VisitOperand(expression);
+			AppendType(translator.Context.Curr.As());
+			translator.Context.Curr.CloseBracket();
+		}
+	}
+}
+
+class ContainsVisitor<T> : MethodVisitor
+{
+	private static IEnumerable<MemberInfo> GetMembers(string name)
+	{
+		var found = typeof(MemoryExtensions).GetMember(name).Concat(typeof(Queryable).GetMember(name)).OfType<MethodInfo>().Where(m => m.GetGenericArguments().Length == 1);
+
+		if (!typeof(T).GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEquatable<>)))
+		{
+			found = found.Where(m => m.GetParameters().Length == 3);
+		}
+
+		if (typeof(T) == typeof(string))
+		{
+			found = found.Where(m => m.GetParameters()[0].ParameterType.GetGenericArguments()[0] == typeof(char));
+		}
+		else
+		{
+			found = found.Where(m => m.GetParameters()[0].ParameterType.GetGenericArguments()[0] != typeof(char));
+		}
+
+		return found.Select(m => m.Make(typeof(T)));
+	}
+
+	public ContainsVisitor()
+		: base(GetMembers(nameof(MemoryExtensions.Contains)))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var q = translator.Context.Curr;
+		var mce = (MethodCallExpression)expression;
+
+		translator.Visit(mce.Arguments[1]);
+
+		q.In();
+
+		q.OpenBracket();
+
+		var ctx = translator.Context;
+
+		var firstArg = mce.Arguments[0].TryHandleImplicit();
+
+		var isSubQuery = firstArg.NodeType == ExpressionType.Call;
+
+		if (isSubQuery)
+		{
+			// Walk to the deepest source so TableAlias can be set BEFORE
+			// `Visit(firstArg)` — otherwise inner-scope references like
+			// `pgp.X` inside the sub-query body resolve through the
+			// outer's alias and emit `[outer].[X]` instead of `[pgp].[X]`.
+			var deepest = (MethodCallExpression)firstArg;
+			while (deepest.Arguments.Count > 0 && deepest.Arguments[0] is MethodCallExpression deeper)
+				deepest = deeper;
+
+			string subAlias = null;
+			if (deepest.Arguments.Count > 1 && deepest.Arguments[1].StripQuotes() is LambdaExpression lambda && lambda.Parameters.Count > 0)
+				subAlias = lambda.Parameters[0].Name;
+
+			translator.Context = new()
+			{
+				Curr = new(),
+				ParamCountOffset = ctx.Parameters.Count + ctx.ParamCountOffset,
+				TableAlias = subAlias,
+			};
+
+			// Inherit outer alias bindings so a correlated reference like
+			// `outerParam.Field` inside the sub-query keeps the outer FROM
+			// alias instead of being remapped to the sub-query's alias.
+			foreach (var kv in ctx.Aliases)
+				translator.Context.Aliases[kv.Key] = kv.Value;
+
+			foreach (var jp in ctx.JoinParts)
+				translator.Context.JoinParts.Add(jp);
+
+			foreach (var preName in ctx.PreknownJoinAliases)
+				translator.Context.PreknownJoinAliases.Add(preName);
+		}
+
+		translator.Visit(firstArg);
+
+		if (isSubQuery)
+		{
+			while (firstArg is MethodCallExpression mce1)
+			{
+				mce = mce1;
+				firstArg = mce.Arguments[0];
+			}
+
+			// Resolve the sub-query's source entity from the deepest source
+			// expression (an IQueryable<Entity>), not the innermost method's
+			// return type: a scalar projection like `select ic.Item.Id` makes
+			// that return IQueryable<long>, so the FROM would degenerate to the
+			// CLR type name (`[Int64]`) instead of the real table.
+			var type = firstArg.Type.IsGenericType
+				? firstArg.Type.GetGenericArguments()[0]
+				: mce.Method.ReturnType.GenericTypeArguments[0];
+
+			translator.Context.Build(SchemaRegistry.Get(type)).CopyTo(q);
+
+			ctx.AddParamsFromSubquery(translator.Context.Parameters, false);
+
+			translator.Context = ctx;
+		}
+
+		q.CloseBracket();
+	}
+}
+
+class ConcatVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	public ConcatVisitor()
+		: base(nameof(Queryable.Concat))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+		var ctx = translator.Context;
+		var schema = SchemaRegistry.Get(ItemType);
+
+		if (ctx.Curr is null)
+			ctx.Curr = ctx.UnionPart;
+
+		var idx = 0;
+
+		foreach (var arg in mce.Arguments)
+		{
+			translator.Context = new() { ParamCountOffset = ctx.Parameters.Count + ctx.ParamCountOffset };
+			translator.Visit(arg);
+
+			translator.Context.Build(schema).CopyTo(ctx.Curr);
+
+			if (++idx < mce.Arguments.Count)
+				ctx.Curr.NewLine().UnionAll().NewLine();
+
+			ctx.AddParamsFromSubquery(translator.Context.Parameters, false);
+		}
+
+		translator.Context = ctx;
+	}
+}
+
+class UnionVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	public UnionVisitor()
+		: base(nameof(Queryable.Union))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+		var ctx = translator.Context;
+		var schema = SchemaRegistry.Get(ItemType);
+
+		if (ctx.Curr is null)
+			ctx.Curr = ctx.UnionPart;
+
+		var idx = 0;
+
+		foreach (var arg in mce.Arguments)
+		{
+			translator.Context = new() { ParamCountOffset = ctx.Parameters.Count + ctx.ParamCountOffset };
+			translator.Visit(arg);
+
+			translator.Context.Build(schema).CopyTo(ctx.Curr);
+
+			if (++idx < mce.Arguments.Count)
+				ctx.Curr.NewLine().Union().NewLine();
+
+			ctx.AddParamsFromSubquery(translator.Context.Parameters, false);
+		}
+
+		translator.Context = ctx;
+	}
+}
+
+class FirstOrDefaultVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	public FirstOrDefaultVisitor()
+		: base(nameof(Queryable.FirstOrDefault))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+		translator.Context.Take = 1;
+		translator.Visit(mce.Arguments[0]);
+	}
+}
+
+class AnyVisitor<T> : EnumerableAndQueryableVisitor<T>
+{
+	public AnyVisitor()
+		: base(nameof(Queryable.Any))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+		var ctx = translator.Context;
+
+		// Normalise the `Any(predicate)` overload to `Where(predicate).Any()`: the
+		// two are semantically identical, and folding the predicate into a Where lets
+		// the existing (well-tested) Where machinery emit it as part of the
+		// sub-query's WHERE. Without this the predicate lambda was silently dropped.
+		var firstArg = mce.Arguments[0].TryHandleImplicit();
+
+		if (mce.Arguments.Count > 1)
+		{
+			var elementType = mce.Method.GetGenericArguments()[0];
+
+			var whereMethod = typeof(Queryable).GetMethods()
+				.First(m => m.Name == nameof(Queryable.Where)
+					&& m.GetParameters().Length == 2
+					// Func<T,bool>, not the indexed Func<T,int,bool> overload.
+					&& m.GetParameters()[1].ParameterType.GetGenericArguments()[0].GetGenericArguments().Length == 2)
+				.MakeGenericMethod(elementType);
+
+			firstArg = Expression.Call(whereMethod, firstArg, mce.Arguments[1]);
+		}
+
+		// In a PREDICATE position (a WHERE root, an operand of `&&`/`||`, a `!`
+		// operand, or a conditional test) a correlated `.Any()` must render as a
+		// bare `exists(<sub-query>)` with the sub-query's own alias. The scalar
+		// `cast(case when exists(...) as bit)` form (Context.Exists, built by the
+		// query builder) is correct only when Any's result is a VALUE — a projection
+		// member or a comparison operand — which reaches this visitor already inside
+		// its own sub-context (VisitNew / VisitOperand wrap it via
+		// ProcessInitExpression). In a value position the sub-context is set up for
+		// us, so the old Exists path is kept.
+		if (ctx.PredicatePosition)
+		{
+			var q = ctx.Curr;
+
+			q.Exists().OpenBracket();
+
+			// Walk to the deepest source so the sub-query alias is set BEFORE the
+			// body is visited (mirrors ContainsVisitor) — otherwise inner references
+			// resolve through the outer alias. A bare (non-chain) source — e.g.
+			// `Query<T>()` — has no lambda, so the alias falls back to the default.
+			string subAlias = null;
+			if (firstArg is MethodCallExpression chain)
+			{
+				var deepest = chain;
+				while (deepest.Arguments.Count > 0 && deepest.Arguments[0] is MethodCallExpression deeper)
+					deepest = deeper;
+
+				if (deepest.Arguments.Count > 1 && deepest.Arguments[1].StripQuotes() is LambdaExpression lambda && lambda.Parameters.Count > 0)
+					subAlias = lambda.Parameters[0].Name;
+			}
+
+			translator.Context = new()
+			{
+				Curr = new(),
+				ParamCountOffset = ctx.Parameters.Count + ctx.ParamCountOffset,
+				TableAlias = subAlias,
+			};
+
+			foreach (var kv in ctx.Aliases)
+				translator.Context.Aliases[kv.Key] = kv.Value;
+
+			foreach (var jp in ctx.JoinParts)
+				translator.Context.JoinParts.Add(jp);
+
+			foreach (var preName in ctx.PreknownJoinAliases)
+				translator.Context.PreknownJoinAliases.Add(preName);
+
+			// A method-chain source (Where/Select) must be visited to build its
+			// FROM/WHERE; a bare queryable source contributes only its table, which
+			// Build emits from the resolved schema, so nothing needs visiting.
+			if (firstArg is MethodCallExpression)
+				translator.Visit(firstArg);
+
+			var deepestSource = firstArg;
+			while (deepestSource is MethodCallExpression m)
+				deepestSource = m.Arguments[0];
+
+			var type = deepestSource.Type.IsGenericType
+				? deepestSource.Type.GetGenericArguments()[0]
+				: firstArg.Type.GetGenericArguments()[0];
+
+			translator.Context.Build(SchemaRegistry.Get(type)).CopyTo(q);
+
+			ctx.AddParamsFromSubquery(translator.Context.Parameters, false);
+
+			translator.Context = ctx;
+
+			q.CloseBracket();
+
+			return;
+		}
+
+		ctx.Exists = true;
+		translator.Visit(firstArg);
+	}
+}
+
+class StringFormatVisitor : MethodVisitor<string>
+{
+	public StringFormatVisitor()
+		: base(nameof(string.Format))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+		var q = translator.Context.Curr;
+
+		q.FormatMessage();
+		q.OpenBracket();
+
+		var str = mce.Arguments[0].GetValue<string>();
+
+		for (int i = 0; i < mce.Arguments.Count - 1; i++)
+			str = str.Replace($"{{{i}}}", "%s");
+
+		q.Raw($"'{str}'");
+
+		foreach (var arg in mce.Arguments.Skip(1))
+		{
+			q.Comma();
+			translator.Visit(arg);
+		}
+
+		q.CloseBracket();
+	}
+}
+
+class EqualsVisitor : MethodVisitor<object>
+{
+	public EqualsVisitor()
+		: base(nameof(object.Equals))
+	{
+	}
+
+	public override void Visit(ExpressionQueryTranslator translator, Expression expression)
+	{
+		var mce = (MethodCallExpression)expression;
+		var q = translator.Context.Curr;
+
+		q.OpenBracket();
+
+		translator.Visit(mce.Object);
+		q.Equal();
+
+		translator.Visit(mce.Arguments[0]);
+
+		q.CloseBracket();
+	}
+}

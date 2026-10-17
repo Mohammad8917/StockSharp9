@@ -1,0 +1,21 @@
+# Impuls
+
+Der **Impulsindikator** misst das Ausmaß der Preisänderung eines Finanzinstruments über einen bestimmten Zeitraum. Er zeigt überkaufte und überverkaufte Momente an, in denen die Kurve Höchst- oder Tiefstwerte erreicht. Das Hinzufügen eines geglätteten gleitenden Durchschnitts zum Indikator verbessert die Interpretation von Trendänderungen.
+
+Um den Indikator zu verwenden, sollte die Klasse [Momentum](xref:StockSharp.Algo.Indicators.Momentum) verwendet werden.
+##### Berechnung
+
+Der Impuls ist definiert als das Verhältnis des heutigen Preises zum Preis vor n Perioden:
+
+MOMENTUM = CLOSE(i) / CLOSE(i - n) * 100
+
+Dabei gilt:
+CLOSE(i) – der Schlusskurs des aktuellen Balkens;
+CLOSE(i - n) – der Schlusskurs von n Balken zurück.
+
+
+![Impuls Diagramm](../../../../images/indicatormomentum.png)
+
+## Siehe auch
+
+[Geldflussindex](money_flow_index.md)

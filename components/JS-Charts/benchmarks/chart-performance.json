@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "scenario": {
+    "bars": 100000,
+    "baseSeries": 5,
+    "panes": 3,
+    "chartInstances": 1,
+    "activeIndicators": 10,
+    "replaceLastBurst": 500
+  },
+  "reference": {
+    "capturedAt": "2026-07-22",
+    "platform": "Windows x64",
+    "browser": "Chromium 149 / DPR 1",
+    "generationMs": 30.5,
+    "initializationMs": 2014.3,
+    "frameMedianMs": 190.0,
+    "frameP95Ms": 202.2,
+    "replaceLastDispatchMs": 0.4,
+    "realtimeUpdateMs": 1277.0,
+    "jsHeapUsedMiB": 209.3
+  },
+  "budgets": {
+    "initializationMs": 15000,
+    "frameP95Ms": 750,
+    "replaceLastDispatchMs": 100,
+    "realtimeUpdateMs": 15000,
+    "jsHeapUsedMiB": 1024
+  }
+}

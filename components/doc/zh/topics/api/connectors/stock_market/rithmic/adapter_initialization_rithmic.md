@@ -1,0 +1,38 @@
+# Rithmic 适配器初始化
+
+下面的代码演示如何初始化 [RithmicMessageAdapter](xref:StockSharp.Rithmic.RithmicMessageAdapter)，并将其传递给 [Connector](xref:StockSharp.Algo.Connector)。
+
+```cs
+Connector Connector = new Connector();				
+...				
+var messageAdapter = new RithmicMessageAdapter(Connector.TransactionIdGenerator)
+{
+	UserName = "<您的登录名>",
+	Password = "<您的密码>".To<SecureString>(),
+	CertFile = "<证书文件路径>",
+	Server = RithmicServers.Real,
+	//Server = RithmicServers.Test,
+	//Server = RithmicServers.Simulator,  
+};
+Connector.Adapter.InnerAdapters.Add(messageAdapter);
+...	
+							
+```
+
+另一种更方便的方式是使用 `AddAdapter<T>()` 扩展方法：
+
+```cs
+Connector Connector = new Connector();
+...
+Connector.AddAdapter<RithmicMessageAdapter>(a =>
+{
+	a.UserName = "<您的登录名>";
+	a.Password = "<您的密码>".To<SecureString>();
+	a.CertFile = "<证书文件路径>";
+	a.Server = RithmicServers.Real;
+});
+```
+
+## 另请参阅
+
+[连接设置窗口](../../../graphical_user_interface/connection_settings_window.md)

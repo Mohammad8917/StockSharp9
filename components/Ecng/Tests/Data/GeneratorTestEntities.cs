@@ -1,0 +1,579 @@
+#if NET10_0_OR_GREATER
+
+namespace Ecng.Tests.Data;
+
+using System.ComponentModel;
+
+using Ecng.Serialization;
+
+public abstract partial class GenTestBaseEntity : IDbPersistable
+{
+	[Identity]
+	[ReadOnly(true)]
+	public long Id { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+	public virtual void Save(SettingsStorage storage) { }
+	public virtual ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken ct) => default;
+	public virtual void InitLists(IStorage db) { }
+}
+
+[Entity(Name = "Ecng_Orders", NoCache = true)]
+public partial class GenTestOrderEntity : GenTestBaseEntity
+{
+	public string Symbol { get; set; }
+	public decimal Price { get; set; }
+}
+
+[Entity(Name = "Ecng_Products")]
+public partial class GenTestProductEntity : GenTestBaseEntity
+{
+	public string Title { get; set; }
+}
+
+public partial class GenTestPlainEntity : GenTestBaseEntity
+{
+	public string Value { get; set; }
+}
+
+[Entity(Name = "Ecng_ColGen")]
+public partial class GenTestColumnAttrEntity : GenTestBaseEntity
+{
+	[Column(MaxLength = 128)]
+	public string Name { get; set; }
+
+	[Column(IsNullable = true)]
+	public string Description { get; set; }
+
+	[Column(IsNullable = true, MaxLength = 64)]
+	public string Tag { get; set; }
+
+	public string Plain { get; set; }
+
+	public int? NullableInt { get; set; }
+
+	public int RequiredInt { get; set; }
+}
+
+/// <summary>
+/// Base entity with int identity instead of long.
+/// </summary>
+public abstract partial class GenTestIntIdBase : IDbPersistable
+{
+	[Identity]
+	[ReadOnly(true)]
+	public int Id { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<int>();
+	public virtual void Save(SettingsStorage storage) { }
+	public virtual ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken ct) => default;
+	public virtual void InitLists(IStorage db) { }
+}
+
+[Entity(Name = "Ecng_IntId")]
+public partial class GenTestIntIdEntity : GenTestIntIdBase
+{
+	public string Name { get; set; }
+}
+
+/// <summary>
+/// Base entity with Guid identity.
+/// </summary>
+public abstract partial class GenTestGuidIdBase : IDbPersistable
+{
+	[Identity]
+	[ReadOnly(true)]
+	public Guid Id { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<Guid>();
+	public virtual void Save(SettingsStorage storage) { }
+	public virtual ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken ct) => default;
+	public virtual void InitLists(IStorage db) { }
+}
+
+[Entity(Name = "Ecng_GuidId")]
+public partial class GenTestGuidIdEntity : GenTestGuidIdBase
+{
+	public string Title { get; set; }
+
+	/// <summary>
+	/// Reference to a long-id entity — FK column type must be long.
+	/// </summary>
+	[RelationSingle]
+	public GenTestOrderEntity Order { get; set; }
+}
+
+/// <summary>
+/// Entity with long identity referencing a Guid-identity entity.
+/// FK column type must be Guid, not long.
+/// </summary>
+[Entity(Name = "Ecng_LongRefGuid")]
+public partial class GenTestLongRefGuidEntity : GenTestBaseEntity
+{
+	[RelationSingle]
+	public GenTestGuidIdEntity GuidRef { get; set; }
+
+	public string Note { get; set; }
+}
+
+/// <summary>
+/// Simple inner schema type for flattening tests.
+/// </summary>
+public class GenTestAddress
+{
+	public string Street { get; set; }
+	public string City { get; set; }
+}
+
+/// <summary>
+/// Entity with nullable inner schema property.
+/// </summary>
+[Entity(Name = "Ecng_NullInner")]
+public partial class GenTestNullableInnerEntity : GenTestBaseEntity
+{
+	[Column(IsNullable = true)]
+	public GenTestAddress Address { get; set; }
+
+	public string Code { get; set; }
+}
+
+/// <summary>
+/// Inner schema that contains a [RelationSingle] navigation property.
+/// Generator must emit the FK load as a post-init statement (await is
+/// not legal inside object-initializers).
+/// </summary>
+public class GenTestAddressWithFk
+{
+	public string Street { get; set; }
+	public string City { get; set; }
+
+	[RelationSingle]
+	public GenTestOrderEntity DeliveredBy { get; set; }
+}
+
+[Entity(Name = "Ecng_InnerWithFk")]
+public partial class GenTestEntityWithRelationSingleInsideInnerSchema : GenTestBaseEntity
+{
+	public GenTestAddressWithFk ShippingAddress { get; set; }
+
+	public string Note { get; set; }
+}
+
+// ===== Enum tests =====
+
+public enum GenTestStatus
+{
+	Active,
+	Inactive,
+	Deleted,
+}
+
+[Entity(Name = "Ecng_EnumTest")]
+public partial class GenTestEnumEntity : GenTestBaseEntity
+{
+	public GenTestStatus Status { get; set; }
+	public GenTestStatus? NullableStatus { get; set; }
+	public string Label { get; set; }
+}
+
+// ===== Shared inner schema types for deep nullable propagation tests =====
+
+/// <summary>Level 4 (deepest leaf).</summary>
+public class NullPropL4
+{
+	public string Deep { get; set; }
+	public int Count { get; set; }
+}
+
+/// <summary>Level 3.</summary>
+public class NullPropL3
+{
+	public string Mid { get; set; }
+	public NullPropL4 L4 { get; set; }
+}
+
+/// <summary>
+/// Level 2 with two branches:
+/// NullBranch is [Column(IsNullable = true)] — nullable introduced mid-tree.
+/// SolidBranch has no nullable marker.
+/// </summary>
+public class NullPropL2
+{
+	public string Top { get; set; }
+
+	[Column(IsNullable = true)]
+	public NullPropL3 NullBranch { get; set; }
+
+	public NullPropL3 SolidBranch { get; set; }
+}
+
+/// <summary>
+/// Level 2 where inner tries to cancel outer nullable via [Column(IsNullable = false)].
+/// </summary>
+public class NullPropL2Strict
+{
+	[Column(IsNullable = false)]
+	public string Forced { get; set; }
+
+	public string Normal { get; set; }
+}
+
+// ===== Generator test entities using shared inner types =====
+
+/// <summary>
+/// Outer NOT NULL → nullable introduced at mid-level via NullBranch.
+/// SolidBranch stays NOT NULL. Tests 4-level propagation with branching.
+/// </summary>
+[Entity(Name = "Ecng_GenNullMid")]
+public partial class GenTestNullMidEntity : GenTestBaseEntity
+{
+	public NullPropL2 Data { get; set; }
+}
+
+/// <summary>
+/// Outer nullable, inner tries [Column(IsNullable = false)] — outer must win.
+/// </summary>
+[Entity(Name = "Ecng_GenNullCantCancel")]
+public partial class GenTestNullCantCancelEntity : GenTestBaseEntity
+{
+	[Column(IsNullable = true)]
+	public NullPropL2Strict Data { get; set; }
+}
+
+/// <summary>
+/// Outer nullable at root, entire 4-level tree must be nullable.
+/// </summary>
+[Entity(Name = "Ecng_GenNullRoot")]
+public partial class GenTestNullRootEntity : GenTestBaseEntity
+{
+	[Column(IsNullable = true)]
+	public NullPropL2 Data { get; set; }
+}
+
+/// <summary>
+/// Inner value object for ColumnOverride tests.
+/// Key and Secret are both non-nullable string properties.
+/// </summary>
+public class TestKeySecret
+{
+	public string Key { get; set; }
+	public string Secret { get; set; }
+}
+
+/// <summary>
+/// Outer nullable, but [ColumnOverride] forces Secret to NOT NULL.
+/// Key remains nullable (inherits outer).
+/// </summary>
+[Entity(Name = "Ecng_GenColOverride")]
+public partial class GenTestColumnOverrideEntity : GenTestBaseEntity
+{
+	[Column(IsNullable = true)]
+	[ColumnOverride(nameof(TestKeySecret.Secret), IsNullable = false)]
+	public TestKeySecret Auth { get; set; }
+}
+
+/// <summary>
+/// ColumnOverride + NameOverride on same inner schema property.
+/// Secret renamed to ApiToken and forced NOT NULL.
+/// </summary>
+[Entity(Name = "Ecng_GenColOverrideName")]
+public partial class GenTestColumnOverrideWithNameEntity : GenTestBaseEntity
+{
+	[Column(IsNullable = true)]
+	[NameOverride("Secret", "ApiToken")]
+	[ColumnOverride(nameof(TestKeySecret.Secret), IsNullable = false)]
+	public TestKeySecret Auth { get; set; }
+}
+
+/// <summary>
+/// Inner value object whose decimals get their digits only from the outer [ColumnOverride].
+/// </summary>
+public class GenTestOverrideMoney
+{
+	public decimal Amount { get; set; }
+
+	[Column(Precision = 20, Scale = 6)]
+	public decimal Fee { get; set; }
+
+	[Column(Precision = 20, Scale = 6)]
+	public decimal Rate { get; set; }
+
+	public decimal Tax { get; set; }
+
+	public decimal Price { get; set; }
+}
+
+[Entity(Name = "Ecng_GenColOverridePrecision")]
+public partial class GenTestColumnOverridePrecisionEntity : GenTestBaseEntity
+{
+	[ColumnOverride(nameof(GenTestOverrideMoney.Amount), Precision = 18, Scale = 2)]
+	[ColumnOverride(nameof(GenTestOverrideMoney.Fee), IsNullable = true)]
+	[ColumnOverride(nameof(GenTestOverrideMoney.Rate), Precision = 10)]
+	[ColumnOverride(nameof(GenTestOverrideMoney.Tax), Scale = 3)]
+	[ColumnOverride(nameof(GenTestOverrideMoney.Price), IsNullable = true, Precision = 12, Scale = 4)]
+	public GenTestOverrideMoney Money { get; set; }
+}
+
+public abstract partial class GenTestBalanceBaseEntity : GenTestBaseEntity
+{
+	public decimal Balance { get; set; }
+
+	public decimal Reserved { get; set; }
+}
+
+/// <summary>
+/// Entity-level [ColumnOverride] giving digits to a decimal column inherited from the base.
+/// </summary>
+[Entity(Name = "Ecng_GenColOverrideInherited")]
+[ColumnOverride(nameof(GenTestBalanceBaseEntity.Balance), Precision = 18, Scale = 2)]
+public partial class GenTestColumnOverrideInheritedEntity : GenTestBalanceBaseEntity
+{
+}
+
+/// <summary>
+/// Inner value object whose strings get their length only from the outer [ColumnOverride].
+/// </summary>
+public class GenTestOverrideText
+{
+	public string Tag { get; set; }
+
+	[Column(MaxLength = 50)]
+	public string Code { get; set; }
+
+	public string Note { get; set; }
+
+	[Column(MaxLength = 100)]
+	public string Body { get; set; }
+
+	public byte[] Hash { get; set; }
+}
+
+[Entity(Name = "Ecng_GenColOverrideLength")]
+public partial class GenTestColumnOverrideLengthEntity : GenTestBaseEntity
+{
+	[ColumnOverride(nameof(GenTestOverrideText.Tag), MaxLength = 64)]
+	[ColumnOverride(nameof(GenTestOverrideText.Code), IsNullable = true)]
+	[ColumnOverride(nameof(GenTestOverrideText.Note), IsNullable = true, MaxLength = 200)]
+	[ColumnOverride(nameof(GenTestOverrideText.Body), MaxLength = ColumnAttribute.Max)]
+	[ColumnOverride(nameof(GenTestOverrideText.Hash), MaxLength = 32)]
+	public GenTestOverrideText Text { get; set; }
+}
+
+public abstract partial class GenTestLabelBaseEntity : GenTestBaseEntity
+{
+	public string Label { get; set; }
+
+	public string Remark { get; set; }
+}
+
+/// <summary>
+/// Entity-level [ColumnOverride] giving a length to a string column inherited from the base.
+/// </summary>
+[Entity(Name = "Ecng_GenColOverrideInheritedLength")]
+[ColumnOverride(nameof(GenTestLabelBaseEntity.Label), MaxLength = 32)]
+public partial class GenTestColumnOverrideInheritedLengthEntity : GenTestLabelBaseEntity
+{
+}
+
+// ===== Join entity tests (no Identity) =====
+
+/// <summary>
+/// Abstract base for join entities — implements IDbPersistable, NO Identity.
+/// Generator must NOT produce code for this (it's abstract).
+/// </summary>
+public abstract partial class GenTestBaseJoinEntity : IDbPersistable
+{
+	object IDbPersistable.GetIdentity() => throw new NotSupportedException();
+	void IDbPersistable.SetIdentity(object id) => throw new NotSupportedException();
+	public virtual void Save(SettingsStorage storage) { }
+	public virtual ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken ct) => default;
+}
+
+/// <summary>
+/// Join entity with two FK properties — classic many-to-many link table.
+/// </summary>
+public partial class GenTestTwoFkJoin : GenTestBaseJoinEntity
+{
+	[RelationSingle]
+	public GenTestOrderEntity Order { get; set; }
+
+	[RelationSingle]
+	public GenTestProductEntity Product { get; set; }
+}
+
+/// <summary>
+/// Join entity with simple (non-FK) properties only.
+/// </summary>
+public partial class GenTestSimplePropJoin : GenTestBaseJoinEntity
+{
+	public string Name { get; set; }
+	public int Score { get; set; }
+}
+
+/// <summary>
+/// Join entity with enum property.
+/// </summary>
+public partial class GenTestEnumJoin : GenTestBaseJoinEntity
+{
+	public GenTestStatus Status { get; set; }
+	public GenTestStatus? NullableStatus { get; set; }
+}
+
+/// <summary>
+/// Join entity with mixed FK + simple + enum properties.
+/// </summary>
+public partial class GenTestMixedJoin : GenTestBaseJoinEntity
+{
+	[RelationSingle]
+	public GenTestOrderEntity Order { get; set; }
+
+	public string Label { get; set; }
+
+	public GenTestStatus Status { get; set; }
+}
+
+/// <summary>
+/// Join entity with FK to Guid-identity entity.
+/// </summary>
+public partial class GenTestGuidFkJoin : GenTestBaseJoinEntity
+{
+	[RelationSingle]
+	public GenTestGuidIdEntity GuidRef { get; set; }
+
+	[RelationSingle]
+	public GenTestOrderEntity LongRef { get; set; }
+}
+
+// ===== Finding #3: plain id column with [ForeignKey] =====
+
+/// <summary>
+/// A plain scalar id column declaring its FK target via [ForeignKey(typeof(X))].
+/// The generated schema column must carry ReferencedEntityType (reflection path:
+/// SchemaRegistry.cs:473), or the SchemaMigrator drops the FK constraint.
+/// </summary>
+[Entity(Name = "Ecng_GenFkColumn")]
+public partial class GenTestForeignKeyColumnEntity : GenTestBaseEntity
+{
+	[ForeignKey(typeof(GenTestOrderEntity))]
+	public long OrderId { get; set; }
+
+	public string Note { get; set; }
+}
+
+// ===== Finding #4: index metadata =====
+
+/// <summary>
+/// Property-level [Index] plus a type-level composite [Unique]. The generated schema must
+/// populate SchemaColumn.Indexes for the participating columns (reflection path: CollectIndexes
+/// + type-level expansion, SchemaRegistry.cs:272/355), not only the IsUnique/IsIndex booleans.
+/// </summary>
+[Entity(Name = "Ecng_GenIndexes")]
+[Unique(nameof(Login), nameof(Tenant))]
+public partial class GenTestIndexEntity : GenTestBaseEntity
+{
+	[Index]
+	public string Email { get; set; }
+
+	public string Login { get; set; }
+
+	public string Tenant { get; set; }
+}
+
+// ===== Finding #5: overridden property must not duplicate columns =====
+
+/// <summary>
+/// Base entity declaring a virtual persistent property that a derived entity overrides.
+/// Inherits the identity/IDbPersistable plumbing from <see cref="GenTestBaseEntity"/> so the
+/// generator emits its Save/Load as overrides (no hand-written stub to collide with).
+/// </summary>
+public abstract partial class GenTestOverrideBase : GenTestBaseEntity
+{
+	public virtual string Shared { get; set; }
+}
+
+/// <summary>
+/// Overrides the base's virtual property — the generated schema must contain a single "Shared"
+/// column, mirroring the reflection path's name-based dedup (SchemaRegistry.GetOrderedProperties).
+/// </summary>
+[Entity(Name = "Ecng_GenOverride")]
+public partial class GenTestOverrideEntity : GenTestOverrideBase
+{
+	public override string Shared { get; set; }
+
+	public string Own { get; set; }
+}
+
+// ===== Finding #7: [Column(Precision/Scale)] =====
+
+/// <summary>
+/// A decimal column declaring Precision/Scale. The generated schema column must carry them
+/// (SchemaColumn.Precision/Scale), or the database column falls back to the dialect default.
+/// </summary>
+[Entity(Name = "Ecng_GenPrecision")]
+public partial class GenTestPrecisionEntity : GenTestBaseEntity
+{
+	[Column(Precision = 18, Scale = 8)]
+	public decimal Amount { get; set; }
+}
+
+// ===== Finding #8: filtered (partial) unique indexes =====
+
+/// <summary>
+/// A type-level [NonEmptyUnique] — a subclass of [Unique] whose constructor computes the filter —
+/// next to a plain [Unique] carrying an explicit Condition. Both must reach the generated schema
+/// as unique participations with their Condition, the way the reflection path reads them off the
+/// attribute instance (SchemaRegistry.cs:284/409). A generator that matches attributes by exact
+/// class name drops the subclass entirely and the filtered unique index never reaches the database.
+/// </summary>
+[Entity(Name = "Ecng_GenFilteredIx")]
+[NonEmptyUnique(nameof(Tenant), nameof(IdempotencyKey), Name = "UX_GenFiltered_Tenant_Key")]
+[NonEmptyUnique(nameof(SingleKey), Name = "UX_GenFiltered_Single")]
+[Unique(nameof(Tenant), nameof(ExternalId), Name = "UX_GenFiltered_Tenant_External", Condition = "{ExternalId} <> ''")]
+public partial class GenTestFilteredIndexEntity : GenTestBaseEntity
+{
+	public long Tenant { get; set; }
+
+	[Column(MaxLength = 128)]
+	public string IdempotencyKey { get; set; } = string.Empty;
+
+	[Column(MaxLength = 128)]
+	public string ExternalId { get; set; } = string.Empty;
+
+	// Declared through the single-column constructor, which reaches Roslyn as a bare string
+	// rather than the params array the composite declarations above produce.
+	[Column(MaxLength = 128)]
+	public string SingleKey { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// The same subclassed attribute declared on the property instead of the type.
+/// </summary>
+[Entity(Name = "Ecng_GenFilteredCol")]
+public partial class GenTestFilteredColumnEntity : GenTestBaseEntity
+{
+	[NonEmptyUnique(nameof(Token))]
+	[Column(MaxLength = 64)]
+	public string Token { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// A calendar date and a time of day, in both their required and optional forms. The
+/// generator decides on its own which property types are flat columns; when it disagrees
+/// with reflection the entity gets a different schema depending on which path built it.
+/// </summary>
+[Entity(Name = "Ecng_GenSchedule")]
+public partial class GenTestScheduleEntity : GenTestBaseEntity
+{
+	public DateOnly Day { get; set; }
+
+	public DateOnly? Until { get; set; }
+
+	public TimeOnly OpensAt { get; set; }
+
+	public TimeOnly? ClosesAt { get; set; }
+}
+
+#endif

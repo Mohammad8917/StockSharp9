@@ -1,0 +1,278 @@
+﻿namespace Ecng.UnitTesting;
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Security;
+
+using Ecng.Common;
+
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+
+/// <summary>
+/// Assert helper.
+/// </summary>
+public static class AssertHelper
+{
+	/// <summary>
+	/// Asserts that the value is true.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertTrue(this bool value, string message = null)
+		=> Assert.IsTrue(value, message);
+
+	/// <summary>
+	/// Asserts that the value is false.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertFalse(this bool value, string message = null)
+		=> Assert.IsFalse(value, message);
+
+	/// <summary>
+	/// Asserts that the value is null.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertNull(this object value, string message = null)
+		=> Assert.IsNull(value, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	public static void AssertNull(this Exception value)
+	{
+		if (value != null)
+			throw value;
+	}
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertNotNull(this object value, string message = null)
+		=> Assert.IsNotNull(value, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertOfType<T>(this object value, string message = null)
+		=> Assert.IsInstanceOfType(value, typeof(T), message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertNotOfType<T>(this object value, string message = null)
+		=> Assert.IsNotInstanceOfType(value, typeof(T), message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AreEqual<T>(this T value, T expected, string message = null)
+		=> value.AssertEqual(expected, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertEqual<T>(this T value, T expected, string message = null)
+	{
+		if (value is SecureString str)
+			str.IsEqualTo(expected.To<SecureString>()).AssertTrue(message);
+		else if (value is IEnumerable enu1 && value is not string)
+			enu1.AssertEqual((IEnumerable)expected, message);
+		else if (value is DateTime dtValue && expected is DateTime dtExpected)
+		{
+			if (!dtValue.Equals(dtExpected))
+			{
+				var details = $"DateTime mismatch:\n" +
+					$"  Expected: {dtExpected:o} Kind={dtExpected.Kind} Ticks={dtExpected.Ticks}\n" +
+					$"  Actual:   {dtValue:o} Kind={dtValue.Kind} Ticks={dtValue.Ticks}\n" +
+					$"  Diff:     {dtValue.Ticks - dtExpected.Ticks} ticks";
+				Assert.Fail(message is null ? details : $"{message}\n{details}");
+			}
+		}
+		else if (value is DateTimeOffset dtoValue && expected is DateTimeOffset dtoExpected)
+		{
+			if (!dtoValue.Equals(dtoExpected))
+			{
+				var details = $"DateTimeOffset mismatch:\n" +
+					$"  Expected: {dtoExpected:o} Offset={dtoExpected.Offset} Ticks={dtoExpected.Ticks} UtcTicks={dtoExpected.UtcTicks}\n" +
+					$"  Actual:   {dtoValue:o} Offset={dtoValue.Offset} Ticks={dtoValue.Ticks} UtcTicks={dtoValue.UtcTicks}\n" +
+					$"  Diff:     {dtoValue.Ticks - dtoExpected.Ticks} ticks, UtcDiff={dtoValue.UtcTicks - dtoExpected.UtcTicks} ticks";
+				Assert.Fail(message is null ? details : $"{message}\n{details}");
+			}
+		}
+		else
+			Assert.AreEqual(expected, value, message);
+	}
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="delta">Delta for comparing floating point numbers.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertEqual(this double value, double expected, double delta, string message = null)
+		=> Assert.AreEqual(expected, value, delta, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="delta">Delta for comparing floating point numbers.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertEqual(this float value, float expected, float delta, string message = null)
+		=> Assert.AreEqual(expected, value, delta, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertNotEqual<T>(this T value, T expected, string message = null)
+		=> Assert.AreNotEqual(expected, value, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertSame<T>(this T value, T expected, string message = null)
+		=> Assert.AreSame(expected, value, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <typeparam name="T">Type of the value.</typeparam>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertNotSame<T>(this T value, T expected, string message = null)
+		=> Assert.AreNotSame(expected, value, message);
+
+	/// <summary>
+	/// Asserts that the value is not null.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="expected">Expected value.</param>
+	/// <param name="nullAsEmpty">If <see langword="true"/>, then null and empty strings are considered equal.</param>
+	public static void AssertEqual(this string value, string expected, bool nullAsEmpty = false)
+	{
+		if (nullAsEmpty && value.IsEmpty() && expected.IsEmpty())
+			return;
+
+		Assert.AreEqual(expected, value);
+	}
+
+	/// <summary>
+	/// Asserts that two enumerables are equal by comparing their elements.
+	/// </summary>
+	/// <param name="value">The actual collection to be tested. Can be null.</param>
+	/// <param name="expected">The expected collection. If <paramref name="value"/> is null, then <paramref name="expected"/> must also be null.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertEqual(this IEnumerable value, IEnumerable expected, string message = null)
+	{
+		if (value is null)
+		{
+			expected.AssertNull(message);
+			return;
+		}
+
+		expected.AssertNotNull(message);
+
+		var enum1 = value.GetEnumerator();
+		var enum2 = expected.GetEnumerator();
+
+		while (true)
+		{
+			var move1 = enum1.MoveNext();
+			var move2 = enum2.MoveNext();
+
+			move1.AssertEqual(move2, message);
+
+			if (!move1)
+				break;
+
+			enum1.Current.AssertEqual(enum2.Current, message);
+		}
+	}
+
+	/// <summary>
+	/// Asserts that <paramref name="value"/> is greater than <paramref name="expected"/>.
+	/// </summary>
+	/// <typeparam name="T">Type implementing <see cref="IComparable{T}"/>.</typeparam>
+	/// <param name="value">Actual value.</param>
+	/// <param name="expected">Value to compare against.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertGreater<T>(this T value, T expected, string message = null)
+		where T : IComparable<T>
+		=> (value.CompareTo(expected) > 0).AssertTrue(message);
+
+	/// <summary>
+	/// Asserts that <paramref name="value"/> is less than <paramref name="expected"/>.
+	/// </summary>
+	/// <typeparam name="T">Type implementing <see cref="IComparable{T}"/>.</typeparam>
+	/// <param name="value">Actual value.</param>
+	/// <param name="expected">Value to compare against.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertLess<T>(this T value, T expected, string message = null)
+		where T : IComparable<T>
+		=> (value.CompareTo(expected) < 0).AssertTrue(message);
+
+	/// <summary>
+	/// Asserts that <paramref name="value"/> is greater than <paramref name="min"/> and less than <paramref name="max"/>.
+	/// </summary>
+	/// <typeparam name="T">Type implementing <see cref="IComparable{T}"/>.</typeparam>
+	/// <param name="value">Actual value.</param>
+	/// <param name="min">Minimum value (exclusive).</param>
+	/// <param name="max">Maximum value (exclusive).</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertInRange<T>(this T value, T min, T max, string message = null)
+		where T : IComparable<T>
+	{
+		value.AssertGreater(min, message);
+		value.AssertLess(max, message);
+	}
+
+	/// <summary>
+	/// Asserts that the sequence contains the specified value.
+	/// </summary>
+	/// <typeparam name="T">Type of elements in the sequence.</typeparam>
+	/// <param name="seq">Sequence to search.</param>
+	/// <param name="value">Value to find.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertContains<T>(this IEnumerable<T> seq, T value, string message = null)
+		=> Assert.Contains(value, seq, message);
+
+	/// <summary>
+	/// Asserts that the string contains the specified substring.
+	/// </summary>
+	/// <param name="value">String to search.</param>
+	/// <param name="subStr">Substring expected to be present.</param>
+	/// <param name="message">Error message.</param>
+	public static void AssertContains(this string value, string subStr, string message = null)
+		=> Assert.Contains(subStr, value, message);
+}

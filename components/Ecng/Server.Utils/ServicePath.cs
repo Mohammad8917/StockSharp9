@@ -1,0 +1,159 @@
+namespace Ecng.Server.Utils;
+
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Ecng.Common;
+using Ecng.Serialization;
+using Ecng.Logging;
+using Ecng.IO;
+
+using Microsoft.Extensions.Logging;
+
+/// <summary>
+/// Services IO utils.
+/// </summary>
+public static class ServicePath
+{
+	/// <summary>
+	/// Current service directory.
+	/// </summary>
+	// AppContext.BaseDirectory is correct even for single-file published apps, where
+	// Assembly.GetExecutingAssembly().Location returns an empty string and would make
+	// ServiceDir empty and DataDir resolve relative to the current working directory.
+	public static string ServiceDir => AppContext.BaseDirectory;
+
+	/// <summary>
+	/// Get path to Data directory.
+	/// </summary>
+	public static string DataDir => Path.Combine(ServiceDir, "Data");
+
+	/// <summary>
+	/// Creates and configures an <see cref="LogManager"/> that persists settings to the specified data directory,
+	/// writes logs to files, and forwards messages to the provided <see cref="ILogger"/>.
+	/// </summary>
+	/// <param name="logger">The Microsoft.Extensions.Logging logger used to mirror log messages via <see cref="ServiceLogListener"/>.</param>
+	/// <param name="fileSystem"><see cref="IFileSystem"/></param>
+	/// <param name="dataDir">The writable directory where the log manager settings file and log files are stored.</param>
+	/// <param name="defaultLevel">The default application log level used when no persisted settings are found.</param>
+	/// <returns>A configured <see cref="LogManager"/> instance.</returns>
+	/// <exception cref="ArgumentNullException">Thrown when <paramref name="logger"/> is <c>null</c>.</exception>
+	/// <remarks>
+	/// If a settings file (logManager.{serializer extension}) exists in <paramref name="dataDir"/>, it is loaded; otherwise,
+	/// a default file listener is created that writes to the <c>Logs</c> subdirectory and the settings are saved.
+	/// </remarks>
+	[Obsolete("Blocking sync-over-async wrapper. Use CreateLogManagerAsync instead.")]
+	public static LogManager CreateLogManager(this ILogger logger, IFileSystem fileSystem, string dataDir, LogLevels defaultLevel)
+		=> AsyncHelper.Run(() => logger.CreateLogManagerAsync(fileSystem, dataDir, defaultLevel, default));
+
+	/// <summary>
+	/// Creates and configures an <see cref="LogManager"/> that persists settings to the specified data directory,
+	/// writes logs to files, and forwards messages to the provided <see cref="ILogger"/>.
+	/// </summary>
+	/// <param name="logger">The Microsoft.Extensions.Logging logger used to mirror log messages via <see cref="ServiceLogListener"/>.</param>
+	/// <param name="fileSystem"><see cref="IFileSystem"/></param>
+	/// <param name="dataDir">The writable directory where the log manager settings file and log files are stored.</param>
+	/// <param name="defaultLevel">The default application log level used when no persisted settings are found.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>A configured <see cref="LogManager"/> instance.</returns>
+	/// <exception cref="ArgumentNullException">Thrown when <paramref name="logger"/> is <c>null</c>.</exception>
+	/// <remarks>
+	/// If a settings file (logManager.{serializer extension}) exists in <paramref name="dataDir"/>, it is loaded; otherwise,
+	/// a default file listener is created that writes to the <c>Logs</c> subdirectory and the settings are saved.
+	/// </remarks>
+	public static async ValueTask<LogManager> CreateLogManagerAsync(this ILogger logger, IFileSystem fileSystem, string dataDir, LogLevels defaultLevel, CancellationToken cancellationToken)
+	{
+		if (logger is null)
+			throw new ArgumentNullException(nameof(logger));
+
+		var logManager = await CreateLogManagerAsync(fileSystem, dataDir, defaultLevel, cancellationToken).NoWait();
+
+		logManager.Listeners.Add(new ServiceLogListener(logger));
+
+		return logManager;
+	}
+
+	/// <summary>
+	/// Creates a <see cref="LogManager"/> that keeps to itself, for a service that routes <see cref="ILogger"/>
+	/// into it with a <see cref="LogManagerLoggerProvider"/> instead of the other way round.
+	/// </summary>
+	/// <param name="fileSystem">File system.</param>
+	/// <param name="dataDir">Data directory.</param>
+	/// <param name="defaultLevel">Default log level.</param>
+	/// <returns>Log manager.</returns>
+	/// <remarks>
+	/// Same file and settings as the overload taking a logger; it only leaves out the forwarding into
+	/// <see cref="ILogger"/>, which a service being fed from <see cref="ILogger"/> must not have.
+	/// What is still waiting to be written when the manager is disposed is written, not dropped.
+	/// </remarks>
+	[Obsolete("Blocking sync-over-async wrapper. Use CreateLogManagerAsync instead.")]
+	public static LogManager CreateLogManager(IFileSystem fileSystem, string dataDir, LogLevels defaultLevel)
+		=> AsyncHelper.Run(() => CreateLogManagerAsync(fileSystem, dataDir, defaultLevel, default));
+
+	/// <summary>
+	/// Creates a <see cref="LogManager"/> that keeps to itself, for a service that routes <see cref="ILogger"/>
+	/// into it with a <see cref="LogManagerLoggerProvider"/> instead of the other way round.
+	/// </summary>
+	/// <param name="fileSystem">File system.</param>
+	/// <param name="dataDir">Data directory.</param>
+	/// <param name="defaultLevel">Default log level.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Log manager.</returns>
+	/// <remarks>
+	/// Same file and settings as the overload taking a logger; it only leaves out the forwarding into
+	/// <see cref="ILogger"/>, which a service being fed from <see cref="ILogger"/> must not have.
+	/// What is still waiting to be written when the manager is disposed is written, not dropped.
+	/// </remarks>
+	public static async ValueTask<LogManager> CreateLogManagerAsync(IFileSystem fileSystem, string dataDir, LogLevels defaultLevel, CancellationToken cancellationToken)
+	{
+        if (fileSystem is null)
+            throw new ArgumentNullException(nameof(fileSystem));
+
+		fileSystem.CreateDirectory(dataDir);
+
+		var serializer = JsonSerializer<SettingsStorage>.CreateDefault();
+
+		var logSettingsFile = Path.Combine(dataDir, $"logManager.{serializer.FileExtension}");
+
+		var logManager = new LogManager(fileSystem)
+		{
+			Application = { LogLevel = defaultLevel },
+			// A service that fails at start is torn down before its first flush, and those last lines
+			// are the only account of why it stopped.
+			ClearPendingOnDispose = false,
+		};
+
+		if (fileSystem.FileExists(logSettingsFile))
+		{
+			await logManager.LoadAsync(await serializer.DeserializeAsync(fileSystem, logSettingsFile, cancellationToken).NoWait(), cancellationToken);
+		}
+		else
+		{
+			logManager.Listeners.Add(new FileLogListener(fileSystem)
+			{
+				Append = true,
+				FileName = "logs",
+				LogDirectory = Path.Combine(dataDir, "Logs"),
+				SeparateByDates = SeparateByDateModes.SubDirectories,
+				HistoryPolicy = FileLogHistoryPolicies.Delete,
+			});
+
+			await using var stream = fileSystem.OpenWrite(logSettingsFile);
+			await serializer.SerializeAsync(await logManager.SaveAsync(cancellationToken), stream, cancellationToken).NoWait();
+		}
+
+		return logManager;
+	}
+
+	/// <summary>
+	/// Restart service.
+	/// </summary>
+	public static void Restart()
+	{
+		// https://stackoverflow.com/a/220451
+		// solution required setup
+		Environment.Exit(1);
+	}
+}

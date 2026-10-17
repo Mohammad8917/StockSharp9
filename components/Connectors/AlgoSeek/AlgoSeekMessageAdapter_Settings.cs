@@ -1,0 +1,76 @@
+namespace StockSharp.AlgoSeek;
+
+/// <summary>The message adapter for licensed AlgoSeek historical delivery files.</summary>
+[MediaIcon(Media.MediaNames.algoseek)]
+[Doc("topics/api/connectors/stock_market/algoseek.html")]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.AlgoSeekKey,
+	Description = LocalizedStrings.MarketDataConnectorKey,
+	GroupName = LocalizedStrings.AmericaKey)]
+[MessageAdapterCategory(MessageAdapterCategories.US | MessageAdapterCategories.Paid |
+	MessageAdapterCategories.History | MessageAdapterCategories.Stock |
+	MessageAdapterCategories.Options | MessageAdapterCategories.Futures |
+	MessageAdapterCategories.Ticks | MessageAdapterCategories.Level1 |
+	MessageAdapterCategories.MarketDepth | MessageAdapterCategories.Candles)]
+public partial class AlgoSeekMessageAdapter : MessageAdapter
+{
+	/// <summary>Directory containing licensed AlgoSeek CSV delivery files.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DataDirectoryKey,
+		Description = LocalizedStrings.DataDirectoryKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public string DataDirectory { get; set; }
+
+	/// <summary>Time zone used by US equities and OPRA options files.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.MarketTimeZoneKey,
+		Description = LocalizedStrings.SystemTimeZoneIdentifierUsedForUsEquityAndOptionTimestampsDescKey,
+		GroupName = LocalizedStrings.MarketDataLabelKey,
+		Order = 1)]
+	public string MarketTimeZoneId { get; set; } = "America/New_York";
+
+	/// <summary>Whether nested delivery directories are scanned.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.RecursiveScanKey,
+		Description = LocalizedStrings.ScanNestedDeliveryDirectoriesWithoutFollowingReparsePointsDescKey,
+		GroupName = LocalizedStrings.MarketDataLabelKey,
+		Order = 2)]
+	public bool IsRecursive { get; set; } = true;
+
+	/// <summary>Whether only consolidated NBBO equity quotes are published.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.NbboQuotesOnlyKey,
+		Description = LocalizedStrings.IgnoreVenueBboRowsAndPublishConsolidatedEquityNbboRowsOnlyDescKey,
+		GroupName = LocalizedStrings.MarketDataLabelKey,
+		Order = 3)]
+	public bool IsNationalBestQuotesOnly { get; set; } = true;
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+		storage
+			.Set(nameof(DataDirectory), DataDirectory)
+			.Set(nameof(MarketTimeZoneId), MarketTimeZoneId)
+			.Set(nameof(IsRecursive), IsRecursive)
+			.Set(nameof(IsNationalBestQuotesOnly), IsNationalBestQuotesOnly);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+		DataDirectory = storage.GetValue<string>(nameof(DataDirectory));
+		MarketTimeZoneId = storage.GetValue(nameof(MarketTimeZoneId), MarketTimeZoneId);
+		IsRecursive = storage.GetValue(nameof(IsRecursive), IsRecursive);
+		IsNationalBestQuotesOnly = storage.GetValue(nameof(IsNationalBestQuotesOnly),
+			IsNationalBestQuotesOnly);
+	}
+}

@@ -1,0 +1,455 @@
+﻿namespace Ecng.Nuget;
+
+using System.IO.Compression;
+using System.Net;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+
+using Ecng.Reflection;
+
+using Newtonsoft.Json.Linq;
+
+/// <summary>
+/// NuGET extensions.
+/// </summary>
+public static class NugetExtensions
+{
+	/// <summary>
+	/// Get the target frameworks for the package.
+	/// </summary>
+	/// <param name="reader"><see cref="PackageArchiveReader"/></param>
+	/// <returns>Target frameworks.</returns>
+	public static string[] GetTargetFrameworks(this PackageArchiveReader reader)
+	{
+		var targetFrameworks = reader
+			.GetSupportedFrameworks()
+			.Select(f => f.GetShortFolderName())
+			.ToList();
+
+		// Default to the "any" framework if no frameworks were found.
+		if (targetFrameworks.Count == 0)
+		{
+			targetFrameworks.Add("any");
+		}
+
+		return [.. targetFrameworks];
+	}
+
+	/// <summary>
+	/// Remove the platform version.
+	/// </summary>
+	/// <param name="fwk"><see cref="NuGetFramework"/></param>
+	/// <returns>The framework without the platform version.</returns>
+	public static NuGetFramework RemovePlatformVersion(this NuGetFramework fwk)
+		=> new(fwk.Framework, fwk.Version, fwk.Platform, FrameworkConstants.EmptyVersion);
+
+	/// <summary>
+	/// Get all versions.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="logger"><see cref="ILogger"/></param>
+	/// <param name="cache"><see cref="SourceCacheContext"/></param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>All versions ordered.</returns>
+	public static async Task<NuGetVersion[]> GetAllVersionsOrderedAsync(this SourceRepository repo, string packageId, ILogger logger, SourceCacheContext cache, CancellationToken token)
+	{
+		var resource = await repo.GetResourceAsync<FindPackageByIdResource>(token).NoWait();
+
+		return [.. (await resource.GetAllVersionsAsync(packageId, cache, logger, token).NoWait()).OrderBy(v => v)];
+	}
+
+	/// <summary>
+	/// Get the last version.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="allowPreview">Allow preview versions.</param>
+	/// <param name="logger"><see cref="ILogger"/></param>
+	/// <param name="cache"><see cref="SourceCacheContext"/></param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>The last version.</returns>
+	public static async Task<NuGetVersion> GetLastVersionAsync(this SourceRepository repo, string packageId, bool allowPreview, ILogger logger, SourceCacheContext cache, CancellationToken token)
+	{
+		var versions = await repo.GetAllVersionsOrderedAsync(packageId, logger, cache, token).NoWait();
+		Func<NuGetVersion, bool> cond = allowPreview ? _ => true : v => !v.IsPrerelease;
+
+		return versions.LastOrDefault(cond);
+	}
+
+	/// <summary>
+	/// Get the last version in the floating range.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="floatingVer">The floating version.</param>
+	/// <param name="logger"><see cref="ILogger"/></param>
+	/// <param name="cache"><see cref="SourceCacheContext"/></param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>The last version in the floating range.</returns>
+	public static async Task<NuGetVersion> GetLastVersionInFloatingRangeAsync(this SourceRepository repo, string packageId, string floatingVer, ILogger logger, SourceCacheContext cache, CancellationToken token)
+	{
+		if (!FloatRange.TryParse(floatingVer, out var range))
+			throw new ArgumentException($"invalid floating version '{floatingVer}'", nameof(floatingVer));
+
+		var versions = await repo.GetAllVersionsOrderedAsync(packageId, logger, cache, token).NoWait();
+
+		return versions.LastOrDefault(range.Satisfies);
+	}
+
+	private class DummySettings : ISettings
+	{
+		private class MockSettingSection : SettingSection
+		{
+			public MockSettingSection(string name, IReadOnlyDictionary<string, string> attributes, IEnumerable<SettingItem> children)
+				: base(name, attributes, children)
+			{
+			}
+
+			public MockSettingSection(string name, params SettingItem[] children)
+				: base(name, attributes: null, children: new HashSet<SettingItem>(children))
+			{
+			}
+
+			public override SettingBase Clone()
+				=> throw new NotSupportedException();
+		}
+
+		event EventHandler ISettings.SettingsChanged
+		{
+			add { }
+			remove { }
+		}
+
+		void ISettings.AddOrUpdate(string sectionName, SettingItem item) => throw new NotSupportedException();
+		IList<string> ISettings.GetConfigFilePaths() => throw new NotSupportedException();
+		IList<string> ISettings.GetConfigRoots() => throw new NotSupportedException();
+		SettingSection ISettings.GetSection(string sectionName) => new MockSettingSection(sectionName);
+		void ISettings.Remove(string sectionName, SettingItem item) => throw new NotSupportedException();
+		void ISettings.SaveToDisk() => throw new NotSupportedException();
+	}
+
+	/// <summary>
+	/// Disable access to the nuget.config file.
+	/// </summary>
+	public static void DisableNugetConfig()
+	{
+		// disable access nuget.config file
+
+		var proxy = new ProxyCache(new DummySettings(), EnvironmentVariableWrapper.Instance);
+
+		var f = typeof(ProxyCache).GetField("_instance", BindingFlags.Static | BindingFlags.NonPublic);
+		var lazy = (Lazy<ProxyCache>)f.GetValue(null);
+		lazy.SetValue(proxy);
+	}
+
+	/// <summary>
+	/// Increment the version.
+	/// </summary>
+	/// <param name="version"><see cref="NuGetVersion"/></param>
+	/// <returns>The incremented version.</returns>
+	public static NuGetVersion Increment(this NuGetVersion version)
+	{
+		if (version is null)
+			throw new ArgumentNullException(nameof(version));
+
+		return new(version.Major, version.Minor, version.Patch + 1);
+	}
+
+	/// <summary>
+	/// Add a suffix to the version.
+	/// </summary>
+	/// <param name="version"><see cref="NuGetVersion"/></param>
+	/// <param name="suffix">The suffix to add.</param>
+	/// <returns>The version with the suffix.</returns>
+	public static NuGetVersion WithSuffix(this NuGetVersion version, string suffix)
+	{
+		if (version is null)
+			throw new ArgumentNullException(nameof(version));
+
+		if (suffix.IsEmpty())
+			throw new ArgumentNullException(nameof(suffix));
+
+		return new(version.Major, version.Minor, version.Patch, suffix);
+	}
+
+	/// <summary>
+	/// Get the base URL for the repository.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The base URL for the repository.</returns>
+	public static async Task<Uri> GetBaseUrl(this SourceRepository repo, CancellationToken cancellationToken)
+	{
+		if (repo is null)
+			throw new ArgumentNullException(nameof(repo));
+
+		var serviceIndex = await repo.GetResourceAsync<ServiceIndexResourceV3>(cancellationToken).NoWait()
+			?? throw new InvalidOperationException($"ServiceIndexResourceV3 for {repo.PackageSource.Name} is null.");
+
+		var baseUrl = serviceIndex.GetServiceEntryUri(ServiceTypes.PackageBaseAddress)
+			?? throw new InvalidOperationException($"No PackageBaseAddress endpoint for {repo.PackageSource.Name}.");
+
+		var str = baseUrl.To<string>();
+
+		if (!str.EndsWith('/'))
+			baseUrl = (str + "/").To<Uri>();
+
+		return baseUrl;
+	}
+
+	/// <summary>
+	/// Get the search URL for the repository.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The search URL for the repository.</returns>
+	public static async Task<Uri> GetSearchUrl(this SourceRepository repo, CancellationToken cancellationToken)
+	{
+		if (repo is null)
+			throw new ArgumentNullException(nameof(repo));
+
+		var serviceIndex = await repo.GetResourceAsync<ServiceIndexResourceV3>(cancellationToken).NoWait()
+			?? throw new InvalidOperationException($"ServiceIndexResourceV3 for {repo.PackageSource.Name} is null.");
+
+		return serviceIndex.GetServiceEntryUri(ServiceTypes.SearchQueryService)
+			?? throw new InvalidOperationException($"No SearchQueryService endpoint for {repo.PackageSource.Name}.");
+	}
+
+	/// <summary>
+	/// The versions listed in a flat container index, oldest first. An entry that cannot be read is skipped
+	/// rather than throwing the rest of the list away.
+	/// </summary>
+	/// <param name="json">The index.</param>
+	/// <returns>The versions.</returns>
+	public static NuGetVersion[] ParseFeedVersions(string json)
+	{
+		using var doc = JsonDocument.Parse(json);
+
+		if (!doc.RootElement.TryGetProperty("versions", out var versions) || versions.ValueKind != JsonValueKind.Array)
+			return [];
+
+		return [.. versions
+			.EnumerateArray()
+			.Select(v => NuGetVersion.TryParse(v.GetString(), out var parsed) ? parsed : null)
+			.Where(v => v is not null)
+			.OrderBy(v => v)];
+	}
+
+	/// <summary>
+	/// The versions a feed holds for a package right now, oldest first.
+	/// </summary>
+	/// <remarks>
+	/// Read from the feed's own index rather than through <see cref="FindPackageByIdResource"/>: that resource
+	/// keeps the list it read for as long as it lives, so a caller that outlives a publish -- a long running
+	/// service -- would go on answering for the versions that existed when it started.
+	/// </remarks>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="http"><see cref="HttpClient"/></param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The versions, or empty when the feed does not carry the package.</returns>
+	public static async Task<NuGetVersion[]> GetFeedVersionsAsync(this SourceRepository repo, HttpClient http, string packageId, CancellationToken cancellationToken)
+	{
+		if (repo is null)			throw new ArgumentNullException(nameof(repo));
+		if (http is null)			throw new ArgumentNullException(nameof(http));
+		if (packageId.IsEmpty())	throw new ArgumentNullException(nameof(packageId));
+
+		var baseUrl = await repo.GetBaseUrl(cancellationToken).NoWait();
+
+		try
+		{
+			return ParseFeedVersions(await http.GetStringAsync(new Uri(baseUrl, $"{packageId}/index.json".ToLowerInvariant()), cancellationToken).NoWait());
+		}
+		catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+		{
+			return [];
+		}
+	}
+
+	/// <summary>
+	/// Get the registrations URL for the repository: where the feed describes each version of a package.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The registrations URL for the repository.</returns>
+	public static async Task<Uri> GetRegistrationsUrl(this SourceRepository repo, CancellationToken cancellationToken)
+	{
+		if (repo is null)
+			throw new ArgumentNullException(nameof(repo));
+
+		var serviceIndex = await repo.GetResourceAsync<ServiceIndexResourceV3>(cancellationToken).NoWait()
+			?? throw new InvalidOperationException($"ServiceIndexResourceV3 for {repo.PackageSource.Name} is null.");
+
+		var url = serviceIndex.GetServiceEntryUri(ServiceTypes.RegistrationsBaseUrl)
+			?? throw new InvalidOperationException($"No RegistrationsBaseUrl endpoint for {repo.PackageSource.Name}.");
+
+		var str = url.To<string>();
+
+		return str.EndsWith('/') ? url : (str + "/").To<Uri>();
+	}
+
+	/// <summary>
+	/// What a feed says about every version of a package -- when it was published, whether it is listed, and
+	/// what it depends on for each target framework -- oldest first. Unlisted versions are included.
+	/// </summary>
+	/// <remarks>
+	/// Read with the given client rather than through <see cref="PackageMetadataResource"/>: that resource keeps
+	/// an HTTP cache on disk in the user profile, and a service running under an account that has none it may
+	/// write to -- an IIS application pool -- fails on every call.
+	/// </remarks>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="http"><see cref="HttpClient"/></param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The versions, or empty when the feed does not carry the package.</returns>
+	public static async Task<IPackageSearchMetadata[]> GetFeedMetadataAsync(this SourceRepository repo, HttpClient http, string packageId, CancellationToken cancellationToken)
+	{
+		if (repo is null)
+			throw new ArgumentNullException(nameof(repo));
+
+		return await http.GetFeedMetadataAsync(await repo.GetRegistrationsUrl(cancellationToken).NoWait(), packageId, cancellationToken).NoWait();
+	}
+
+	/// <summary>
+	/// What a feed says about every version of a package, read from its registration index -- see
+	/// <see cref="GetFeedMetadataAsync(SourceRepository, HttpClient, string, CancellationToken)"/>.
+	/// </summary>
+	/// <param name="http"><see cref="HttpClient"/></param>
+	/// <param name="registrationsUrl">The registrations URL for the repository.</param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The versions, or empty when the feed does not carry the package.</returns>
+	public static async Task<IPackageSearchMetadata[]> GetFeedMetadataAsync(this HttpClient http, Uri registrationsUrl, string packageId, CancellationToken cancellationToken)
+	{
+		if (http is null)				throw new ArgumentNullException(nameof(http));
+		if (registrationsUrl is null)	throw new ArgumentNullException(nameof(registrationsUrl));
+		if (packageId.IsEmpty())		throw new ArgumentNullException(nameof(packageId));
+
+		JObject index;
+
+		try
+		{
+			index = JObject.Parse(await http.GetFeedJsonAsync(new Uri(registrationsUrl, $"{packageId}/index.json".ToLowerInvariant()), cancellationToken).NoWait());
+		}
+		catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+		{
+			return [];
+		}
+
+		var versions = new List<IPackageSearchMetadata>();
+
+		foreach (var page in Items(index))
+		{
+			// A package with many versions has its pages listed by address only.
+			var leaves = page["items"] is JArray inline
+				? inline
+				: Items(JObject.Parse(await http.GetFeedJsonAsync(new Uri((string)page["@id"]), cancellationToken).NoWait()));
+
+			foreach (var leaf in leaves)
+			{
+				if (leaf["catalogEntry"] is JObject entry)
+					versions.Add(entry.FromJToken<PackageSearchMetadataRegistration>());
+			}
+		}
+
+		return [.. versions.OrderBy(v => v.Identity.Version)];
+	}
+
+	private static IEnumerable<JToken> Items(JToken token)
+		=> (IEnumerable<JToken>)(token["items"] as JArray) ?? [];
+
+	private static async Task<string> GetFeedJsonAsync(this HttpClient http, Uri url, CancellationToken cancellationToken)
+	{
+		using var response = await http.GetAsync(url, cancellationToken).NoWait();
+		response.EnsureSuccessStatusCode();
+
+		var body = await response.Content.ReadAsByteArrayAsync(cancellationToken).NoWait();
+
+		// nuget.org encodes some documents whether the client asked for it or not.
+		if (response.Content.Headers.ContentEncoding.Contains("gzip", StringComparer.OrdinalIgnoreCase))
+		{
+			using var zip = new GZipStream(new MemoryStream(body), CompressionMode.Decompress);
+			using var plain = new MemoryStream();
+
+			await zip.CopyToAsync(plain, 81920, cancellationToken).NoWait();
+			body = plain.ToArray();
+		}
+
+		return Encoding.UTF8.GetString(body);
+	}
+
+	/// <summary>
+	/// Everything a feed answers to a search query, page by page.
+	/// </summary>
+	/// <param name="repo"><see cref="SourceRepository"/></param>
+	/// <param name="query">The query, in the feed's own syntax (for example <c>author:someone</c>).</param>
+	/// <param name="allowPreview">Allow preview versions.</param>
+	/// <param name="logger"><see cref="ILogger"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The packages found, each carrying its latest version and download count.</returns>
+	public static async Task<IPackageSearchMetadata[]> SearchAllAsync(this SourceRepository repo, string query, bool allowPreview, ILogger logger, CancellationToken cancellationToken)
+	{
+		if (repo is null)		throw new ArgumentNullException(nameof(repo));
+		if (query is null)		throw new ArgumentNullException(nameof(query));
+		if (logger is null)		throw new ArgumentNullException(nameof(logger));
+
+		const int pageSize = 1000;
+
+		var search = await repo.GetResourceAsync<PackageSearchResource>(cancellationToken).NoWait()
+			?? throw new InvalidOperationException($"PackageSearchResource for {repo.PackageSource.Name} is null.");
+
+		var filter = new SearchFilter(allowPreview);
+		var found = new Dictionary<string, IPackageSearchMetadata>(StringComparer.InvariantCultureIgnoreCase);
+
+		for (var page = 0; ; page++)
+		{
+			var hasNew = false;
+
+			foreach (var result in await search.SearchAsync(query, filter, page * pageSize, pageSize, logger, cancellationToken).NoWait())
+			{
+				if (found.TryAdd(result.Identity.Id, result))
+					hasNew = true;
+			}
+
+			// A page that adds nothing new is the end of the list: a feed that keeps answering the same
+			// packages would otherwise be paged forever.
+			if (!hasNew)
+				break;
+		}
+
+		return [.. found.Values];
+	}
+
+	/// <summary>
+	/// Create a private HTTP client.
+	/// </summary>
+	/// <param name="apiKey">The API key.</param>
+	/// <returns>The private HTTP client.</returns>
+	public static HttpClient CreatePrivateHttp(string apiKey)
+	{
+		var http = new HttpClient();
+		http.DefaultRequestHeaders.Add(ProtocolConstants.ApiKeyHeader, apiKey);
+		return http;
+	}
+
+	/// <summary>
+	/// Get the nuspec file.
+	/// </summary>
+	/// <param name="http"><see cref="HttpClient"/></param>
+	/// <param name="baseUrl">The base URL for the repository.</param>
+	/// <param name="packageId">The package ID.</param>
+	/// <param name="version">The package version.</param>
+	/// <param name="cancellationToken">The cancellation token.</param>
+	/// <returns>The nuspec file.</returns>
+	public static Task<Stream> GetNuspecAsync(this HttpClient http, Uri baseUrl, string packageId, NuGetVersion version, CancellationToken cancellationToken)
+	{
+		if (http is null)			throw new ArgumentNullException(nameof(http));
+		if (baseUrl is null)		throw new ArgumentNullException(nameof(baseUrl));
+		if (packageId.IsEmpty())	throw new ArgumentNullException(nameof(packageId));
+		if (version is null)		throw new ArgumentNullException(nameof(version));
+
+		return http.GetStreamAsync(new Uri(baseUrl, $"{packageId}/{version}/{packageId}{NuGetConstants.ManifestExtension}".ToLowerInvariant()), cancellationToken);
+	}
+}

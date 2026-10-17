@@ -1,0 +1,198 @@
+namespace Ecng.ComponentModel;
+
+/// <summary>
+/// Working schedule settings.
+/// </summary>
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.WorkScheduleKey,
+	Description = LocalizedStrings.WorkScheduleDescKey)]
+public class WorkingTime : Cloneable<WorkingTime>, IAsyncPersistable
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="WorkingTime"/>.
+	/// </summary>
+	public WorkingTime()
+	{
+	}
+
+	/// <summary>
+	/// Whether the schedule is active.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ActiveKey,
+		Description = LocalizedStrings.TaskOnKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 0)]
+	public bool IsEnabled { get; set; }
+
+	private List<WorkingTimePeriod> _periods = [];
+
+	/// <summary>
+	/// Schedule validity periods.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PeriodsKey,
+		Description = LocalizedStrings.PeriodsDescKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 1)]
+	public List<WorkingTimePeriod> Periods
+	{
+		get => _periods;
+		set => _periods = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private IDictionary<DateTime, Range<TimeSpan>[]> _specialDays = new Dictionary<DateTime, Range<TimeSpan>[]>();
+
+	/// <summary>
+	/// Special working days (holidays, shortened days, etc.).
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SpecialDaysKey,
+		Description = LocalizedStrings.SpecialDaysDescKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 2)]
+	public IDictionary<DateTime, Range<TimeSpan>[]> SpecialDays
+	{
+		get => _specialDays;
+		set
+		{
+			if (value is null)
+				throw new ArgumentNullException(nameof(value));
+
+			CheckDates(value.Keys);
+
+			_specialDays = value;
+		}
+	}
+
+	/// <summary>
+	/// Special working days (non-standard working days, e.g., Saturday working days).
+	/// </summary>
+	public DateTime[] SpecialWorkingDays
+	{
+		get => [.. SpecialDays.Where(p => p.Value.Length > 0).Select(p => p.Key)];
+		set
+		{
+			var workDays = (value ?? throw new ArgumentNullException(nameof(value)))
+				.Select(d => d.Date)
+				.ToHashSet();
+
+			var holidays = SpecialHolidays
+				.Where(d => !workDays.Contains(d))
+				.ToHashSet();
+
+			_specialDays = workDays
+				.Concat(holidays)
+				.Distinct()
+				.ToDictionary(
+					d => d,
+					d => holidays.Contains(d) ? [] : SpecialDays.TryGetValue(d, out var r) && r.Length > 0 ? r : [new Range<TimeSpan>(TimeSpan.Zero, TimeHelper.LessOneDay)]);
+		}
+	}
+
+	/// <summary>
+	/// Special holidays.
+	/// </summary>
+	public DateTime[] SpecialHolidays
+	{
+		get => [.. SpecialDays.Where(p => p.Value.Length == 0).Select(p => p.Key)];
+		set
+		{
+			var holidays = (value ?? throw new ArgumentNullException(nameof(value)))
+				.Select(d => d.Date)
+				.ToHashSet();
+
+			var workDays = SpecialWorkingDays
+				.Where(d => !holidays.Contains(d))
+				.ToHashSet();
+
+			_specialDays = holidays
+				.Concat(workDays)
+				.Distinct()
+				.ToDictionary(
+					d => d,
+					d => workDays.Contains(d) ? SpecialDays.TryGetValue(d, out var r) ? r : [new Range<TimeSpan>(TimeSpan.Zero, TimeHelper.LessOneDay)] : []);
+		}
+	}
+
+	private static void CheckDates(IEnumerable<DateTime> dates)
+	{
+		var unique = new HashSet<DateTime>();
+
+		foreach (var date in dates)
+		{
+			if (!unique.Add(date.Date))
+				throw new ArgumentException($"Collection has duplicate dates.");
+		}
+	}
+
+	/// <inheritdoc />
+	public override WorkingTime Clone()
+	{
+		return new()
+		{
+			IsEnabled = IsEnabled,
+			_periods = [.. Periods.Select(p => p.Clone())],
+			_specialDays = SpecialDays.ToDictionary(
+				p => p.Key,
+				p => p.Value.Select(r => r.Clone()).ToArray())
+		};
+	}
+
+	/// <inheritdoc />
+	public async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		IsEnabled = storage.GetValue(nameof(IsEnabled), IsEnabled);
+
+		var periods = new List<WorkingTimePeriod>();
+
+		foreach (var s in storage.GetValue<IEnumerable<SettingsStorage>>(nameof(Periods)))
+			periods.Add(await s.LoadAsync<WorkingTimePeriod>(cancellationToken));
+
+		Periods = periods;
+
+		if (storage.ContainsKey(nameof(SpecialDays)))
+		{
+			SpecialDays.Clear();
+			SpecialDays.AddRange(storage
+				.GetValue<IEnumerable<SettingsStorage>>(nameof(SpecialDays))
+				.Select(s => new KeyValuePair<DateTime, Range<TimeSpan>[]>
+				(
+					s.GetValue<DateTime>("Day"),
+					[.. s.GetValue<IEnumerable<SettingsStorage>>("Periods").Select(s1 => s1.ToRange<TimeSpan>())]
+				))
+			);
+		}
+		else
+		{
+			SpecialWorkingDays = [.. storage.GetValue<List<DateTime>>(nameof(SpecialWorkingDays))];
+			SpecialHolidays = [.. storage.GetValue<List<DateTime>>(nameof(SpecialHolidays))];
+		}
+	}
+
+	/// <inheritdoc />
+	public async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var periods = new List<SettingsStorage>();
+
+		foreach (var period in Periods)
+			periods.Add(await period.SaveAsync(cancellationToken));
+
+		storage
+			.Set(nameof(IsEnabled), IsEnabled)
+			.Set(nameof(Periods), periods.ToArray())
+			.Set(nameof(SpecialDays), SpecialDays.Select(p => new SettingsStorage()
+				.Set("Day", p.Key)
+				.Set("Periods", p.Value.Select(p1 => p1.ToStorage()).ToArray())
+			).ToArray());
+		;
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+		=> $"Enabled={IsEnabled}, Periods={Periods.Count}, SpecialDays={SpecialDays.Count}";
+}

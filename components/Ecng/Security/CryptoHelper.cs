@@ -1,0 +1,510 @@
+namespace Ecng.Security;
+
+using System.Buffers;
+using System.IO;
+using System.Security;
+
+using Ecng.IO;
+
+/// <summary>
+/// Crypto helper.
+/// </summary>
+public static class CryptoHelper
+{
+	/// <summary>
+	/// Converts the <see cref="RSAParameters"/> to a byte array.
+	/// </summary>
+	/// <param name="param"><see cref="RSAParameters"/></param>
+	/// <returns>Byte array.</returns>
+	public static byte[] FromRsa(this RSAParameters param)
+	{
+		var stream = new MemoryStream();
+
+		WriteByteArray(stream, param.P);
+		WriteByteArray(stream, param.Q);
+		WriteByteArray(stream, param.D);
+		WriteByteArray(stream, param.DP);
+		WriteByteArray(stream, param.DQ);
+		WriteByteArray(stream, param.InverseQ);
+		WriteByteArray(stream, param.Exponent);
+		WriteByteArray(stream, param.Modulus);
+
+		return stream.To<byte[]>();
+	}
+
+	/// <summary>
+	/// Converts the byte array to <see cref="RSAParameters"/>.
+	/// </summary>
+	/// <param name="key">Byte array.</param>
+	/// <returns><see cref="RSAParameters"/></returns>
+	public static RSAParameters ToRsa(this byte[] key)
+	{
+		if (key is null)
+			throw new ArgumentNullException(nameof(key));
+
+		var stream = key.To<Stream>();
+
+		return new()
+		{
+			P = ReadByteArray(stream),
+			Q = ReadByteArray(stream),
+			D = ReadByteArray(stream),
+			DP = ReadByteArray(stream),
+			DQ = ReadByteArray(stream),
+			InverseQ = ReadByteArray(stream),
+			Exponent = ReadByteArray(stream),
+			Modulus = ReadByteArray(stream)
+		};
+	}
+
+	#region WriteByteArray
+
+	private static void WriteByteArray(Stream stream, byte[] array)
+	{
+		if (stream is null)
+			throw new ArgumentNullException(nameof(stream));
+
+		stream.WriteEx(array is null);
+
+		if (array is null)
+			return;
+
+		stream.WriteEx(array);
+	}
+
+	#endregion
+
+	#region ReadByteArray
+
+	private static byte[] ReadByteArray(Stream stream)
+	{
+		if (stream is null)
+			throw new ArgumentNullException(nameof(stream));
+
+		var isNull = stream.Read<bool>();
+
+		if (isNull)
+			return null;
+
+		return stream.Read<byte[]>();
+	}
+
+	#endregion
+
+	#region Generate
+
+	/// <summary>
+	/// Returns a new generated <code>RSAParameters</code> class which
+	/// will be used as a key for the signature.
+	/// <remarks>
+	/// It will generate a PRIVATE key (which includes the PUBLIC key).
+	/// </remarks>
+	/// </summary>
+	public static RSAParameters GenerateRsa()
+	{
+		using var rsa = RSA.Create();
+		return rsa.ExportParameters(true);
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Returns the public part of the <see cref="RSAParameters"/>.
+	/// </summary>
+	/// <param name="param"><see cref="RSAParameters"/></param>
+	/// <returns>The public part of the <see cref="RSAParameters"/>.</returns>
+	public static RSAParameters PublicPart(this RSAParameters param)
+	{
+		return new()
+		{
+			Exponent = param.Exponent,
+			Modulus = param.Modulus,
+		};
+	}
+
+	// This constant is used to determine the keysize of the encryption algorithm in bits.
+	// We divide this by 8 within the code below to get the equivalent number of bytes.
+	private const int _keySize = 256;
+
+	private const int _legacyDerivationIterations = 1000;
+	private const int _derivationIterations = 100000;
+	private static readonly HashAlgorithmName _legacyDerivationHash = HashAlgorithmName.SHA1;
+	private static readonly HashAlgorithmName _derivationHash = HashAlgorithmName.SHA256;
+
+	private static SymmetricAlgorithm CreateRijndaelManaged()
+	{
+		var algo = Aes.Create();
+
+		algo.BlockSize = 128;
+		algo.Mode = CipherMode.CBC;
+		algo.Padding = PaddingMode.PKCS7;
+
+		return algo;
+	}
+
+	/// <summary>
+	/// Encrypts the plain text.
+	/// </summary>
+	/// <param name="plain">The plain text.</param>
+	/// <param name="passPhrase">The pass phrase.</param>
+	/// <param name="salt">The salt.</param>
+	/// <param name="iv">The iv.</param>
+	/// <returns>The encrypted bytes.</returns>
+	public static byte[] Encrypt(this byte[] plain, string passPhrase, byte[] salt, byte[] iv)
+	{
+		if (plain is null)
+			throw new ArgumentNullException(nameof(plain));
+
+		if (passPhrase.IsEmpty())
+			throw new ArgumentNullException(nameof(passPhrase));
+
+		if (iv?.Length > 16)
+			iv = iv.AsSpan(0, 16).ToArray();
+
+		var keyBytes = DeriveKey(passPhrase, salt, false);
+
+		using var symmetricKey = CreateRijndaelManaged();
+
+		using var encryptor = symmetricKey.CreateEncryptor(keyBytes, iv);
+		using var memoryStream = new MemoryStream();
+		using var cryptoStream = new CryptoStream(memoryStream, encryptor, CryptoStreamMode.Write);
+
+		cryptoStream.Write(plain, 0, plain.Length);
+		cryptoStream.FlushFinalBlock();
+		// Return only the cipher bytes; salt and IV should be stored separately.
+
+		return memoryStream.ToArray();
+	}
+
+	private static byte[] ReadStream(this CryptoStream stream, int maxLen)
+	{
+		var buffer = ArrayPool<byte>.Shared.Rent(maxLen);
+		try
+		{
+			var offset = 0;
+
+			while (offset < maxLen)
+			{
+				var numRead = stream.Read(buffer, offset, maxLen - offset);
+				if (numRead == 0)
+					break;
+
+				offset += numRead;
+			}
+
+			var result = new byte[offset];
+			Buffer.BlockCopy(buffer, 0, result, 0, offset);
+			return result;
+		}
+		finally
+		{
+			ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+		}
+	}
+
+	/// <summary>
+	/// Decrypts the cipher text.
+	/// </summary>
+	/// <param name="cipherText">The cipher text.</param>
+	/// <param name="passPhrase">The pass phrase.</param>
+	/// <param name="salt">The salt.</param>
+	/// <param name="iv">The iv.</param>
+	/// <returns>The decrypted bytes.</returns>
+	public static byte[] Decrypt(this byte[] cipherText, string passPhrase, byte[] salt, byte[] iv)
+	{
+		if (cipherText is null)
+			throw new ArgumentNullException(nameof(cipherText));
+
+		if (passPhrase.IsEmpty())
+			throw new ArgumentNullException(nameof(passPhrase));
+
+		if (iv?.Length > 16)
+			iv = iv.AsSpan(0, 16).ToArray();
+
+		var keyBytes = DeriveKey(passPhrase, salt, false);
+
+		using var symmetricKey = CreateRijndaelManaged();
+
+		try
+		{
+			using var decryptor = symmetricKey.CreateDecryptor(keyBytes, iv);
+			using var memoryStream = new MemoryStream(cipherText);
+			using var cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read);
+
+			return cryptoStream.ReadStream(cipherText.Length);
+		}
+		catch (CryptographicException)
+		{
+			keyBytes = DeriveKey(passPhrase, salt, true);
+
+			using var decryptor = symmetricKey.CreateDecryptor(keyBytes, iv);
+			using var memoryStream = new MemoryStream(cipherText);
+			using var cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read);
+
+			return cryptoStream.ReadStream(cipherText.Length);
+		}
+	}
+
+	private static byte[] DeriveKey(string passPhrase, byte[] salt, bool legacy)
+	{
+#if NET10_0_OR_GREATER
+		return Rfc2898DeriveBytes.Pbkdf2(
+			passPhrase,
+			salt,
+			legacy ? _legacyDerivationIterations : _derivationIterations,
+			legacy ? _legacyDerivationHash : _derivationHash,
+			_keySize / 8);
+#else
+		using var password = new Rfc2898DeriveBytes(passPhrase, salt, legacy ? _legacyDerivationIterations : _derivationIterations);
+		return password.GetBytes(_keySize / 8);
+#endif
+	}
+
+	private static byte[] TransformAes(bool isEncrypt, byte[] inputBytes, string passPhrase, byte[] salt, byte[] iv)
+	{
+		if (inputBytes is null)
+			throw new ArgumentNullException(nameof(inputBytes));
+
+		if (passPhrase.IsEmpty())
+			throw new ArgumentNullException(nameof(passPhrase));
+
+		var keyBytes = DeriveKey(passPhrase, salt, false);
+
+		using var aes = Aes.Create();
+
+		aes.Mode = CipherMode.CBC;
+		aes.Padding = PaddingMode.PKCS7;
+
+		if (isEncrypt)
+		{
+			using var encryptor = aes.CreateEncryptor(keyBytes, iv);
+			using var memoryStream = new MemoryStream();
+			using var cryptoStream = new CryptoStream(memoryStream, encryptor, CryptoStreamMode.Write);
+
+			cryptoStream.Write(inputBytes, 0, inputBytes.Length);
+			cryptoStream.FlushFinalBlock();
+			return memoryStream.ToArray();
+		}
+		else
+		{
+			try
+			{
+				using var decryptor = aes.CreateDecryptor(keyBytes, iv);
+				using var memoryStream = new MemoryStream(inputBytes);
+				using var cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read);
+
+				return cryptoStream.ReadStream(inputBytes.Length);
+			}
+			catch (CryptographicException)
+			{
+				keyBytes = DeriveKey(passPhrase, salt, true);
+
+				using var decryptor = aes.CreateDecryptor(keyBytes, iv);
+				using var memoryStream = new MemoryStream(inputBytes);
+				using var cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read);
+
+				return cryptoStream.ReadStream(inputBytes.Length);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Encrypts the plain text.
+	/// </summary>
+	/// <param name="plain">The plain text.</param>
+	/// <param name="passPhrase">The pass phrase.</param>
+	/// <param name="salt">The salt.</param>
+	/// <param name="iv">The iv.</param>
+	/// <returns>The cipher text.</returns>
+	public static byte[] EncryptAes(this byte[] plain, string passPhrase, byte[] salt, byte[] iv) => TransformAes(true, plain, passPhrase, salt, iv);
+
+	/// <summary>
+	/// Decrypts the cipher text.
+	/// </summary>
+	/// <param name="cipherText">The cipher text.</param>
+	/// <param name="passPhrase">The pass phrase.</param>
+	/// <param name="salt">The salt.</param>
+	/// <param name="iv">The iv.</param>
+	/// <returns>The plain text.</returns>
+	public static byte[] DecryptAes(this byte[] cipherText, string passPhrase, byte[] salt, byte[] iv) => TransformAes(false, cipherText, passPhrase, salt, iv);
+
+	/// <summary>
+	/// MD5 hash.
+	/// </summary>
+	/// <param name="value">The value to hash.</param>
+	/// <returns>The hash.</returns>
+	public static string Md5(this byte[] value)
+	{
+		ArgumentNullException.ThrowIfNull(value);
+#if NET6_0_OR_GREATER
+		return MD5.HashData(value).Digest();
+#else
+		using var algo = MD5.Create();
+		return algo.ComputeHash(value).Digest();
+#endif
+	}
+
+	/// <summary>
+	/// SHA256 hash.
+	/// </summary>
+	/// <param name="value">The value to hash.</param>
+	/// <returns>The hash.</returns>
+	public static string Sha256(this byte[] value)
+	{
+		ArgumentNullException.ThrowIfNull(value);
+#if NET6_0_OR_GREATER
+		return SHA256.HashData(value).Digest();
+#else
+		using var algo = SHA256.Create();
+		return algo.ComputeHash(value).Digest();
+#endif
+	}
+
+	/// <summary>
+	/// SHA512 hash.
+	/// </summary>
+	/// <param name="value">The value to hash.</param>
+	/// <returns>The hash.</returns>
+	public static string Sha512(this byte[] value)
+	{
+		ArgumentNullException.ThrowIfNull(value);
+#if NET6_0_OR_GREATER
+		return SHA512.HashData(value).Digest();
+#else
+		using var algo = SHA512.Create();
+		return algo.ComputeHash(value).Digest();
+#endif
+	}
+
+	/// <summary>
+	/// The default salt size.
+	/// </summary>
+	public const int DefaultSaltSize = 128;
+
+	/// <summary>
+	/// Validates the password.
+	/// </summary>
+	/// <param name="secret"><see cref="Secret"/></param>
+	/// <param name="password">The password to check.</param>
+	/// <param name="algo">The hash algorithm.</param>
+	/// <returns>Operation result.</returns>
+	public static bool IsValid(this Secret secret, SecureString password, CryptoAlgorithm algo)
+		=> secret.IsValid(password.UnSecure(), algo);
+
+	/// <summary>
+	/// Validates the password.
+	/// </summary>
+	/// <param name="secret"><see cref="Secret"/></param>
+	/// <param name="password">The password to check.</param>
+	/// <param name="algo">The hash algorithm.</param>
+	/// <returns>Operation result.</returns>
+	public static bool IsValid(this Secret secret, string password, CryptoAlgorithm algo)
+		=> secret.Equals(password.CreateSecret(secret, algo));
+
+	/// <summary>
+	/// Creates a new <see cref="Secret"/> from the plain text.
+	/// </summary>
+	/// <param name="plainText">The plain text.</param>
+	/// <param name="algo">The hash algorithm.</param>
+	/// <returns><see cref="Secret"/></returns>
+	public static Secret CreateSecret(this SecureString plainText, CryptoAlgorithm algo)
+		=> plainText.UnSecure().CreateSecret(algo);
+
+	/// <summary>
+	/// Creates a new <see cref="Secret"/> from the plain text.
+	/// </summary>
+	/// <param name="plainText">The plain text.</param>
+	/// <param name="algo">The hash algorithm.</param>
+	/// <returns><see cref="Secret"/></returns>
+	public static Secret CreateSecret(this string plainText, CryptoAlgorithm algo)
+		=> plainText.CreateSecret(TypeHelper.GenerateSalt(DefaultSaltSize), algo);
+
+	/// <summary>
+	/// Creates a new <see cref="Secret"/> from the plain text.
+	/// </summary>
+	/// <param name="plainText">The plain text.</param>
+	/// <param name="secret"><see cref="Secret"/></param>
+	/// <param name="algo">The hash algorithm.</param>
+	/// <returns><see cref="Secret"/></returns>
+	public static Secret CreateSecret(this string plainText, Secret secret, CryptoAlgorithm algo)
+		=> plainText.CreateSecret(secret.CheckOnNull(nameof(secret)).Salt, algo);
+
+	/// <summary>
+	/// Creates a new <see cref="Secret"/> from the plain text.
+	/// </summary>
+	/// <param name="plainText">The plain text.</param>
+	/// <param name="salt">The salt.</param>
+	/// <param name="algo">The hash algorithm.</param>
+	/// <returns><see cref="Secret"/></returns>
+	public static Secret CreateSecret(this string plainText, byte[] salt, CryptoAlgorithm algo)
+	{
+		if (plainText.IsEmpty())
+			throw new ArgumentNullException(nameof(plainText));
+
+		if (salt is null)
+			throw new ArgumentNullException(nameof(salt));
+
+		if (algo is null)
+			throw new ArgumentNullException(nameof(algo));
+
+		var unencodedBytes = plainText.Unicode();
+		var buffer = new byte[unencodedBytes.Length + salt.Length];
+
+		Buffer.BlockCopy(unencodedBytes, 0, buffer, 0, unencodedBytes.Length);
+		Buffer.BlockCopy(salt, 0, buffer, unencodedBytes.Length, salt.Length);
+
+		return new()
+		{
+			Salt = [.. salt],
+			Hash = algo.Encrypt(buffer),
+		};
+	}
+
+	/// <summary>
+	/// Number of PBKDF2 iterations used to hash passwords (key stretching).
+	/// </summary>
+	public const int PasswordIterations = 100_000;
+
+	private const int _passwordHashSize = 32;
+	private static readonly HashAlgorithmName _passwordHash = HashAlgorithmName.SHA256;
+
+	/// <summary>
+	/// Creates a password <see cref="Secret"/> using PBKDF2 (slow, salted key stretching) — the recommended
+	/// way to store passwords, unlike the fast single-pass <see cref="CreateSecret(string, CryptoAlgorithm)"/>.
+	/// </summary>
+	/// <param name="password">The plain-text password.</param>
+	/// <param name="salt">Optional salt; a random one is generated when omitted.</param>
+	/// <returns><see cref="Secret"/> whose <see cref="Secret.Hash"/> is the PBKDF2 derivation.</returns>
+	public static Secret CreatePasswordSecret(this string password, byte[] salt = null)
+	{
+		if (password.IsEmpty())
+			throw new ArgumentNullException(nameof(password));
+
+		salt ??= TypeHelper.GenerateSalt(DefaultSaltSize);
+
+		return new()
+		{
+			Salt = [.. salt],
+			Hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, PasswordIterations, _passwordHash, _passwordHashSize),
+		};
+	}
+
+	/// <summary>
+	/// Validates a password against a PBKDF2 <see cref="Secret"/> created by <see cref="CreatePasswordSecret"/>,
+	/// in constant time.
+	/// </summary>
+	/// <param name="secret"><see cref="Secret"/>.</param>
+	/// <param name="password">The password to check.</param>
+	/// <returns><see langword="true"/> if the password matches.</returns>
+	public static bool IsPasswordValid(this Secret secret, string password)
+	{
+		if (secret is null)
+			throw new ArgumentNullException(nameof(secret));
+
+		if (secret.Salt is null || secret.Hash is null)
+			return false;
+
+		var computed = Rfc2898DeriveBytes.Pbkdf2(password ?? string.Empty, secret.Salt, PasswordIterations, _passwordHash, _passwordHashSize);
+		return CryptographicOperations.FixedTimeEquals(computed, secret.Hash);
+	}
+}

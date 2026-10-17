@@ -1,0 +1,7 @@
+# Handelsplätze
+
+Klicken Sie auf der Registerkarte **Allgemein** auf die Schaltfläche **Börsenplätze**.
+
+Hier können Sie grundlegende Informationen zu Handelsplätzen anzeigen sowie deren Zeitzone und Arbeitszeitplan festlegen.
+
+![Handelsplätze Bildschirmfoto](../../../images/hydra_boards.png)

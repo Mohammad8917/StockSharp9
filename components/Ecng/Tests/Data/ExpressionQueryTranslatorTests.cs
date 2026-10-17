@@ -1,0 +1,2045 @@
+﻿#if NET10_0_OR_GREATER
+
+namespace Ecng.Tests.Data;
+
+using System.Linq.Expressions;
+using System.Reflection;
+
+using Ecng.Data;
+using Ecng.Data.Sql;
+using Ecng.Serialization;
+
+/// <summary>
+/// Tests for ExpressionQueryTranslator SQL generation,
+/// particularly subquery alias handling.
+/// </summary>
+[TestClass]
+public class ExpressionQueryTranslatorTests : BaseTestClass
+{
+	private static readonly ISqlDialect _dialect = SqlServerDialect.Instance;
+	private static readonly ISqlDialect _pgDialect = PostgreSqlDialect.Instance;
+	private static readonly ISqlDialect _sqliteDialect = SQLiteDialect.Instance;
+
+	private class DummyQueryContext : IQueryContext
+	{
+
+		IAsyncEnumerable<TResult> IQueryContext.ExecuteEnumAsync<TSource, TResult>(Expression expression)
+			=> throw new NotSupportedException();
+
+		ValueTask IQueryContext.ExecuteAsync<TSource>(Expression expression)
+			=> throw new NotSupportedException();
+
+		ValueTask<TResult> IQueryContext.ExecuteResultAsync<TSource, TResult>(Expression expression)
+			=> throw new NotSupportedException();
+	}
+
+	private static IQueryable<T> CreateQueryable<T>()
+		=> new DefaultQueryable<T>(new DefaultQueryProvider<T>(new DummyQueryContext()), null);
+
+	private static (string sql, IDictionary<string, (Type, object)> parameters) TranslateSql<TSource>(IQueryable queryable, ISqlDialect dialect = null)
+	{
+		var expression = queryable.Expression;
+		var meta = SchemaRegistry.Get(typeof(TSource));
+
+		var translator = new ExpressionQueryTranslator(meta);
+		var query = translator.GenerateSql(expression);
+		var parameters = translator.Parameters;
+
+		return (query.Render(dialect ?? _dialect), parameters);
+	}
+
+	private static string GenerateSql<TSource>(IQueryable queryable, ISqlDialect dialect = null)
+		=> TranslateSql<TSource>(queryable, dialect).sql;
+
+	[TestMethod]
+	public void SubqueryAny_ShouldNotProduceEmptyAlias()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = from p in persons
+					select new VTestPersonWithTasks
+					{
+						AllColumns = p.AllColumns,
+						HasTasks = (from t in tasks where t.Person.Id == p.Id select t).Any(),
+					};
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("[]").AssertFalse($"SQL should not contain empty alias '[]', got: {sql}");
+		sql.Contains("[e].*").AssertTrue($"Expected main table alias '[e].*', got: {sql}");
+	}
+
+	[TestMethod]
+	public void SubqueryAverageWithCast_ShouldNotCastPredicate()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = from p in persons
+					select new VTestPersonWithTasks
+					{
+						AllColumns = p.AllColumns,
+						AvgPriority = (from t in tasks where !t.IsDone && t.Person.Id == p.Id select (decimal)t.Priority).Average(),
+					};
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		// averaging asks for one converted column; the rows it averages are chosen by plain comparisons, and
+		// converting those keeps every index out of the plan.
+		sql.Contains("cast([t].[Priority]").AssertTrue($"the averaged column should be converted, got: {sql}");
+		sql.Contains("cast([t].[IsDone]").AssertFalse($"the flag must not be converted, got: {sql}");
+		sql.Contains("cast([t].[Person]").AssertFalse($"the relation must not be converted, got: {sql}");
+		sql.Contains("cast([e].[Id]").AssertFalse($"the correlated key must not be converted, got: {sql}");
+	}
+
+	[TestMethod]
+	public void CorrelatedAnyInWhere_IsAskedAsExists()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		// "Whose person has a task worth showing" is one question about the person, and a list asks it that
+		// way rather than joining every task and throwing the duplicates away with a distinct.
+		var query = from p in persons
+					where tasks.Any(t => t.Person.Id == p.Id && !t.IsDone)
+					select p;
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+		sql.Contains("[e].[Id]").AssertTrue($"the sub-query should refer to the outer row, got: {sql}");
+	}
+
+	[TestMethod]
+	public void CorrelatedAnyInWhere_SurvivesAJoinAroundIt()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+		var categories = CreateQueryable<TestItemCategory>();
+
+		// The same question asked by a query that also joins -- which is what a list with access rules looks
+		// like. This is the shape that threw NullReferenceException while translating.
+		var query = from p in persons
+					join c in categories on p.Id equals c.Id into cg
+					from c2 in cg.DefaultIfEmpty()
+					where tasks.Any(t => t.Person.Id == p.Id && !t.IsDone) && c2 == null
+					select p;
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+	}
+
+	[TestMethod]
+	public void CorrelatedAnyInWhere_ComparingARelationToNull()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		// "Has a task that belongs to nobody else" -- a relation compared to null inside the correlated
+		// question. This is the shape a topic list asks with ("a message with no parent"), and it threw
+		// NullReferenceException while being translated.
+		var query = from p in persons
+					where tasks.Any(t => t.Person == null && !t.IsDone)
+					select p;
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+		sql.Contains("is null").AssertTrue($"the relation should be compared to null, got: {sql}");
+	}
+
+	[TestMethod]
+	public void CorrelatedAnyInWhere_OverAView()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var view = from p in persons
+				   select new VTestPersonWithTasks
+				   {
+					   AllColumns = p.AllColumns,
+					   TaskCount = (from t in tasks where t.Person.Id == p.Id select t).Count(),
+				   };
+
+		// The question is asked of the view, not of the table -- which is how a list filters a view the site
+		// reads. This is the shape that threw NullReferenceException while being translated.
+		var query = from v in view
+					where tasks.Any(t => t.Person.Id == v.Id && !t.IsDone)
+					select v;
+
+		var sql = GenerateSql<VTestPersonWithTasks>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+	}
+
+	[TestMethod]
+	public void CorrelatedAnyInWhere_WholeShape()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+		var categories = CreateQueryable<TestItemCategory>();
+
+		var view = from p in persons
+				   select new VTestPersonWithTasks
+				   {
+					   AllColumns = p.AllColumns,
+					   TaskCount = (from t in tasks where t.Person.Id == p.Id select t).Count(),
+				   };
+
+		// Everything a topic list is made of at once: a view, a pre-filtered source, an optional join, and
+		// the correlated question standing last among the conditions.
+		var filtered = view.Where(v => v.TaskCount >= 0);
+
+		var query = from e in filtered
+					join c in categories on e.Id equals c.Id into cg
+					from c2 in cg.DefaultIfEmpty()
+					where c2 == null && tasks.Any(t => t.Person.Id == e.Id)
+					select e;
+
+		var sql = GenerateSql<VTestPersonWithTasks>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+	}
+
+	[TestMethod]
+	public void AnyInWhere_OverAViewEntity()
+	{
+		var view = CreateQueryable<VTestPersonWithTasks>();
+		var tasks = CreateQueryable<TestTask>();
+
+		// The list a site reads is a view registered in the schema, not a projection written on the spot.
+		// Asking a sub-query question in a filter over such a view threw NullReferenceException.
+		var query = from v in view
+					where v.TaskCount > 0 && tasks.Any(t => !t.IsDone)
+					select v;
+
+		var sql = GenerateSql<VTestPersonWithTasks>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+	}
+
+	/// <summary>
+	/// A registry of tables reached as static properties, which is how an application usually offers the
+	/// tables a query may refer to.
+	/// </summary>
+	private static class Tables
+	{
+		public static IQueryable<TestTask> Tasks => CreateQueryable<TestTask>();
+	}
+
+	[TestMethod]
+	public void AnyOverAStaticallyReachedTable()
+	{
+		var persons = CreateQueryable<TestPerson>();
+
+		// The sub-query's source is reached through a static property rather than held in a local. It stands
+		// for a table either way, but the chain has no constant at its root, and walking it as if it were a
+		// column threw NullReferenceException.
+		var query = from p in persons
+					where Tables.Tasks.Any(t => !t.IsDone)
+					select p;
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+		sql.Contains("Ecng_TestTask").AssertTrue($"the sub-query should read the task table, got: {sql}");
+	}
+
+	[TestMethod]
+	public void CorrelatedAnyOverAStaticallyReachedTable()
+	{
+		var persons = CreateQueryable<TestPerson>();
+
+		var query = from p in persons
+					where Tables.Tasks.Any(t => t.Person.Id == p.Id && !t.IsDone)
+					select p;
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("exists").AssertTrue($"the question should become an EXISTS, got: {sql}");
+		sql.Contains("[e].[Id]").AssertTrue($"the sub-query should refer to the outer row, got: {sql}");
+	}
+
+	[TestMethod]
+	public void SubqueryCount_ShouldNotProduceEmptyAlias()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = from p in persons
+					select new VTestPersonWithTasks
+					{
+						AllColumns = p.AllColumns,
+						TaskCount = (from t in tasks where t.Person.Id == p.Id select t).Count(),
+					};
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("[]").AssertFalse($"SQL should not contain empty alias '[]', got: {sql}");
+	}
+
+	[TestMethod]
+	public void MultipleSubqueries_ShouldNotProduceEmptyAlias()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = from p in persons
+					select new VTestPersonWithTasks
+					{
+						AllColumns = p.AllColumns,
+						HasTasks = (from t in tasks where t.Person.Id == p.Id select t).Any(),
+						TaskCount = (from t in tasks where t.Person.Id == p.Id select t).Count(),
+					};
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.Contains("[]").AssertFalse($"SQL should not contain empty alias '[]', got: {sql}");
+	}
+
+	/// <summary>
+	/// A projection that mixes a correlated <c>.Any()</c> (bit) column with a real aggregate
+	/// (<c>.Count()</c> / <c>.Max()</c>) over a correlated subquery must keep the <c>.Any()</c>
+	/// column as a scalar EXISTS/CASE subquery. It must never be folded through an aggregate as
+	/// <c>MAX(&lt;bit&gt;)</c>, which SQL Server rejects with
+	/// "Operand data type bit is invalid for max operator". Repro of the VTopic view shape.
+	/// </summary>
+	[TestMethod]
+	public void SubqueryAny_WithAggregateSiblings_DoesNotWrapBitInMax()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+		var items = CreateQueryable<TestItem>();
+
+		// Mirrors the VTopic view exactly: a bit .Any() column over one relation, plus .Count() and
+		// .Max() aggregate subqueries over another relation whose WHERE filters on a bit column and a
+		// correlated FK (here "!t.IsDone && t.Person.Id == p.Id", like VTopic's "!m.Deleted && m.Topic.Id == e.Id").
+		var query = from p in persons
+					select new VTestPersonWithTasks
+					{
+						AllColumns = p.AllColumns,
+						HasTasks = (from i in items where i.Id == p.Id select i).Any(),
+						TaskCount = (from t in tasks where !t.IsDone && t.Person.Id == p.Id select t).Count(),
+						MaxSubTaskId = (from t in tasks where !t.IsDone && t.Person.Id == p.Id select t.Id).Max(),
+					};
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		// The aggregate must apply ONLY to the projected column (max([t].[Id])). Every column referenced
+		// in the subquery's WHERE predicate — the bit [IsDone], the correlated FK [Person], the outer key
+		// [e].[Id] — must remain un-aggregated. Wrapping the bit in MAX makes SQL Server fail with
+		// "Operand data type bit is invalid for max operator"; wrapping any of them is also an illegal
+		// aggregate in a WHERE clause.
+		sql.ContainsIgnoreCase("max([t].[IsDone]").AssertFalse($"bit predicate column wrapped in MAX, got: {sql}");
+		sql.ContainsIgnoreCase("max([t].[Person]").AssertFalse($"correlated FK wrapped in MAX, got: {sql}");
+		sql.ContainsIgnoreCase("max([e].[Id])").AssertFalse($"outer key wrapped in MAX, got: {sql}");
+		sql.ContainsIgnoreCase("max([t].[Id])").AssertTrue($"projected column must be aggregated, got: {sql}");
+	}
+
+	/// <summary>
+	/// A correlated aggregate sub-query projected into an ANONYMOUS type
+	/// (<see cref="NewExpression"/>, e.g. <c>select new { p.Id, Max = (from t ... ).Max() }</c>)
+	/// must emit a scalar sub-query that keeps its OWN FROM/alias, exactly like the
+	/// entity <c>MemberInit</c> path. (Was: <c>VisitNew</c> visited the aggregate
+	/// directly instead of wrapping it, so the sub-query collapsed into the outer
+	/// query — <c>select max([e].[Priority]) from [Ecng_TestPerson] [e] where
+	/// ([e].[Person] = [e].[Id])</c> — dropping the inner FROM and the outer key
+	/// column. The scalar then came back NULL and materialised as <c>default(T)</c>
+	/// for every row.)
+	/// </summary>
+	[TestMethod]
+	public void CorrelatedAggregate_AnonymousProjection_EmitsScalarSubquery()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = persons.Select(p => new
+		{
+			p.Id,
+			MaxPri = (from t in tasks where t.Person.Id == p.Id select t.Priority).Max(),
+		});
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		// The outer key column must still be projected alongside the sub-query.
+		sql.Contains("[e].[Id]").AssertTrue($"outer key column dropped, got: {sql}");
+		// The aggregate must run over the INNER task alias, not the outer person alias.
+		sql.ContainsIgnoreCase("max([t].[Priority])").AssertTrue($"aggregate not over inner alias, got: {sql}");
+		sql.ContainsIgnoreCase("max([e].[Priority])").AssertFalse($"aggregate flattened onto outer alias, got: {sql}");
+		// The sub-query keeps its own FROM and correlates inner FK to the outer key.
+		sql.ContainsIgnoreCase("from [Ecng_TestTask]").AssertTrue($"inner FROM lost, got: {sql}");
+		sql.Contains("[t].[Person] = [e].[Id]").AssertTrue($"correlation not bound to outer key, got: {sql}");
+	}
+
+	/// <summary>
+	/// Same correlated-aggregate shape as
+	/// <see cref="CorrelatedAggregate_AnonymousProjection_EmitsScalarSubquery"/> but
+	/// projected through a POSITIONAL constructor / record (also a
+	/// <see cref="NewExpression"/>, with <c>Members == null</c>). Must likewise emit a
+	/// proper scalar sub-query rather than flattening the aggregate onto the outer alias.
+	/// </summary>
+	[TestMethod]
+	public void CorrelatedAggregate_PositionalCtorProjection_EmitsScalarSubquery()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = persons.Select(p => new PersonMaxPriority(
+			p.Id,
+			(from t in tasks where t.Person.Id == p.Id select t.Priority).Max()));
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.ContainsIgnoreCase("max([t].[Priority])").AssertTrue($"aggregate not over inner alias, got: {sql}");
+		sql.ContainsIgnoreCase("max([e].[Priority])").AssertFalse($"aggregate flattened onto outer alias, got: {sql}");
+		sql.ContainsIgnoreCase("from [Ecng_TestTask]").AssertTrue($"inner FROM lost, got: {sql}");
+		sql.Contains("[t].[Person] = [e].[Id]").AssertTrue($"correlation not bound to outer key, got: {sql}");
+	}
+
+	/// <summary>
+	/// Only a genuine correlated sub-query in an anonymous/ctor projection may be
+	/// routed through the sub-query-wrapping path. A NESTED SCALAR FUNCTION call
+	/// whose first argument is itself a call — e.g. <c>Math.Round(Math.Abs(col))</c>
+	/// — must stay on the plain visit path and emit nested scalar SQL, not be
+	/// mistaken for a sub-query. (Guards against an over-broad routing that sent
+	/// every projection arg through the sub-query path, whose <c>isSubquery</c>
+	/// heuristic over-matches such calls and then throws in <c>AnalyseSubqueryShape</c>.)
+	/// </summary>
+	[TestMethod]
+	public void AnonymousProjection_NestedScalarCall_NotTreatedAsSubquery()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(e => new { e.Id, R = Math.Round(Math.Abs(e.Price)) });
+
+		// Must translate without throwing and emit the nested scalar functions.
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("round(").AssertTrue($"expected round(...) scalar function, got: {sql}");
+		sql.ContainsIgnoreCase("abs([e].[Price])").AssertTrue($"expected abs over the column, got: {sql}");
+	}
+
+	/// <summary>
+	/// A Convert-wrapped column projected into a CHAINED anonymous projection
+	/// (<c>Select(e =&gt; new { P = (long)e.Priority }).Select(x =&gt; new { Q = x.P })</c>)
+	/// must keep resolving to the underlying column and emit a valid
+	/// <c>[e].[Priority] AS [Q]</c>. (Guards against an over-broad routing that
+	/// stripped the leading Convert and re-routed the member through the rename-map
+	/// branch, corrupting the projected column in a nested layer.)
+	/// </summary>
+	[TestMethod]
+	public void ChainedAnonymousProjection_ConvertWrappedColumn_KeepsColumn()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items
+			.Select(e => new { P = (long)e.Priority })
+			.Select(x => new { Q = x.P });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[Priority]").AssertTrue($"projected column lost, got: {sql}");
+		sql.ContainsIgnoreCase("as [Q]").AssertTrue($"result alias lost, got: {sql}");
+	}
+
+	/// <summary>
+	/// A correlated aggregate combined with a BINARY operator in a projection
+	/// member — <c>(from t ...).Count() + 1</c> — must wrap the aggregate as a
+	/// scalar sub-query and then apply the operator: <c>((select count(*) ...) + 1)</c>.
+	/// (Was: the aggregate was a <see cref="BinaryExpression"/> operand, not a
+	/// top-level call, so it was never wrapped — the correlation flattened to
+	/// <c>[e].[Fk] = [e].[Id]</c> and the SQL was malformed.)
+	/// </summary>
+	[TestMethod]
+	public void CorrelatedAggregate_BinaryWrapped_EmitsScalarSubquery()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = persons.Select(p => new
+		{
+			p.Id,
+			C = (from t in tasks where t.Person.Id == p.Id select t).Count() + 1,
+		});
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.ContainsIgnoreCase("count(*)").AssertTrue($"aggregate lost, got: {sql}");
+		sql.ContainsIgnoreCase("from [Ecng_TestTask]").AssertTrue($"inner FROM lost, got: {sql}");
+		sql.Contains("[t].[Person] = [e].[Id]").AssertTrue($"correlation not bound to outer key, got: {sql}");
+		sql.Contains(") + 1").AssertTrue($"operator not applied to the wrapped sub-query, got: {sql}");
+	}
+
+	/// <summary>
+	/// The idiomatic empty-set guard <c>(from t ...).Max() ?? 0</c> (a
+	/// <see cref="ExpressionType.Coalesce"/> <see cref="BinaryExpression"/> over a
+	/// nullable-select aggregate) must emit <c>isnull((select max(...) ...), 0)</c>
+	/// with the aggregate correctly correlated and the source table resolved to the
+	/// real entity (not <c>[Nullable`1]</c>).
+	/// </summary>
+	[TestMethod]
+	public void CorrelatedAggregate_CoalesceGuard_EmitsScalarSubquery()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = persons.Select(p => new
+		{
+			p.Id,
+			M = (from t in tasks where t.Person.Id == p.Id select (int?)t.Priority).Max() ?? 0,
+		});
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.ContainsIgnoreCase("isnull(").AssertTrue($"coalesce not emitted, got: {sql}");
+		sql.ContainsIgnoreCase("max([t].[Priority])").AssertTrue($"aggregate lost, got: {sql}");
+		sql.ContainsIgnoreCase("from [Ecng_TestTask]").AssertTrue($"source table not resolved (Nullable leaked?), got: {sql}");
+		sql.ContainsIgnoreCase("[Nullable").AssertFalse($"source degenerated to the CLR nullable type, got: {sql}");
+		sql.Contains("[t].[Person] = [e].[Id]").AssertTrue($"correlation not bound to outer key, got: {sql}");
+	}
+
+	/// <summary>
+	/// A correlated aggregate inside a CONDITIONAL (ternary) branch —
+	/// <c>cond ? (from t ...).Max() : 0</c> — must render the aggregate as a scalar
+	/// sub-query inside the CASE THEN branch, keeping the ELSE/END intact. (Was: the
+	/// nested aggregate flattened and collapsed the CASE body to
+	/// <c>(case when ... then )</c>.)
+	/// </summary>
+	[TestMethod]
+	public void CorrelatedAggregate_InConditionalBranch_EmitsScalarSubquery()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = persons.Select(p => new
+		{
+			p.Id,
+			X = p.Name != null ? (from t in tasks where t.Person.Id == p.Id select t.Priority).Max() : 0,
+		});
+
+		var sql = GenerateSql<TestPerson>(query);
+
+		sql.ContainsIgnoreCase("case").AssertTrue($"CASE not emitted, got: {sql}");
+		sql.ContainsIgnoreCase("max([t].[Priority])").AssertTrue($"aggregate lost from THEN branch, got: {sql}");
+		sql.ContainsIgnoreCase("from [Ecng_TestTask]").AssertTrue($"inner FROM lost, got: {sql}");
+		sql.ContainsIgnoreCase("end").AssertTrue($"CASE END missing (body collapsed?), got: {sql}");
+		sql.Contains("[t].[Person] = [e].[Id]").AssertTrue($"correlation not bound to outer key, got: {sql}");
+	}
+
+	/// <summary>
+	/// Two-level navigation in a Where clause (<c>s.Task.Person.Id == X</c>)
+	/// must register a LEFT JOIN to the intermediate <c>Task</c> table so
+	/// the FK column <c>[Task].[Person]</c> becomes reachable, and then use
+	/// that FK column directly instead of joining the leaf <c>Person</c>
+	/// table just to read its primary key.
+	/// </summary>
+	[TestMethod]
+	public void WhereTwoLevelNavigation_ShouldChainImplicitJoins()
+	{
+		// Pre-register related entity schemas so the resolver can discover
+		// the intermediate Task table when recursing through the navigation.
+		SchemaRegistry.Get(typeof(TestPerson));
+		SchemaRegistry.Get(typeof(TestTask));
+
+		var subTasks = CreateQueryable<TestSubTask>();
+
+		var personId = 42L;
+		var query = subTasks.Where(s => s.Task.Person.Id == personId);
+
+		var sql = GenerateSql<TestSubTask>(query);
+
+		// Intermediate JOIN to TestTask is required so the FK column on Task is reachable.
+		sql.ContainsIgnoreCase("left join").AssertTrue($"Expected at least one LEFT JOIN, got: {sql}");
+		sql.ContainsIgnoreCase("[Ecng_TestTask]").AssertTrue($"Expected JOIN to Ecng_TestTask, got: {sql}");
+		// Leaf .Id resolves through the FK column on Task — no need to join Person.
+		sql.ContainsIgnoreCase("[Ecng_TestPerson]").AssertFalse($"Should not join Ecng_TestPerson when only its Id is needed, got: {sql}");
+		// Predicate must reference the FK column on the Task alias.
+		sql.Contains("[Task].[Person]").AssertTrue($"Expected FK column [Task].[Person] in predicate, got: {sql}");
+	}
+
+	[TestMethod]
+	public void StringHelper_IsEmpty_TranslatesToSql()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Where(x => !x.Name.IsEmpty());
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("is null").AssertTrue($"Expected 'is null' in SQL, got: {sql}");
+		sql.Contains("like N''").AssertTrue($"Expected 'like N''' in SQL, got: {sql}");
+	}
+
+	[TestMethod]
+	public void StringHelper_IsEmptyOrWhiteSpace_TranslatesToSql()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Where(x => !x.Name.IsEmptyOrWhiteSpace());
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("is null").AssertTrue($"Expected 'is null' in SQL, got: {sql}");
+		sql.Contains("= N''").AssertTrue($"Expected '= N''' in SQL, got: {sql}");
+	}
+
+	/// <summary>
+	/// When C# compiler folds "select new VEntity { Prop = joined.Col }" into the
+	/// last Join's result selector (inner join without "into"), the translator must
+	/// visit the MemberInitExpression to include computed columns in SELECT.
+	/// Without the fix, the SQL would be missing computed columns like JoinedCategoryName.
+	/// </summary>
+	[TestMethod]
+	public void Join_MemberInitInResultSelector_IncludesComputedColumns()
+	{
+		var items = CreateQueryable<TestItem>();
+		var categories = CreateQueryable<TestCategory>();
+
+		// C# compiles this into Queryable.Join with MemberInit in the result selector (4th arg)
+		var query = from item in items
+					join cat in categories on item.Id equals cat.Id
+					select new VTestItemWithCategory
+					{
+						Id = item.Id,
+						Name = item.Name,
+						JoinedCategoryName = cat.CategoryName,
+					};
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("JoinedCategoryName").AssertTrue(
+			$"SQL must include computed column 'JoinedCategoryName' from Join result selector, got: {sql}");
+		sql.Contains("[Ecng_TestCategory]").AssertTrue(
+			$"SQL must include INNER JOIN to Ecng_TestCategory, got: {sql}");
+	}
+
+	/// <summary>
+	/// When C# compiler folds "select new VEntity { Prop = joined.Col }" into the
+	/// last SelectMany's result selector (left join via GroupJoin + SelectMany + DefaultIfEmpty),
+	/// the translator must visit the MemberInitExpression to include computed columns.
+	/// Without the fix, the SQL would be missing the left-joined computed columns.
+	/// </summary>
+	[TestMethod]
+	public void SelectMany_MemberInitInResultSelector_IncludesComputedColumns()
+	{
+		var items = CreateQueryable<TestItem>();
+		var categories = CreateQueryable<TestCategory>();
+
+		// C# compiles this into GroupJoin + SelectMany with MemberInit in SelectMany's result selector
+		var query = from item in items
+					join cat in categories on item.Id equals cat.Id into g
+					from cat in g.DefaultIfEmpty()
+					select new VTestItemWithOptionalCategory
+					{
+						Id = item.Id,
+						Name = item.Name,
+						LeftJoinedDescription = cat.Description,
+					};
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("LeftJoinedDescription").AssertTrue(
+			$"SQL must include computed column 'LeftJoinedDescription' from SelectMany result selector, got: {sql}");
+		sql.Contains("[Ecng_TestCategory]").AssertTrue(
+			$"SQL must include LEFT JOIN to Ecng_TestCategory, got: {sql}");
+	}
+
+	/// <summary>
+	/// When multiple joins fold their MemberInit into the result selector,
+	/// all computed columns from each join must appear in the generated SQL.
+	/// </summary>
+	[TestMethod]
+	public void MultipleJoins_MemberInitInResultSelector_IncludesAllComputedColumns()
+	{
+		var items = CreateQueryable<TestItem>();
+		var categories = CreateQueryable<TestCategory>();
+		var persons = CreateQueryable<TestPerson>();
+
+		// Two consecutive joins with MemberInit folded into the last Join's result selector
+		var query = from item in items
+					join cat in categories on item.Id equals cat.Id
+					join p in persons on item.Id equals p.Id
+					select new VTestItemWithCategory
+					{
+						Id = item.Id,
+						Name = p.Name,
+						JoinedCategoryName = cat.CategoryName,
+					};
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("JoinedCategoryName").AssertTrue(
+			$"SQL must include 'JoinedCategoryName' from multi-join MemberInit, got: {sql}");
+		sql.Contains("[Ecng_TestCategory]").AssertTrue(
+			$"SQL must include JOIN to Ecng_TestCategory, got: {sql}");
+		sql.Contains("[Ecng_TestPerson]").AssertTrue(
+			$"SQL must include JOIN to Ecng_TestPerson, got: {sql}");
+	}
+	// Helper that produces same closure field name "value" for both calls
+	private static IQueryable<TestItem> FilterByName(IQueryable<TestItem> q, string value)
+		=> q.Where(x => x.Name == value);
+
+	// Helper that produces same closure field name "value" for subquery tests
+	private static IQueryable<TestTask> FilterTasksByName(IQueryable<TestTask> q, string value)
+		=> q.Where(x => x.Title == value);
+
+	[TestMethod]
+	public void Concat_DifferentConstants_ParametersPreserved()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		// Same closure field name "value" → same parameter base name → collision without fix
+		var left = FilterByName(items, "AAA");
+		var right = FilterByName(items, "BBB");
+		var query = left.Concat(right);
+
+		var (sql, parameters) = TranslateSql<TestItem>(query);
+
+		var values = parameters.Values.Select(v => v.Item2).ToArray();
+		values.AssertContains("AAA");
+		values.AssertContains("BBB");
+	}
+
+	[TestMethod]
+	public void Union_DifferentConstants_ParametersPreserved()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var left = FilterByName(items, "XXX");
+		var right = FilterByName(items, "YYY");
+		var query = left.Union(right);
+
+		var (sql, parameters) = TranslateSql<TestItem>(query);
+
+		var values = parameters.Values.Select(v => v.Item2).ToArray();
+		values.AssertContains("XXX");
+		values.AssertContains("YYY");
+	}
+
+	[TestMethod]
+	public void MultipleSubqueries_SameClosureFieldName_ParametersPreserved()
+	{
+		var persons = CreateQueryable<TestPerson>();
+		var tasks = CreateQueryable<TestTask>();
+
+		var left = FilterTasksByName(tasks, "AAA");
+		var right = FilterTasksByName(tasks, "BBB");
+
+		var query = from p in persons
+					select new VTestPersonWithTasks
+					{
+						AllColumns = p.AllColumns,
+						HasTasks = (from t in left where t.Person.Id == p.Id select t).Any(),
+						TaskCount = (from t in right where t.Person.Id == p.Id select t).Count(),
+					};
+
+		var (_, parameters) = TranslateSql<TestPerson>(query);
+
+		var values = parameters.Values.Select(v => v.Item2).ToArray();
+		values.AssertContains("AAA");
+		values.AssertContains("BBB");
+	}
+
+	#region Contains + Navigation Property Tests
+
+	/// <summary>
+	/// Ensures FK target entities are registered in SchemaRegistry
+	/// before running tests that reference them in expressions.
+	/// Without this, the resolver classifies unregistered FK targets as
+	/// inner-schema and doubles column names (e.g., PersonPerson).
+	/// </summary>
+	private static void EnsureFkEntitiesRegistered()
+	{
+		// Force registration of all FK target entity types.
+		// In production, this happens during startup, but in unit tests
+		// SchemaRegistry may not have seen these types yet.
+		SchemaRegistry.Get(typeof(TestPerson));
+		SchemaRegistry.Get(typeof(TestItem));
+		SchemaRegistry.Get(typeof(TestCategory));
+	}
+
+	/// <summary>
+	/// Verifies that Contains with a navigation property's Id
+	/// generates SQL using the FK column, not the entity's own Id column.
+	/// </summary>
+	[TestMethod]
+	public void Contains_NavigationPropertyId_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+		var personIds = new long[] { 1, 2, 3 };
+
+		var query = tasks.Where(t => personIds.Contains(t.Person.Id));
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("[Person] in").AssertTrue(
+			$"Expected FK column [Person] IN clause, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that Contains works on entities without identity columns (BaseJoinEntity pattern).
+	/// </summary>
+	[TestMethod]
+	public void Contains_NavigationPropertyId_NoIdentity_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tags = CreateQueryable<TestItemTag>();
+		var itemIds = new long[] { 10, 20 };
+
+		var query = tags.Where(t => itemIds.Contains(t.Item.Id));
+
+		var sql = GenerateSql<TestItemTag>(query);
+
+		sql.ContainsIgnoreCase("[Item] in").AssertTrue(
+			$"Expected FK column [Item] IN clause, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that multiple Contains on different FK navigation properties
+	/// produce correct SQL with both FK columns.
+	/// </summary>
+	[TestMethod]
+	public void Contains_MultipleNavigationPropertyIds_ShouldUseFkColumns()
+	{
+		EnsureFkEntitiesRegistered();
+		var ics = CreateQueryable<TestItemCategory>();
+		var itemIds = new long[] { 1, 2 };
+		var catIds = new long[] { 10, 20, 30 };
+
+		var query = ics.Where(ic => itemIds.Contains(ic.Item.Id) && catIds.Contains(ic.Category.Id));
+
+		var sql = GenerateSql<TestItemCategory>(query);
+
+		sql.ContainsIgnoreCase("[Item] in").AssertTrue(
+			$"Expected [Item] IN clause, got: {sql}");
+		sql.ContainsIgnoreCase("[Category] in").AssertTrue(
+			$"Expected [Category] IN clause, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that Contains with FK navigation property works correctly
+	/// when combined with other filter conditions on the same entity.
+	/// </summary>
+	[TestMethod]
+	public void Contains_NavigationPropertyId_WithOtherFilter_ShouldCombine()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+		var personIds = new long[] { 1, 2 };
+
+		var query = tasks.Where(t => personIds.Contains(t.Person.Id) && t.Priority > 5);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("[Person] in").AssertTrue(
+			$"Expected [Person] IN clause, got: {sql}");
+		sql.Contains("[Priority]").AssertTrue(
+			$"Expected [Priority] filter, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that Contains parameters are correctly captured
+	/// when filtering by navigation property Id.
+	/// </summary>
+	[TestMethod]
+	public void Contains_NavigationPropertyId_ParametersCaptured()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+		var personIds = new long[] { 100, 200 };
+
+		var query = tasks.Where(t => personIds.Contains(t.Person.Id));
+
+		var (sql, parameters) = TranslateSql<TestTask>(query);
+
+		var values = parameters.Values.Select(v => v.Item2).ToArray();
+		values.AssertContains(100L);
+		values.AssertContains(200L);
+	}
+
+	/// <summary>
+	/// Verifies that multi-element Contains on navigation property generates
+	/// IN clause with all parameters (not just the first one).
+	/// </summary>
+	[TestMethod]
+	public void Contains_NavigationPropertyId_MultiElement_AllParamsInSql()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+		var personIds = new long[] { 10, 20, 30 };
+
+		var query = tasks.Where(t => personIds.Contains(t.Person.Id));
+
+		var (sql, parameters) = TranslateSql<TestTask>(query);
+
+		// must have all 3 parameters in SQL
+		3.AssertEqual(parameters.Count, $"Expected 3 parameters, got {parameters.Count}. SQL: {sql}");
+
+		// all parameter placeholders must appear in the IN clause
+		foreach (var paramName in parameters.Keys)
+			sql.Contains(paramName).AssertTrue($"Parameter {paramName} not found in SQL: {sql}");
+
+		sql.ContainsIgnoreCase("[Person] in").AssertTrue(
+			$"Expected [Person] IN clause, got: {sql}");
+	}
+
+	/// <summary>
+	/// Baseline: Contains on primary key generates correct IN clause.
+	/// </summary>
+	[TestMethod]
+	public void Contains_PrimaryKey_Baseline_ShouldGenerateInClause()
+	{
+		var items = CreateQueryable<TestItem>();
+		var ids = new long[] { 1, 2, 3 };
+
+		var query = items.Where(x => ids.Contains(x.Id));
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("in").AssertTrue(
+			$"Expected IN clause for Contains, got: {sql}");
+		sql.ContainsIgnoreCase("[Id] in").AssertTrue(
+			$"Expected [Id] IN clause, got: {sql}");
+	}
+
+	#endregion
+
+	#region OrderBy + Navigation Property Tests
+
+	/// <summary>
+	/// Verifies that OrderBy with navigation property's Id
+	/// generates ORDER BY using the FK column name.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_NavigationPropertyId_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.OrderBy(t => t.Person.Id);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue(
+			$"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Person]").AssertTrue(
+			$"Expected FK column [Person] in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that OrderByDescending with navigation property's Id
+	/// generates correct ORDER BY DESC using the FK column.
+	/// </summary>
+	[TestMethod]
+	public void OrderByDescending_NavigationPropertyId_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.OrderByDescending(t => t.Person.Id);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue(
+			$"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Person]").AssertTrue(
+			$"Expected FK column [Person] in ORDER BY DESC, got: {sql}");
+		sql.ContainsIgnoreCase("DESC").AssertTrue(
+			$"Expected DESC in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that OrderBy with FK navigation property works combined with Where.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_NavigationPropertyId_WithWhere_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.Where(t => t.Priority > 5).OrderBy(t => t.Person.Id);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.Contains("[Priority]").AssertTrue(
+			$"Expected [Priority] in WHERE, got: {sql}");
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue(
+			$"Expected ORDER BY clause, got: {sql}");
+		// ORDER BY should reference FK column, not entity's own Id
+		sql.Contains("[Person]").AssertTrue(
+			$"Expected FK column [Person] in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that ThenBy with navigation property's Id
+	/// uses the FK column, not the entity's own Id column.
+	/// Same underlying code path as OrderBy (ParseOrderByExpression).
+	/// </summary>
+	[TestMethod]
+	public void ThenBy_NavigationPropertyId_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.OrderBy(t => t.Priority).ThenBy(t => t.Person.Id);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.Contains("[Priority]").AssertTrue(
+			$"Expected [Priority] in ORDER BY, got: {sql}");
+		sql.Contains("[Person]").AssertTrue(
+			$"Expected FK column [Person] in ThenBy, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that ThenByDescending with navigation property's Id
+	/// uses the FK column with DESC.
+	/// </summary>
+	[TestMethod]
+	public void ThenByDescending_NavigationPropertyId_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.OrderBy(t => t.Priority).ThenByDescending(t => t.Person.Id);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.Contains("[Priority]").AssertTrue(
+			$"Expected [Priority] in ORDER BY, got: {sql}");
+		sql.Contains("[Person]").AssertTrue(
+			$"Expected FK column [Person] in ThenByDescending, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that OrderBy with navigation property Id on a no-identity entity
+	/// uses the FK column name correctly.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_NavigationPropertyId_NoIdentity_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tags = CreateQueryable<TestItemTag>();
+
+		var query = tags.OrderBy(t => t.Item.Id);
+
+		var sql = GenerateSql<TestItemTag>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue(
+			$"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Item]").AssertTrue(
+			$"Expected FK column [Item] in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that OrderBy with Expression&lt;Func&lt;T, object&gt;&gt; over a value-type
+	/// member (compiler emits Convert(member, object)) still resolves to the column.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_ValueTypeConvertToObject_ShouldUseColumn()
+	{
+		var items = CreateQueryable<TestItem>();
+		Expression<Func<TestItem, object>> key = x => x.Priority;
+
+		var query = items.OrderBy(key);
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue($"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Priority]").AssertTrue($"Expected [Priority] in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that OrderByDescending with Expression&lt;Func&lt;T, object&gt;&gt; over a
+	/// reference-type member works (no Convert emitted, must not regress).
+	/// </summary>
+	[TestMethod]
+	public void OrderByDescending_ReferenceTypeAsObject_ShouldUseColumn()
+	{
+		var items = CreateQueryable<TestItem>();
+		Expression<Func<TestItem, object>> key = x => x.Name;
+
+		var query = items.OrderByDescending(key);
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue($"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Name]").AssertTrue($"Expected [Name] in ORDER BY, got: {sql}");
+		sql.ContainsIgnoreCase("DESC").AssertTrue($"Expected DESC in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that OrderBy with Expression&lt;Func&lt;T, object&gt;&gt; over a navigation
+	/// property's Id (Convert wraps the nav.Id access) still emits the FK column.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_NavigationPropertyIdConvertToObject_ShouldUseFkColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+		Expression<Func<TestTask, object>> key = t => t.Person.Id;
+
+		var query = tasks.OrderBy(key);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue($"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Person]").AssertTrue($"Expected FK column [Person] in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Sorting by a non-Id member of a [RelationSingle] navigation
+	/// (e.g., t.Person.Name) used to leak the leaf column unaliased,
+	/// producing SQL like ORDER BY [Name] which fails on the host
+	/// table that doesn't have a [Name] column. The translator must
+	/// register an implicit JOIN to the navigation table and qualify
+	/// the column with the join alias.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_NavigationPropertyMember_ShouldRegisterJoinAndQualifyColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.OrderBy(t => t.Person.Name);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue($"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[Person].[Name]").AssertTrue(
+			$"Expected qualified [Person].[Name] in ORDER BY (implicit JOIN required), got: {sql}");
+		sql.ContainsIgnoreCase("left join").AssertTrue(
+			$"Expected LEFT JOIN to Person table for navigation OrderBy, got: {sql}");
+	}
+
+	/// <summary>
+	/// OrderByDescending variant of <see cref="OrderBy_NavigationPropertyMember_ShouldRegisterJoinAndQualifyColumn"/>.
+	/// </summary>
+	[TestMethod]
+	public void OrderByDescending_NavigationPropertyMember_ShouldRegisterJoinAndQualifyColumn()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.OrderByDescending(t => t.Person.Name);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.Contains("[Person].[Name]").AssertTrue(
+			$"Expected qualified [Person].[Name] in ORDER BY DESC, got: {sql}");
+		sql.ContainsIgnoreCase("DESC").AssertTrue($"Expected DESC, got: {sql}");
+		sql.ContainsIgnoreCase("left join").AssertTrue(
+			$"Expected LEFT JOIN to Person table, got: {sql}");
+	}
+
+	/// <summary>
+	/// OrderBy with null-coalescing operator (?? ) must emit ISNULL/COALESCE,
+	/// not throw NotSupportedException. Common shape: "newest first by last
+	/// modification time, falling back to creation time when ModifiedAt is
+	/// null".
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_Coalesce_EmitsIsNullExpression()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.OrderBy(i => i.NullableValue ?? i.Priority);
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("ORDER BY").AssertTrue(
+			$"Expected ORDER BY clause, got: {sql}");
+		sql.Contains("[NullableValue]").AssertTrue(
+			$"Expected first arm [NullableValue] in COALESCE/ISNULL, got: {sql}");
+		sql.Contains("[Priority]").AssertTrue(
+			$"Expected fallback arm [Priority] in COALESCE/ISNULL, got: {sql}");
+		(sql.ContainsIgnoreCase("ISNULL") || sql.ContainsIgnoreCase("COALESCE")).AssertTrue(
+			$"Expected ISNULL or COALESCE in ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// Descending variant must keep the DESC modifier on the COALESCE expression.
+	/// </summary>
+	[TestMethod]
+	public void OrderByDescending_Coalesce_EmitsIsNullExpressionWithDesc()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.OrderByDescending(i => i.NullableValue ?? i.Priority);
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[NullableValue]").AssertTrue($"Got: {sql}");
+		sql.Contains("[Priority]").AssertTrue($"Got: {sql}");
+		(sql.ContainsIgnoreCase("ISNULL") || sql.ContainsIgnoreCase("COALESCE")).AssertTrue(
+			$"Expected ISNULL or COALESCE, got: {sql}");
+		sql.ContainsIgnoreCase("DESC").AssertTrue($"Expected DESC, got: {sql}");
+	}
+
+	/// <summary>
+	/// PostgreSQL emits COALESCE rather than ISNULL — same semantics, different
+	/// function name. Verifies the dialect-aware emission picks the right one.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_Coalesce_PostgreSql_EmitsCoalesce()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.OrderBy(i => i.NullableValue ?? i.Priority);
+
+		var sql = GenerateSql<TestItem>(query, _pgDialect);
+
+		sql.ContainsIgnoreCase("COALESCE").AssertTrue(
+			$"Expected COALESCE in Postgres ORDER BY, got: {sql}");
+	}
+
+	/// <summary>
+	/// COALESCE-based primary ordering must compose with column-based ThenBy
+	/// — the two paths share the OrderBy list and emit in a single ORDER BY
+	/// clause.
+	/// </summary>
+	[TestMethod]
+	public void OrderBy_Coalesce_ThenBy_BothEmit()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items
+			.OrderBy(i => i.NullableValue ?? i.Priority)
+			.ThenBy(i => i.Id);
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[NullableValue]").AssertTrue($"Got: {sql}");
+		sql.Contains("[Priority]").AssertTrue($"Got: {sql}");
+		sql.Contains("[Id]").AssertTrue($"Expected [Id] from ThenBy, got: {sql}");
+	}
+
+	#endregion
+
+	#region Inner schema members renamed by [NameOverride]
+
+	/// <summary>
+	/// A member of an inner schema whose column [NameOverride] renames is filtered and sorted by that column, the one the
+	/// schema declares, not by the prefixed name the member would have without the override.
+	/// </summary>
+	[TestMethod]
+	public void WhereAndOrderBy_InnerSchemaMemberWithNameOverride_UseTheOverriddenColumn()
+	{
+		var products = CreateQueryable<ReflTestProduct>();
+
+		var query = products.Where(p => p.Meta.Score > 5).OrderByDescending(p => p.Meta.Tag);
+
+		var sql = GenerateSql<ReflTestProduct>(query);
+
+		sql.Contains("[ProductScore]").AssertTrue($"Expected the renamed column [ProductScore] in WHERE, got: {sql}");
+		sql.Contains("[ProductTag]").AssertTrue($"Expected the renamed column [ProductTag] in ORDER BY, got: {sql}");
+		sql.Contains("[MetaScore]").AssertFalse($"The schema has no column [MetaScore], got: {sql}");
+		sql.Contains("[MetaTag]").AssertFalse($"The schema has no column [MetaTag], got: {sql}");
+	}
+
+	#endregion
+
+	#region String Parameterization Tests
+
+	/// <summary>
+	/// Verifies that string constants with single quotes are passed as parameters,
+	/// not inlined into SQL.
+	/// </summary>
+	[TestMethod]
+	public void StringConstant_WithSingleQuote_ShouldBeParameterized()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Where(x => x.Name == "O'Reilly");
+
+		var (sql, parameters) = TranslateSql<TestItem>(query);
+
+		sql.Contains("O'Reilly").AssertFalse(
+			$"Literal string should not appear in SQL, got: {sql}");
+		sql.Contains("@p").AssertTrue(
+			$"Expected parameter placeholder in SQL, got: {sql}");
+
+		var paramValue = parameters.Values.First(p => p.Item2 is string).Item2;
+		paramValue.AssertEqual("O'Reilly", "parameter value mismatch");
+	}
+
+	/// <summary>
+	/// Verifies that string constants with multiple single quotes are parameterized.
+	/// </summary>
+	[TestMethod]
+	public void StringConstant_WithMultipleSingleQuotes_ShouldBeParameterized()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Where(x => x.Name == "it's a 'test'");
+
+		var (sql, parameters) = TranslateSql<TestItem>(query);
+
+		sql.Contains("it's").AssertFalse(
+			$"Literal string should not appear in SQL, got: {sql}");
+
+		var paramValue = parameters.Values.First(p => p.Item2 is string).Item2;
+		paramValue.AssertEqual("it's a 'test'", "parameter value mismatch");
+	}
+
+	#endregion
+
+	#region Closure-capture Chain Parameterization Tests
+
+	// Reproduces the closure shape generated by an async method with two levels
+	// of nested if-blocks that capture an outer-method local: outer
+	// state-machine field (tenantId), first if-block DC (referencing the
+	// state-machine), and a nested else-block DC (referencing the first DC).
+	// The lambda inside the inner block then reads tenantId through a 3-link
+	// chain: innerDC → outerDC → methodDC → tenantId. The compiler-generated
+	// tree shape is:
+	//   MemberAccess(tenantId)
+	//     MemberAccess(CS$&lt;&gt;8__locals1)
+	//       MemberAccess(CS$&lt;&gt;8__locals2)
+	//         ConstantExpression(innerDC instance)
+	// Pre-fix VisitMember handled only 1- and 2-link closure chains; this 3-link
+	// chain fell through to column-emission branches and leaked raw field names
+	// (e.g. <c>[e].[tenantId]</c>) as if they were SQL columns.
+	private static IQueryable<TestTask> BuildDeepClosureQueryProductionShape(IQueryable<TestTask> tasks, long ownerId, string user)
+	{
+		var dummyToken = string.IsNullOrEmpty(user) ? null : user;
+		if (dummyToken is not null)
+		{
+			if (long.TryParse(dummyToken, out var uid))
+			{
+				return tasks.Where(t => t.Id == uid);
+			}
+			else
+			{
+				var like = "%" + dummyToken + "%";
+				// This Where lambda captures BOTH `ownerId` (method scope) and `like` (else-block scope).
+				// Compiler emits: innerDC has `like`, parent is firstIfDC which parents the methodDC.
+				// → 3-level MemberExpression chain to reach `ownerId` from the constant.
+				return tasks.Where(t => t.Person.Id == ownerId && (t.Title == like || t.Title == like));
+			}
+		}
+		return tasks;
+	}
+
+	/// <summary>
+	/// Captures across three nested DisplayClass levels used to fall through every
+	/// short-circuit branch in VisitMember and emit raw field names like
+	/// <c>[ownerId]</c> as if they were SQL columns on the default alias.
+	/// The translator must walk the full <c>[CompilerGenerated]</c> chain,
+	/// evaluate via reflection, and parameterize the captured values.
+	/// </summary>
+	[TestMethod]
+	public void Where_NestedClosureCaptureChain_ShouldParameterizeAndNotLeakFieldNames()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = BuildDeepClosureQueryProductionShape(tasks, 42L, "alice");
+
+		var (sql, parameters) = TranslateSql<TestTask>(query);
+
+		sql.Contains("[ownerId]").AssertFalse(
+			$"Captured local 'ownerId' must not appear as a SQL column, got: {sql}");
+		sql.Contains("[like]").AssertFalse(
+			$"Captured local 'like' must not appear as a SQL column, got: {sql}");
+
+		parameters.Values.Any(p => Equals(p.Item2, 42L)).AssertTrue(
+			$"Expected captured ownerId=42 to be parameterized, got params: {string.Join(", ", parameters.Select(p => $"{p.Key}={p.Value.Item2}"))}");
+		parameters.Values.Any(p => Equals(p.Item2, "%alice%")).AssertTrue(
+			$"Expected captured like='%alice%' to be parameterized, got params: {string.Join(", ", parameters.Select(p => $"{p.Key}={p.Value.Item2}"))}");
+	}
+
+	#endregion
+
+	#region Anonymous-type Select Projection Tests
+
+	/// <summary>
+	/// Verifies that .Select(x =&gt; new { x.A, x.B }) over a table emits both columns
+	/// in SELECT list.
+	/// </summary>
+	[TestMethod]
+	public void SelectAnonymous_TwoMembers_ShouldEmitBothColumns()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { x.Id, x.Name });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[Id]").AssertTrue($"Expected [Id] in SELECT, got: {sql}");
+		sql.Contains("[Name]").AssertTrue($"Expected [Name] in SELECT, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that .Select(x =&gt; new { Alias = x.Member }) emits the member
+	/// with AS alias matching the anonymous property name.
+	/// </summary>
+	[TestMethod]
+	public void SelectAnonymous_WithAlias_ShouldEmitAsAlias()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { ItemId = x.Id, Label = x.Name });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[Id]").AssertTrue($"Expected underlying [Id] in SELECT, got: {sql}");
+		sql.Contains("[Name]").AssertTrue($"Expected underlying [Name] in SELECT, got: {sql}");
+		sql.ContainsIgnoreCase("AS [ItemId]").AssertTrue($"Expected 'AS [ItemId]' alias, got: {sql}");
+		sql.ContainsIgnoreCase("AS [Label]").AssertTrue($"Expected 'AS [Label]' alias, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that anonymous-type Select composes with Where.
+	/// </summary>
+	[TestMethod]
+	public void SelectAnonymous_AfterWhere_ShouldEmitProjectionAndPredicate()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items
+			.Where(x => x.Priority > 5)
+			.Select(x => new { x.Id, x.Priority });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[Id]").AssertTrue($"Expected [Id] in SELECT, got: {sql}");
+		sql.Contains("[Priority]").AssertTrue($"Expected [Priority] in SELECT, got: {sql}");
+		sql.ContainsIgnoreCase("WHERE").AssertTrue($"Expected WHERE clause, got: {sql}");
+	}
+
+	/// <summary>
+	/// Verifies that anonymous projection mixing value-type and reference-type members works.
+	/// </summary>
+	[TestMethod]
+	public void SelectAnonymous_MixedValueAndReferenceTypes_ShouldEmitBothColumns()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { x.IsActive, x.Name, x.Price });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains("[IsActive]").AssertTrue($"Expected [IsActive] in SELECT, got: {sql}");
+		sql.Contains("[Name]").AssertTrue($"Expected [Name] in SELECT, got: {sql}");
+		sql.Contains("[Price]").AssertTrue($"Expected [Price] in SELECT, got: {sql}");
+	}
+
+	#endregion
+
+	#region Where + Navigation Property Traversal Tests
+
+	/// <summary>
+	/// Verifies that a Where predicate accessing a non-Id column on a RelationSingle
+	/// navigation property (t.Person.Name) emits an INNER JOIN to the related table
+	/// so the multi-part identifier resolves at SQL execution time.
+	/// </summary>
+	[TestMethod]
+	public void Where_NavigationProperty_NonIdColumn_EmitsJoin()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.Where(t => t.Person.Name.Like("%Alice%"));
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("join").AssertTrue(
+			$"Expected JOIN to {nameof(TestPerson)} for navigation predicate, got: {sql}");
+		sql.Contains("[Ecng_TestPerson]").AssertTrue(
+			$"Expected join target [Ecng_TestPerson], got: {sql}");
+		sql.ContainsIgnoreCase("like").AssertTrue(
+			$"Expected LIKE in WHERE, got: {sql}");
+	}
+
+	/// <summary>
+	/// A navigation predicate combined via OR with Contains over an FK column
+	/// must still emit the JOIN.
+	/// </summary>
+	[TestMethod]
+	public void Where_NavigationProperty_OrContainsFk_EmitsJoin()
+	{
+		EnsureFkEntitiesRegistered();
+		var tasks = CreateQueryable<TestTask>();
+		var personIds = new long[] { 1, 2, 3 };
+
+		var query = tasks.Where(t => t.Person.Name.Like("%Alice%") || personIds.Contains(t.Person.Id));
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("join").AssertTrue(
+			$"Expected JOIN to {nameof(TestPerson)} for OR'ed navigation predicate, got: {sql}");
+		sql.Contains("[Ecng_TestPerson]").AssertTrue(
+			$"Expected join target [Ecng_TestPerson], got: {sql}");
+		sql.ContainsIgnoreCase("like").AssertTrue(
+			$"Expected LIKE in WHERE, got: {sql}");
+		sql.ContainsIgnoreCase(" or ").AssertTrue(
+			$"Expected OR in WHERE, got: {sql}");
+	}
+
+	/// <summary>
+	/// Inheritance + RelationSingle interaction: an entity with
+	/// <see cref="TestBrokerBase"/> audit FKs (CreatedBy/ModifiedBy →
+	/// <see cref="TestBrokerUser"/>) plus another [RelationSingle] User on
+	/// the derived entity. Where-predicate on User.Email must emit the INNER
+	/// JOIN, otherwise SQL Server reports
+	/// "multi-part identifier 'User.Email' could not be bound".
+	/// </summary>
+	[TestMethod]
+	public void Where_BrokerPortfolio_NavigationToUserEmail_EmitsJoin()
+	{
+		EnsureFkEntitiesRegistered();
+		_ = SchemaRegistry.Get(typeof(TestBrokerPortfolio));
+		_ = SchemaRegistry.Get(typeof(TestBrokerUser));
+
+		var portfolios = CreateQueryable<TestBrokerPortfolio>();
+		var query = portfolios.Where(p => p.User.Email.Like("%test%"));
+
+		var sql = GenerateSql<TestBrokerPortfolio>(query);
+
+		sql.ContainsIgnoreCase("join").AssertTrue(
+			$"Expected JOIN to {nameof(TestBrokerUser)} for p.User.Email predicate, got: {sql}");
+		sql.Contains("[Ecng_TestBrokerUser]").AssertTrue(
+			$"Expected join target [Ecng_TestBrokerUser], got: {sql}");
+		sql.Contains("[User].[Email]").AssertTrue(
+			$"Expected qualified column [User].[Email], got: {sql}");
+	}
+
+	/// <summary>
+	/// A single Where with three OR'ed Like predicates over the same
+	/// navigation (p.User.Email / FirstName / LastName) must emit a single
+	/// LEFT JOIN, and all three OR branches must reference the joined
+	/// alias. Earlier the translator skipped the implicit JOIN and SQL
+	/// Server failed with "multi-part identifier 'User.Email' could not be
+	/// bound".
+	/// </summary>
+	[TestMethod]
+	public void Where_BrokerPortfolio_OrAcrossUserColumns_EmitsSingleJoin()
+	{
+		EnsureFkEntitiesRegistered();
+		_ = SchemaRegistry.Get(typeof(TestBrokerPortfolio));
+		_ = SchemaRegistry.Get(typeof(TestBrokerUser));
+
+		var portfolios = CreateQueryable<TestBrokerPortfolio>();
+		var query = portfolios.Where(p =>
+			p.User.Email.Like("%test%") ||
+			p.User.FirstName.Like("%test%") ||
+			p.User.LastName.Like("%test%"));
+
+		var sql = GenerateSql<TestBrokerPortfolio>(query);
+
+		sql.ContainsIgnoreCase("join").AssertTrue(
+			$"Expected JOIN to {nameof(TestBrokerUser)} for OR'ed User columns, got: {sql}");
+		sql.Contains("[Ecng_TestBrokerUser]").AssertTrue(
+			$"Expected join target [Ecng_TestBrokerUser], got: {sql}");
+
+		// All three branches must qualify columns with the joined alias.
+		sql.Contains("[User].[Email]").AssertTrue(
+			$"Expected qualified [User].[Email], got: {sql}");
+		sql.Contains("[User].[FirstName]").AssertTrue(
+			$"Expected qualified [User].[FirstName], got: {sql}");
+		sql.Contains("[User].[LastName]").AssertTrue(
+			$"Expected qualified [User].[LastName], got: {sql}");
+
+		// Defensive: do not duplicate the JOIN even though three branches
+		// reference the same nav.
+		var joinCount = sql.Split("left join", StringSplitOptions.None).Length - 1;
+		joinCount.AssertEqual(1,
+			$"Expected exactly 1 LEFT JOIN to TestBrokerUser, got {joinCount}: {sql}");
+	}
+
+	/// <summary>
+	/// Same as <see cref="Where_BrokerPortfolio_NavigationToUserEmail_EmitsJoin"/>
+	/// but rendered with the PostgreSQL dialect. The JOIN alias is
+	/// <c>nav.Member.Name = "User"</c>, which is a PostgreSQL reserved word.
+	/// Without alias quoting the rendered SQL is <c>"User" User</c> and PG
+	/// fails at runtime with <c>42601: syntax error at or near "User"</c>.
+	/// The qualified column reference <c>"User"."Email"</c> already works,
+	/// so this test pins specifically the alias-declaration site in the
+	/// FROM/JOIN clauses.
+	/// </summary>
+	[TestMethod]
+	public void Where_BrokerPortfolio_NavigationToUserEmail_PostgreSql_QuotesAlias()
+	{
+		EnsureFkEntitiesRegistered();
+		_ = SchemaRegistry.Get(typeof(TestBrokerPortfolio));
+		_ = SchemaRegistry.Get(typeof(TestBrokerUser));
+
+		var portfolios = CreateQueryable<TestBrokerPortfolio>();
+		var query = portfolios.Where(p => p.User.Email.Like("%test%"));
+
+		var sql = GenerateSql<TestBrokerPortfolio>(query, _pgDialect);
+
+		sql.ContainsIgnoreCase("join").AssertTrue(
+			$"Expected JOIN to TestBrokerUser, got: {sql}");
+		sql.Contains("\"Ecng_TestBrokerUser\"").AssertTrue(
+			$"Expected join target \"Ecng_TestBrokerUser\", got: {sql}");
+		sql.Contains("\"User\".\"Email\"").AssertTrue(
+			$"Expected qualified column \"User\".\"Email\", got: {sql}");
+		sql.Contains("\"Ecng_TestBrokerUser\" \"User\"").AssertTrue(
+			$"Expected JOIN alias to be quoted (\"User\"), got: {sql}. "
+			+ "Bare 'User' alias triggers PostgreSQL syntax error 42601 because User is a reserved word.");
+	}
+
+	#endregion
+
+	#region Arithmetic operators
+
+	[TestMethod]
+	public void Arithmetic_Subtract_EmitsMinusOperator()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { V = x.Price - x.Priority });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains(" - ").AssertTrue($"Expected '-' operator, got: {sql}");
+	}
+
+	[TestMethod]
+	public void Arithmetic_Multiply_EmitsStarOperator()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { V = x.Price * x.Priority });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains(" * ").AssertTrue($"Expected '*' operator, got: {sql}");
+	}
+
+	[TestMethod]
+	public void Arithmetic_Divide_EmitsSlashOperator()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { V = x.Price / x.Priority });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains(" / ").AssertTrue($"Expected '/' operator, got: {sql}");
+	}
+
+	[TestMethod]
+	public void Arithmetic_Modulo_EmitsPercentOperator()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Select(x => new { V = x.Id % x.Priority });
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.Contains(" % ").AssertTrue($"Expected '%' operator, got: {sql}");
+	}
+
+	[TestMethod]
+	public void Arithmetic_NegatedDivisor_StaysOneOperand()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items.Where(x => 100m / -x.Price < -5m);
+
+		var sql = GenerateSql<TestItem>(query);
+
+		// Without its own brackets "100 / -1 * Price" reads as "(100 / -1) * Price".
+		sql.Contains("(100 / (-1 * [e].[Price]))").AssertTrue($"the negated divisor must stay bracketed, got: {sql}");
+	}
+
+	#endregion
+
+	#region FK-shortcut projection over single relation
+
+	/// <summary>
+	/// Projecting the PK of a <c>[RelationSingle]</c> navigation as a
+	/// nullable scalar must reuse the same FK-column shortcut already used
+	/// by WHERE / GROUP BY — the FK lives on the source table, so no JOIN
+	/// to the related table is needed and the <c>(long?)</c> cast is a SQL
+	/// no-op (the FK column is already nullable through the relation).
+	/// </summary>
+	[TestMethod]
+	public void ProjectNavigationKey_AsNullable_EmitsFkColumnWithoutJoin()
+	{
+		SchemaRegistry.Get(typeof(TestPerson));
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks.Select(t => (long?)t.Person.Id);
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.Contains("[Person]").AssertTrue(
+			$"Expected FK column [Person] in SELECT, got: {sql}");
+		sql.ContainsIgnoreCase("Ecng_TestPerson").AssertFalse(
+			$"Expected no JOIN to [Ecng_TestPerson] (FK lives on source table), got: {sql}");
+	}
+
+	#endregion
+
+	#region GROUP BY projection aliasing
+
+	/// <summary>
+	/// A single-member GROUP BY projection of <c>g.Key</c> over a navigation
+	/// must alias the column to the projected member so ctor/DTO
+	/// materialisation can map it (g.Key over t.Person.Id must come back as
+	/// [PersonId], not the raw FK column).
+	/// </summary>
+	[TestMethod]
+	public void GroupByKey_OverNavigation_AliasesToProjectedMember()
+	{
+		SchemaRegistry.Get(typeof(TestPerson));
+		var tasks = CreateQueryable<TestTask>();
+
+		var query = tasks
+			.GroupBy(t => t.Person.Id)
+			.Select(g => new { PersonId = g.Key });
+
+		var sql = GenerateSql<TestTask>(query);
+
+		sql.ContainsIgnoreCase("AS [PersonId]").AssertTrue(
+			$"Expected GROUP BY key aliased to projected member 'AS [PersonId]', got: {sql}");
+	}
+
+	#endregion
+
+	#region Max/Min selector in ctor-based GROUP BY report
+
+	private sealed record PriorityReport(int Priority, decimal MaxPrice, decimal MinPrice);
+
+	/// <summary>
+	/// Constructor-based GROUP BY report projecting the two-generic-arg
+	/// <c>Max/Min&lt;TSource,TResult&gt;(selector)</c> over the grouping.
+	/// Both the selector-overload visitor registration and GROUP BY column
+	/// aliasing are required for this single-query report shape.
+	/// </summary>
+	[TestMethod]
+	public void GroupByCtorReport_MaxMinSelector_EmitsAggregatesAndAliases()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var query = items
+			.GroupBy(i => i.Priority)
+			.Select(g => new PriorityReport(g.Key, g.Max(i => i.Price), g.Min(i => i.Price)));
+
+		var sql = GenerateSql<TestItem>(query);
+
+		sql.ContainsIgnoreCase("max(").AssertTrue($"Expected MAX aggregate, got: {sql}");
+		sql.ContainsIgnoreCase("min(").AssertTrue($"Expected MIN aggregate, got: {sql}");
+		sql.ContainsIgnoreCase("AS [Priority]").AssertTrue(
+			$"Expected grouping key aliased to ctor parameter 'AS [Priority]', got: {sql}");
+	}
+
+	#endregion
+
+	#region Decimal arithmetic and comparison
+
+	[TestMethod]
+	public void DecimalComparison_SQLite_CastsParameterAndArithmetic()
+	{
+		var items = CreateQueryable<TestItem>();
+		var limit = 100m;
+
+		var sql = GenerateSql<TestItem>(items.Where(x => x.Price * 2m > limit), _sqliteDialect);
+
+		// A decimal parameter is bound as text; compared as it is, it is greater than every number.
+		sql.Contains("cast(@limit0 as NUMERIC)").AssertTrue($"the parameter must compare as a number, got: {sql}");
+		sql.Contains("* 2) as NUMERIC)").AssertTrue($"the product must compare as a number, got: {sql}");
+	}
+
+	[TestMethod]
+	public void DecimalComparison_SQLite_CastsParameterComparedToLiteral()
+	{
+		var items = CreateQueryable<TestItem>();
+		var maxPrice = 0m;
+
+		var sql = GenerateSql<TestItem>(items.Where(x => maxPrice == 0m || x.Price <= maxPrice), _sqliteDialect);
+
+		sql.Contains("(cast(@maxPrice0 as NUMERIC) = 0)").AssertTrue($"the parameter must compare as a number, got: {sql}");
+	}
+
+	[TestMethod]
+	public void DecimalComparison_SqlServer_NoCast()
+	{
+		var items = CreateQueryable<TestItem>();
+		var limit = 100m;
+
+		var sql = GenerateSql<TestItem>(items.Where(x => x.Price * 2m > limit));
+
+		sql.ContainsIgnoreCase("cast(").AssertFalse($"SQL Server stores decimals as numbers, got: {sql}");
+	}
+
+	[TestMethod]
+	public void MathMaxMin_AreScalar()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var max = items.Where(x => Math.Max(x.Price, 10m) > 50m);
+		var min = items.Select(x => new { M = Math.Min(x.Price, 10m) });
+
+		var sql = GenerateSql<TestItem>(max);
+		sql.ContainsIgnoreCase("Max([e].[Price], 10)").AssertFalse($"MAX is an aggregate on SQL Server, got: {sql}");
+		sql.Contains("(case when [e].[Price] >= 10 then [e].[Price] else 10 end)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(min);
+		sql.Contains("(case when [e].[Price] <= 10 then [e].[Price] else 10 end)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(max, _pgDialect);
+		sql.Contains("greatest(\"e\".\"Price\", 10)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(min, _pgDialect);
+		sql.Contains("least(\"e\".\"Price\", 10)").AssertTrue($"got: {sql}");
+
+		// SQLite's scalar max() orders text above every number, and decimals are stored as text.
+		sql = GenerateSql<TestItem>(max, _sqliteDialect);
+		sql.Contains("max(cast(\"e\".\"Price\" as NUMERIC), 10)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(min, _sqliteDialect);
+		sql.Contains("min(cast(\"e\".\"Price\" as NUMERIC), 10)").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void MathRound_AwayFromZero_IsRound()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		// The mode is not a number of digits.
+		var sql = GenerateSql<TestItem>(items.Where(x => Math.Round(x.Price, MidpointRounding.AwayFromZero) == 10m));
+		sql.Contains("Round([e].[Price], 0)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, 1, MidpointRounding.AwayFromZero) }));
+		sql.Contains("Round([e].[Price], 1)").AssertTrue($"got: {sql}");
+		sql.Contains(", 1, 1)").AssertFalse($"a third ROUND argument truncates on SQL Server, got: {sql}");
+
+		foreach (var dialect in new[] { _pgDialect, _sqliteDialect })
+		{
+			sql = GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, 1, MidpointRounding.AwayFromZero) }), dialect);
+			sql.Contains("Round(\"e\".\"Price\", 1)").AssertTrue($"got: {sql}");
+		}
+	}
+
+	[TestMethod]
+	public void MathRound_ToZero_Truncates()
+	{
+		var items = CreateQueryable<TestItem>();
+		var whole = items.Select(x => new { R = Math.Round(x.Price, MidpointRounding.ToZero) });
+		var digits = items.Select(x => new { R = Math.Round(x.Price, 1, MidpointRounding.ToZero) });
+
+		GenerateSql<TestItem>(whole).Contains("Round([e].[Price], 0, 1)").AssertTrue();
+		GenerateSql<TestItem>(digits).Contains("Round([e].[Price], 1, 1)").AssertTrue();
+
+		GenerateSql<TestItem>(whole, _pgDialect).Contains("trunc(\"e\".\"Price\")").AssertTrue();
+		GenerateSql<TestItem>(digits, _pgDialect).Contains("trunc(\"e\".\"Price\", 1)").AssertTrue();
+
+		GenerateSql<TestItem>(whole, _sqliteDialect).Contains("trunc(\"e\".\"Price\")").AssertTrue();
+
+		// SQLite's trunc() has no digits argument.
+		Throws<NotSupportedException>(() => GenerateSql<TestItem>(digits, _sqliteDialect));
+	}
+
+	[TestMethod]
+	public void MathRound_TowardInfinity_IsFloorAndCeiling()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		foreach (var dialect in new[] { _dialect, _pgDialect, _sqliteDialect })
+		{
+			var sql = GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, MidpointRounding.ToNegativeInfinity) }), dialect);
+			sql.ContainsIgnoreCase("floor(").AssertTrue($"got: {sql}");
+
+			sql = GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, 0, MidpointRounding.ToPositiveInfinity) }), dialect);
+			sql.ContainsIgnoreCase("ceiling(").AssertTrue($"got: {sql}");
+
+			Throws<NotSupportedException>(() => GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, 2, MidpointRounding.ToNegativeInfinity) }), dialect));
+		}
+	}
+
+	[TestMethod]
+	public void MathRound_ToEven_NotSupported()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		// No engine rounds half to even, and ROUND would silently round half away from zero.
+		foreach (var dialect in new[] { _dialect, _pgDialect, _sqliteDialect })
+		{
+			Throws<NotSupportedException>(() => GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, MidpointRounding.ToEven) }), dialect));
+			Throws<NotSupportedException>(() => GenerateSql<TestItem>(items.Select(x => new { R = Math.Round(x.Price, 2, MidpointRounding.ToEven) }), dialect));
+		}
+	}
+
+	[TestMethod]
+	public void OrderBy_Decimal_SortsAsNumber()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		// Decimals are text in SQLite, and text sorts 199.99 before 9.99.
+		var sql = GenerateSql<TestItem>(items.OrderBy(x => x.Price), _sqliteDialect);
+		sql.Contains("order by cast(\"e\".\"Price\" as NUMERIC)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(items.OrderBy(x => x.Name).ThenByDescending(x => x.Price), _sqliteDialect);
+		sql.Contains("cast(\"e\".\"Price\" as NUMERIC) desc").AssertTrue($"got: {sql}");
+		sql.Contains("cast(\"e\".\"Name\"").AssertFalse($"text keeps sorting as text, got: {sql}");
+
+		sql = GenerateSql<TestItem>(items.OrderBy(x => x.Price));
+		sql.Contains("order by [e].[Price]").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void MaxMinAggregate_Decimal_ComparesNumbers()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var grouped = items
+			.GroupBy(i => i.Priority)
+			.Select(g => new { g.Key, Max = g.Max(i => i.Price), Min = g.Min(i => i.Price) });
+
+		var sql = GenerateSql<TestItem>(grouped, _sqliteDialect);
+		sql.Contains("max(cast(\"e\".\"Price\" as NUMERIC))").AssertTrue($"got: {sql}");
+		sql.Contains("min(cast(\"e\".\"Price\" as NUMERIC))").AssertTrue($"got: {sql}");
+
+		var correlated = items.Select(e => new { e.Id, Max = (from j in items where j.Priority == e.Priority select j.Price).Max() });
+
+		sql = GenerateSql<TestItem>(correlated, _sqliteDialect);
+		sql.Contains("max(cast(\"j\".\"Price\" as NUMERIC))").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(grouped);
+		sql.Contains("max([e].[Price])").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void IntegerToDecimal_CastSizedFromSourceType()
+	{
+		SchemaRegistry.Get(typeof(TestItem));
+		var items = CreateQueryable<TestItem>();
+		var links = CreateQueryable<TestItemCategory>();
+
+		// decimal(18,2) holds 16 integer digits; a long has 19.
+		var sql = GenerateSql<TestItemCategory>(links.Select(x => (decimal)x.Item.Id));
+		sql.Contains("cast([e].[Item] as decimal(19,0))").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(items.Select(x => (decimal)x.Priority));
+		sql.Contains("cast([e].[Priority] as decimal(10,0))").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItemCategory>(links.Select(x => (decimal)x.Item.Id), _pgDialect);
+		sql.Contains("cast(\"e\".\"Item\" as decimal(19,0))").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void IntegerToDecimal_ArithmeticInWhere_IsDecimal()
+	{
+		var items = CreateQueryable<TestItem>();
+		var query = items.Where(x => (decimal)x.Priority / 4 > 0.5m);
+
+		// Integer by integer is integer division in SQL: 3 / 4 = 0.
+		var sql = GenerateSql<TestItem>(query);
+		sql.Contains("(cast([e].[Priority] as decimal(10,0)) / 4)").AssertTrue($"got: {sql}");
+
+		// SQLite keeps CAST(3 AS NUMERIC) an integer.
+		sql = GenerateSql<TestItem>(query, _sqliteDialect);
+		sql.Contains("(cast(\"e\".\"Priority\" as REAL) / 4)").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void IntegerToDecimal_ComparedDirectly_StaysAColumn()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		// Comparing a whole number with a decimal is exact everywhere, and a bare column can use an index.
+		var sql = GenerateSql<TestItem>(items.Where(x => x.Priority > 2.5m));
+		sql.Contains("([e].[Priority] > 2.5)").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(items.Where(x => (decimal)x.Priority == 3m));
+		sql.Contains("([e].[Priority] = 3)").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void IntegerToDecimal_OfAnExpression_CastsTheResult()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		// C# divides the integers first and converts the quotient.
+		var sql = GenerateSql<TestItem>(items.Select(x => new { V = (decimal)(x.Priority / 4) }));
+		sql.Contains("cast(([e].[Priority] / 4) as decimal(10,0))").AssertTrue($"got: {sql}");
+
+		sql = GenerateSql<TestItem>(items.Where(x => (decimal)(x.Priority / 4) * 2 > 1m));
+		sql.Contains("cast(([e].[Priority] / 4) as decimal(10,0)) * 2").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void IntegerToDecimal_AnonymousProjection_AveragedAsDecimal()
+	{
+		var items = CreateQueryable<TestItem>();
+
+		var sql = GenerateSql<TestItem>(items.GroupBy(x => 1).Select(g => new { Avg = g.Average(x => (decimal)x.Priority) }));
+
+		// SQL Server's AVG of an int is an int.
+		sql.Contains("avg(cast([e].[Priority] as decimal(10,0)))").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void DecimalModulo_KeepsTheFraction()
+	{
+		var items = CreateQueryable<TestItem>();
+		var query = items.Where(x => x.Price % 1m != 0m);
+
+		GenerateSql<TestItem>(query).Contains("([e].[Price] % 1)").AssertTrue();
+
+		// SQLite's % casts both operands to INTEGER first.
+		var sql = GenerateSql<TestItem>(query, _sqliteDialect);
+		sql.Contains("mod(\"e\".\"Price\", 1)").AssertTrue($"got: {sql}");
+
+		// An integer remainder stays the operator.
+		sql = GenerateSql<TestItem>(items.Where(x => x.Priority % 2 == 1), _sqliteDialect);
+		sql.Contains("(\"e\".\"Priority\" % 2)").AssertTrue($"got: {sql}");
+	}
+
+	[TestMethod]
+	public void MathTruncate_PerDialect()
+	{
+		var items = CreateQueryable<TestItem>();
+		var query = items.Select(x => new { T = Math.Truncate(x.Price) });
+
+		GenerateSql<TestItem>(query).Contains("Round([e].[Price], 0, 1)").AssertTrue();
+
+		// PostgreSQL and SQLite have no three-argument round().
+		foreach (var dialect in new[] { _pgDialect, _sqliteDialect })
+		{
+			var sql = GenerateSql<TestItem>(query, dialect);
+			sql.Contains(", 0, 1)").AssertFalse($"got: {sql}");
+			sql.Contains("trunc(\"e\".\"Price\")").AssertTrue($"got: {sql}");
+		}
+	}
+
+	#endregion
+
+}
+
+/// <summary>
+/// Positional record projection target — a <see cref="NewExpression"/> with
+/// <c>Members == null</c> — used to exercise the ctor-based projection path.
+/// </summary>
+public record PersonMaxPriority(long Id, int MaxPri);
+
+public class VTestPersonWithTasks : IDbPersistable
+{
+	[AllColumnsField]
+	public object AllColumns { get; set; }
+
+	public long Id { get; set; }
+
+	public bool HasTasks { get; set; }
+	public int TaskCount { get; set; }
+	public long MaxSubTaskId { get; set; }
+	public decimal? AvgPriority { get; set; }
+
+	object IDbPersistable.GetIdentity() => default;
+	void IDbPersistable.SetIdentity(object id) { }
+
+	public void Save(SettingsStorage storage) { }
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+		=> default;
+}
+
+#endif

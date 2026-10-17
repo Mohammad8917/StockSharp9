@@ -1,0 +1,106 @@
+namespace StockSharp.CoinCap.Native;
+
+abstract class BasePusherClient<TData> : BaseLogReceiver
+{
+	public event Func<Exception, CancellationToken, ValueTask> Error;
+	public event Func<ConnectionStates, CancellationToken, ValueTask> StateChanged;
+
+	private readonly WebSocketClient _client;
+	private readonly string _url;
+
+	protected BasePusherClient(string endpoint, string url, int attemptsCount, WorkingTime workingTime)
+	{
+		if (url.IsEmpty())
+			throw new ArgumentNullException(nameof(url));
+
+		_url = url;
+
+		_client = new(
+			$"{endpoint.ThrowIfEmpty(nameof(endpoint)).TrimEnd('/')}/{_url}",
+			(state, token) =>
+			{
+				if (StateChanged is { } handler)
+					return handler.InvokeAsync(state, token);
+				return default;
+			},
+			(error, token) =>
+			{
+				this.AddErrorLog(error);
+				if (Error is { } handler)
+					return handler.InvokeAsync(error, token);
+				return default;
+			},
+			OnProcess,
+			(s, a) => this.AddInfoLog(s, a),
+			(s, a) => this.AddErrorLog(s, a),
+			(s, a) => this.AddVerboseLog(s, a))
+		{
+			ReconnectAttempts = attemptsCount,
+			WorkingTime = workingTime ?? throw new ArgumentNullException(nameof(workingTime)),
+		};
+	}
+
+	protected override void DisposeManaged()
+	{
+		_client.Dispose();
+		base.DisposeManaged();
+	}
+
+	public ValueTask ConnectAsync(CancellationToken cancellationToken)
+	{
+		this.AddInfoLog(LocalizedStrings.Connecting);
+		return _client.ConnectAsync(cancellationToken);
+	}
+
+	public ValueTask DisconnectAsync(CancellationToken cancellationToken)
+	{
+		this.AddInfoLog(LocalizedStrings.Disconnecting);
+		return _client.DisconnectAsync(cancellationToken);
+	}
+
+	private async ValueTask OnProcess(WebSocketMessage msg, CancellationToken cancellationToken)
+	{
+		var recv = msg.AsString();
+
+		if (recv.StartsWithIgnoreCase("invalid exchange"))
+		{
+			if (Error is { } handler)
+				await handler.InvokeAsync(new InvalidOperationException(recv), cancellationToken);
+			return;
+		}
+
+		await OnProcess(recv.DeserializeObject<TData>(), cancellationToken);
+	}
+
+	protected abstract ValueTask OnProcess(TData recv, CancellationToken cancellationToken);
+}
+
+class TradesPusherClient(string endpoint, string exchange, int attemptsCount, WorkingTime workingTime) : BasePusherClient<Trade>(endpoint, $"trades/{exchange}", attemptsCount, workingTime)
+{
+	// to get readable name after obfuscation
+	public override string Name => nameof(CoinCap) + "_" + nameof(TradesPusherClient);
+
+	public event Func<Trade, CancellationToken, ValueTask> NewTrade;
+
+	protected override ValueTask OnProcess(Trade trade, CancellationToken cancellationToken)
+	{
+		if (NewTrade is { } handler)
+			return handler.InvokeAsync(trade, cancellationToken);
+		return default;
+	}
+}
+
+class PricesPusherClient(string endpoint, IEnumerable<string> assets, int attemptsCount, WorkingTime workingTime) : BasePusherClient<IDictionary<string, double>>(endpoint, $"prices?assets={assets.JoinComma()}", attemptsCount, workingTime)
+{
+	// to get readable name after obfuscation
+	public override string Name => nameof(CoinCap) + "_" + nameof(PricesPusherClient);
+
+	public event Func<IDictionary<string, double>, CancellationToken, ValueTask> PricesChanged;
+
+	protected override ValueTask OnProcess(IDictionary<string, double> recv, CancellationToken cancellationToken)
+	{
+		if (PricesChanged is { } handler)
+			return handler.InvokeAsync(recv, cancellationToken);
+		return default;
+	}
+}

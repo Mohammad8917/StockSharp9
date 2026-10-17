@@ -1,0 +1,29 @@
+﻿using System;
+
+namespace YandexDisk.Client
+{
+    /// <summary>
+    /// Definition of all methods of Yandex Disk API
+    /// </summary>
+    [PublicAPI]
+    public interface IDiskApi : IDisposable
+    {
+        /// <summary>
+        /// Uploading and downloading file operation
+        /// </summary>
+        [PublicAPI, NotNull]
+        IFilesClient Files { get; }
+
+        /// <summary>
+        /// Getting files and folders metadata  
+        /// </summary>
+        [PublicAPI, NotNull]
+        IMetaInfoClient MetaInfo { get; }
+
+        /// <summary>
+        /// Manipulating with existing files and folders 
+        /// </summary>
+        [PublicAPI, NotNull]
+        ICommandsClient Commands { get; }
+    }
+}

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common.props" />
+  <ItemGroup>
+    <PackageReference Include="IronPython" Version="$(IronPythonVer)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Compilation\Compilation.csproj" />
+  </ItemGroup>
+</Project>

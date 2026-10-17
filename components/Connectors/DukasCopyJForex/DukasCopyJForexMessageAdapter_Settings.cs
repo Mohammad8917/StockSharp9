@@ -1,0 +1,120 @@
+namespace StockSharp.DukasCopyJForex;
+
+/// <summary>The message adapter for Dukascopy through the official JForex SDK.</summary>
+[MediaIcon(Media.MediaNames.dukascopy)]
+[Doc("topics/api/connectors/forex/dukascopy_jforex.html")]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.DukasCopyJForexKey,
+	Description = LocalizedStrings.ForexConnectorKey,
+	GroupName = LocalizedStrings.ForexKey)]
+[MessageAdapterCategory(MessageAdapterCategories.FX | MessageAdapterCategories.RealTime |
+	MessageAdapterCategories.Free | MessageAdapterCategories.History | MessageAdapterCategories.Level1 |
+	MessageAdapterCategories.MarketDepth | MessageAdapterCategories.Ticks |
+	MessageAdapterCategories.Candles | MessageAdapterCategories.Transactions)]
+[OrderCondition(typeof(DukasCopyJForexOrderCondition))]
+public partial class DukasCopyJForexMessageAdapter : MessageAdapter, ILoginPasswordAdapter, IDemoAdapter
+{
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.LoginKey,
+		Description = LocalizedStrings.LoginDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public string Login { get; set; }
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PasswordKey,
+		Description = LocalizedStrings.PasswordDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 1)]
+	[BasicSetting]
+	public SecureString Password { get; set; }
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DemoKey,
+		Description = LocalizedStrings.DemoTradingConnectKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 2)]
+	[BasicSetting]
+	public bool IsDemo { get; set; } = true;
+
+	/// <summary>JForex demo service address.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DemoServiceAddressKey,
+		Description = LocalizedStrings.JForexDemoServiceAddressDescKey,
+		GroupName = LocalizedStrings.AddressesKey,
+		Order = 0)]
+	[BasicSetting]
+	public Uri DemoAddress { get; set; } =
+		new("https://platform.dukascopy.com/demo_3/jforex_3.jnlp");
+
+	/// <summary>JForex live service address.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.LiveServiceAddressKey,
+		Description = LocalizedStrings.JForexLiveServiceAddressDescKey,
+		GroupName = LocalizedStrings.AddressesKey,
+		Order = 1)]
+	[BasicSetting]
+	public Uri LiveAddress { get; set; } =
+		new("https://platform.dukascopy.com/live_3/jforex_3.jnlp");
+
+	/// <summary>Loopback TCP port used by the local JForex bridge.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PortKey,
+		Description = LocalizedStrings.ServerDescriptionKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 3)]
+	[BasicSetting]
+	public int BridgePort { get; set; } = 27431;
+
+	/// <summary>Optional path to the executable bridge JAR. Empty means an externally managed bridge.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PathKey,
+		Description = LocalizedStrings.PathDllDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 4)]
+	[BasicSetting]
+	public string BridgeJarPath { get; set; }
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+		storage
+			.Set(nameof(Login), Login)
+			.Set(nameof(Password), Password)
+			.Set(nameof(IsDemo), IsDemo)
+			.Set(nameof(DemoAddress), DemoAddress)
+			.Set(nameof(LiveAddress), LiveAddress)
+			.Set(nameof(BridgePort), BridgePort)
+			.Set(nameof(BridgeJarPath), BridgeJarPath);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+		Login = storage.GetValue<string>(nameof(Login));
+
+		if (Login.IsEmpty())
+			Login = storage.GetValue<string>("UserName");
+
+		Password = storage.GetValue<SecureString>(nameof(Password));
+		IsDemo = storage.GetValue(nameof(IsDemo), IsDemo);
+		DemoAddress = storage.GetValue(nameof(DemoAddress), DemoAddress);
+		LiveAddress = storage.GetValue(nameof(LiveAddress), LiveAddress);
+		BridgePort = storage.GetValue(nameof(BridgePort), BridgePort);
+		BridgeJarPath = storage.GetValue<string>(nameof(BridgeJarPath));
+	}
+}

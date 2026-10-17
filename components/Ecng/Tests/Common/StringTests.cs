@@ -1,0 +1,1053 @@
+﻿using SmartFormat;
+
+namespace Ecng.Tests.Common;
+
+public enum TestDictKey
+{
+	Alpha,
+	Beta,
+	Gamma,
+}
+
+[TestClass]
+public class StringTests : BaseTestClass
+{
+	[TestMethod]
+	public void ReplaceIgnoreCase()
+	{
+		"".ReplaceIgnoreCase("", "").AssertEqual("");
+		"1".ReplaceIgnoreCase("1", "2").AssertEqual("2");
+		"1".ReplaceIgnoreCase("2", "1").AssertEqual("1");
+		"".ReplaceIgnoreCase("1", "2").AssertEqual("");
+		"1".ReplaceIgnoreCase("11", "22").AssertEqual("1");
+		"1".ReplaceIgnoreCase("", "22").AssertEqual("1");
+		"".ReplaceIgnoreCase("", "22").AssertEqual("22");
+		((string)null).ReplaceIgnoreCase("", "22").AssertEqual(null);
+
+		"AA ffgg GGG".ReplaceIgnoreCase("g", "k").AssertEqual("AA ffkk kkk");
+		"AA ffgg GGG".ReplaceIgnoreCase("g", "").AssertEqual("AA ff ");
+
+		"AbABabab".ReplaceIgnoreCase("ab", "kg").AssertEqual("kgkgkgkg");
+		"AbABaba".ReplaceIgnoreCase("ab", "kg").AssertEqual("kgkgkga");
+
+		"_".ReplaceIgnoreCase("_", "/").AssertEqual("/");
+		"__".ReplaceIgnoreCase("_", "/").AssertEqual("//");
+		"___".ReplaceIgnoreCase("__", "/").AssertEqual("/_");
+		"___S".ReplaceIgnoreCase("__", "/").AssertEqual("/_S");
+		"S___S".ReplaceIgnoreCase("__", "/").AssertEqual("S/_S");
+		"S___".ReplaceIgnoreCase("__", "/").AssertEqual("S/_");
+	}
+
+	[TestMethod]
+	public void ReplaceIgnoreCaseError()
+	{
+		ThrowsExactly<ArgumentNullException>(() => ((string)null).ReplaceIgnoreCase(null, "22"));
+	}
+
+	[TestMethod]
+	public void ReplaceIgnoreCaseError2()
+	{
+		ThrowsExactly<ArgumentNullException>(() => "".ReplaceIgnoreCase(null, "22"));
+	}
+
+	[TestMethod]
+	public void ReplaceIgnoreCaseError3()
+	{
+		ThrowsExactly<ArgumentNullException>(() => "".ReplaceIgnoreCase("", null));
+	}
+
+	[TestMethod]
+	public void ReplaceIgnoreCaseError4()
+	{
+		ThrowsExactly<ArgumentNullException>(() => "11".ReplaceIgnoreCase("11", null));
+	}
+
+	[TestMethod]
+	public void LangCode()
+	{
+		var cultures = CultureInfo.GetCultures(CultureTypes.AllCultures);
+
+		foreach (var culture in cultures)
+		{
+			culture.Name.GetLangCode().AssertEqual(culture.TwoLetterISOLanguageName);
+		}
+	}
+
+	[TestMethod]
+	public void Truncate()
+	{
+		var str = "1234567890";
+		str.Truncate(int.MaxValue).AssertEqual("1234567890");
+		str.Truncate(10).AssertEqual("1234567890");
+		str.Truncate(2).AssertEqual("12...");
+		str.Truncate(0).AssertEqual("...");
+	}
+
+	[TestMethod]
+	public void EmptyChecks()
+	{
+		((string)null).IsEmpty().AssertTrue();
+		"".IsEmpty().AssertTrue();
+		"a".IsEmpty().AssertFalse();
+		((string)null).IsEmptyOrWhiteSpace().AssertTrue();
+		" ".IsEmptyOrWhiteSpace().AssertTrue();
+		"a".IsEmptyOrWhiteSpace().AssertFalse();
+	}
+
+	[TestMethod]
+	public void PutTest()
+	{
+		"{0}-{1}".Put(1, "a").AssertEqual("1-a");
+	}
+
+	[TestMethod]
+	public void SplitByComma()
+	{
+		"a,b,c".SplitByComma().AssertEqual(["a", "b", "c"]);
+	}
+
+	[TestMethod]
+	public void WhiteSpaceAndRemove()
+	{
+		"a b\tc".ReplaceWhiteSpaces('_').AssertEqual("a_b_c");
+		"a b c".ReplaceWhiteSpaces().AssertEqual("a b c");
+		"a b".RemoveSpaces().AssertEqual("ab");
+		"hello world".Remove("WORLD", true).AssertEqual("hello ");
+	}
+
+	[TestMethod]
+	public void NumberChecks()
+	{
+		"10".IsNumber(false).AssertTrue();
+		"10.5".IsNumber(true).AssertTrue();
+		"10a".IsNumber(false).AssertFalse();
+		"1.0".IsNumberOnly(true).AssertTrue();
+		"a".IsNumberOnly(false).AssertFalse();
+		'5'.IsDigit().AssertTrue();
+	}
+
+	[TestMethod]
+	public void ContainsAndIndex()
+	{
+		"Hello".ContainsIgnoreCase("he").AssertTrue();
+		"Hello".StartsWithIgnoreCase("he").AssertTrue();
+		"Hello".EndsWithIgnoreCase("LO").AssertTrue();
+		"hello".IndexOfIgnoreCase("L").AssertEqual(2);
+		"hello".LastIndexOfIgnoreCase("L").AssertEqual(3);
+	}
+
+	[TestMethod]
+	public void Reverse()
+	{
+		"abc".Reverse().AssertEqual("cba");
+	}
+
+	[TestMethod]
+	public void Reduce()
+	{
+		"abcdef".Reduce(6, "").AssertEqual("abcdef");
+		"abcdef".Reduce(5, "").AssertEqual("abcde");
+
+		"abcdef".Reduce(6, "...").AssertEqual("abc...");
+		"abcdef".Reduce(3, "...").AssertEqual("...");
+
+		"".Reduce(0, "").AssertEqual("");
+
+		ThrowsExactly<ArgumentNullException>(() => ((string)null).Reduce(0, "..."));
+		ThrowsExactly<ArgumentOutOfRangeException>(() => "abcdef".Reduce(0, "..."));
+	}
+
+	/// <summary>
+	/// Verifies that Reduce handles count greater than string length gracefully.
+	/// Should return original string or clamp, not throw.
+	/// </summary>
+	[TestMethod]
+	public void Reduce_CountGreaterThanLength_ShouldNotThrow()
+	{
+		var str = "short";
+
+		// Reduce with count greater than string length should not throw
+		// and should return original string or clamp gracefully
+		var result = str.Reduce(100, "...");
+		// If no exception, the result should be at most the original string
+		(result.Length <= str.Length + 3).AssertTrue($"Reduce result '{result}' should be reasonable");
+	}
+
+	[TestMethod]
+	public void SplitBySepAndVariants()
+	{
+		"a|b|c".SplitBySep("|").AssertEqual(["a", "b", "c"]);
+		"a\rb\rc".SplitByR().AssertEqual(["a", "b", "c"]);
+		"a\nb\nc".SplitByN().AssertEqual(["a", "b", "c"]);
+		"a\r\nb\r\nc".SplitByRN().AssertEqual(["a", "b", "c"]);
+		"a.b.c".SplitByDot().AssertEqual(["a", "b", "c"]);
+		"a;b;c".SplitByDotComma().AssertEqual(["a", "b", "c"]);
+		"a:b:c".SplitByColon().AssertEqual(["a", "b", "c"]);
+		"a b c".SplitBySpace().AssertEqual(["a", "b", "c"]);
+		"a=b=c".SplitByEqual().AssertEqual(["a", "b", "c"]);
+		"a\tb\tc".SplitByTab().AssertEqual(["a", "b", "c"]);
+		"a@b@c".SplitByAt().AssertEqual(["a", "b", "c"]);
+	}
+
+	[TestMethod]
+	public void JoinVariants()
+	{
+		var arr = new string[] { "a", "b", "c" };
+		arr.JoinAt().AssertEqual("a@b@c");
+		arr.JoinTab().AssertEqual("a\tb\tc");
+		arr.JoinComma().AssertEqual("a,b,c");
+		arr.JoinDotComma().AssertEqual("a;b;c");
+		arr.JoinDot().AssertEqual("a.b.c");
+		arr.JoinCommaSpace().AssertEqual("a, b, c");
+		arr.JoinSpace().AssertEqual("a b c");
+		arr.JoinPipe().AssertEqual("a|b|c");
+		arr.JoinColon().AssertEqual("a:b:c");
+		arr.JoinEqual().AssertEqual("a=b=c");
+		arr.JoinAnd().AssertEqual("a&b&c");
+		arr.JoinN().AssertEqual("a\nb\nc");
+		arr.JoinRN().AssertEqual("a\r\nb\r\nc");
+		arr.JoinNL().AssertEqual(string.Join(Environment.NewLine, arr));
+		arr.Join("-").AssertEqual("a-b-c");
+	}
+
+	[TestMethod]
+	public void RemoveTrailingZeros_String()
+	{
+		"10,00".RemoveTrailingZeros(",").AssertEqual("10");
+		"0,00".RemoveTrailingZeros(",").AssertEqual("0");
+		"10.5000".RemoveTrailingZeros(".").AssertEqual("10.5");
+		"1200.000".RemoveTrailingZeros(".").AssertEqual("1200");
+
+		foreach (var value in new[] { "1200", "1000000", "001200", "10" })
+			value.RemoveTrailingZeros(".").AssertEqual(value);
+	}
+
+	[TestMethod]
+	[DataRow(1536L, "1.5 KB")]
+	[DataRow(2560L, "2.5 KB")]
+	[DataRow(1572864L, "1.5 MB")]
+	public void ToHumanReadableFileSize_PreservesRoundedFraction(long value, string expected)
+	{
+		value.ToHumanReadableFileSize().AssertEqual(expected);
+	}
+
+	[TestMethod]
+	[DataRow("abcdefghij", 7, "ab...ij")]
+	[DataRow("abcdefghij", 8, "ab...hij")]
+	public void TruncateMiddle_RespectsRequestedLimit(string value, int limit, string expected)
+	{
+		var truncated = value.TruncateMiddle(limit);
+
+		truncated.AssertEqual(expected);
+		truncated.Length.AssertEqual(limit);
+	}
+
+	[TestMethod]
+	public void RemoveMultipleWhitespace_Works()
+	{
+		"a b\t\tc".RemoveMultipleWhitespace().AssertEqual("a b c");
+	}
+
+	[TestMethod]
+	public void Nl2Br_Works()
+	{
+		"a\nb\r\nc".Nl2Br().AssertEqual("a<br />b<br />c");
+	}
+
+	[TestMethod]
+	public void ToTitleCase_Works()
+	{
+		"hello world".ToTitleCase().AssertEqual(CultureInfo.CurrentCulture.TextInfo.ToTitleCase("hello world"));
+	}
+
+	[TestMethod]
+	public void Times_Works()
+	{
+		"a".Times(3).AssertEqual("aaa");
+		"a".Times(3, ",").AssertEqual("a,a,a");
+	}
+
+	[TestMethod]
+	public void ToLatin_And_LightScreening()
+	{
+		// TODO
+		//"тест".ToLatin().AssertEqual("test");
+		"a b.c#?:".LightScreening().AssertEqual("a-bc");
+	}
+
+	[TestMethod]
+	public void ComparePaths_Works()
+	{
+		// Same paths with different representations should be equal
+		var p1 = Path.GetFullPath(".");
+		var p2 = Path.GetFullPath("./");
+		p1.ComparePaths(p2).AssertTrue($"'{p1}' and '{p2}' should be equal paths");
+
+		// Different paths should not be equal
+		var p3 = Path.GetFullPath("..");
+		p1.ComparePaths(p3).AssertFalse($"'{p1}' and '{p3}' should NOT be equal paths");
+
+		// Case sensitivity test (platform-dependent behavior)
+		var pUpper = Path.GetFullPath(".").ToUpperInvariant();
+		var pLower = Path.GetFullPath(".").ToLowerInvariant();
+		// Just verify it doesn't throw - result is platform-dependent
+		_ = pUpper.ComparePaths(pLower);
+	}
+
+	[TestMethod]
+	public void Like_Works()
+	{
+		"abc".Like("a_c").AssertTrue();
+		"abc".Like("a%", true).AssertTrue();
+		"abc".Like("a%z").AssertFalse();
+	}
+
+	[TestMethod]
+	public void IsValidEmailAddress_And_Url()
+	{
+		"test@example.com".IsValidEmailAddress().AssertTrue();
+		"notanemail".IsValidEmailAddress().AssertFalse();
+		"https://example.com".IsValidUrl().AssertTrue();
+		"not a url".IsValidUrl().AssertFalse();
+	}
+
+	[TestMethod]
+	public void Digest_And_Base64()
+	{
+		var bytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF };
+		bytes.Digest().AssertEqual("DEADBEEF");
+		bytes.Digest(2).AssertEqual("DEAD");
+		var str = "Hello";
+		Encoding.UTF8.GetString(Convert.FromBase64String(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(str)))).AssertEqual(str); // roundtrip check
+		Convert.ToBase64String(bytes).AssertEqual(bytes.Base64());
+	}
+
+	[TestMethod]
+	public void EncodingHelpers()
+	{
+		var str = "Hello";
+		str.ASCII().AssertEqual(Encoding.ASCII.GetBytes(str));
+		str.UTF8().AssertEqual(Encoding.UTF8.GetBytes(str));
+		str.Unicode().AssertEqual(Encoding.Unicode.GetBytes(str));
+		str.Cyrillic().AssertEqual(Encoding.GetEncoding(1251).GetBytes(str));
+	}
+
+	[TestMethod]
+	public void ToBitString_And_ToByteArray()
+	{
+		var bytes = new byte[] { 0b10101010, 0b01010101 };
+		var bitStr = bytes.ToBitString();
+		bitStr.ToByteArray().AssertEqual(bytes);
+
+		new byte[] { 0b11110000, 0b00001111 }.ToBitString(index: 1)
+			.AssertEqual("00001111");
+
+		new byte[] { 0b11110000, 0b00001111 }.ToBitString(index: 1, count: 1)
+			.AssertEqual("00001111");
+
+		new byte[] { 0b11110000, 0b00001111, 0b10101010 }.ToBitString(index: 1, count: 2)
+			.AssertEqual("0000111110101010");
+	}
+
+	[TestMethod]
+	public void GetDeterministicHashCode_And_TryToLong()
+	{
+		"test".GetDeterministicHashCode().AssertEqual(-871206010);
+		"secret".GetDeterministicHashCode().AssertEqual(-600681010);
+		"StockSharp".GetDeterministicHashCode().AssertEqual(1668635384);
+
+		"12345".TryToLong().AssertEqual(12345L);
+		"notanumber".TryToLong().AssertNull();
+	}
+
+	[TestMethod]
+	public void FastIndexOf_Works()
+	{
+		"abcdef".FastIndexOf("cd").AssertEqual(2);
+		"abcdef".FastIndexOf("gh").AssertEqual(-1);
+	}
+
+	[TestMethod]
+	public void RemoveLast_And_IsEmpty_StringBuilder()
+	{
+		var sb = new StringBuilder("abc");
+		sb.RemoveLast(1);
+		sb.ToString().AssertEqual("ab");
+		sb.IsEmpty().AssertFalse();
+		sb.Clear();
+		sb.IsEmpty().AssertTrue();
+	}
+
+	[TestMethod]
+	public void GetAndClear_StringBuilder()
+	{
+		var sb = new StringBuilder("abc");
+		sb.GetAndClear().AssertEqual("abc");
+		sb.Length.AssertEqual(0);
+	}
+
+	[TestMethod]
+	public void Intern_Works()
+	{
+		var s1 = string.Intern("abc");
+		var s2 = "abc".Intern();
+		ReferenceEquals(s1, s2).AssertTrue();
+	}
+
+	// Previously added tests
+	[TestMethod]
+	public void PutEx_Sync()
+	{
+		"{0}-{1}".PutEx(1, "a").AssertEqual("1-a");
+	}
+
+	[TestMethod]
+	public void IsEmpty_WithDefaultValue()
+	{
+		((string)null).IsEmpty("def").AssertEqual("def");
+		"".IsEmpty("x").AssertEqual("x");
+		"a".IsEmpty("x").AssertEqual("a");
+	}
+
+	[TestMethod]
+	public void IsEmptyOrWhiteSpace_WithDefaultValue()
+	{
+		((string)null).IsEmptyOrWhiteSpace("d").AssertEqual("d");
+		" ".IsEmptyOrWhiteSpace("d").AssertEqual("d");
+		"a".IsEmptyOrWhiteSpace("d").AssertEqual("a");
+	}
+
+	[TestMethod]
+	public void ThrowIfEmpty_String_Throws()
+	{
+		ThrowsExactly<ArgumentNullException>(() => ((string)null).ThrowIfEmpty("p"));
+		ThrowsExactly<ArgumentNullException>(() => "".ThrowIfEmpty("p"));
+	}
+
+	[TestMethod]
+	public void ReplaceIgnoreCase_StringBuilder()
+	{
+		var sb = new StringBuilder("Hello");
+		sb.ReplaceIgnoreCase("he", "HE");
+		sb.ToString().AssertEqual("HEllo");
+	}
+
+	[TestMethod]
+	public void SplitByLength_Works()
+	{
+		"abcdef".SplitByLength(2).AssertEqual(["ab", "cd", "ef"]);
+	}
+
+	[TestMethod]
+	public void Trim_Variant_Works()
+	{
+		"1234567890".Trim(10).AssertEqual("1234567890");
+		"1234567890".Trim(5).AssertEqual("12345...");
+	}
+
+	[TestMethod]
+	public void TrimStartEnd_CheckBrackets_StripBrackets()
+	{
+		"[abc]".CheckBrackets("[", "]").AssertTrue();
+		"[abc]".StripBrackets("[", "]").AssertEqual("abc");
+		"prefixHello".TrimStart("prefix").AssertEqual("Hello");
+		"HelloSuffix".TrimEnd("Suffix").AssertEqual("Hello");
+	}
+
+	[TestMethod]
+	public void Base64_String_To_Bytes()
+	{
+		var bytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF };
+		var s = Convert.ToBase64String(bytes);
+		s.Base64().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void LastIndexOf_StringBuilder_Works()
+	{
+		var sb = new StringBuilder("a_b_c");
+		sb.LastIndexOf('_').AssertEqual(3);
+	}
+
+	[TestMethod]
+	public void LastIndexOf_StringBuilder_AtIndexZero()
+	{
+		// Test that character at index 0 is found correctly
+		var sb = new StringBuilder("_abc");
+		sb.LastIndexOf('_').AssertEqual(0);
+
+		// Test when only character at index 0
+		sb = new StringBuilder("x");
+		sb.LastIndexOf('x').AssertEqual(0);
+
+		// Test not found
+		sb = new StringBuilder("abc");
+		sb.LastIndexOf('x').AssertEqual(-1);
+
+		// Test empty
+		sb = new StringBuilder("");
+		sb.LastIndexOf('x').AssertEqual(-1);
+	}
+
+	[TestMethod]
+	public void Char_ToLower_ToUpper_Variants()
+	{
+		'A'.ToLower().AssertEqual('a');
+		'a'.ToUpper(false).AssertEqual('A');
+	}
+
+	[TestMethod]
+	public void SecureString_Functions()
+	{
+		var s = "secret".Secure();
+		// UnSecure roundtrip
+		s.UnSecure().AssertEqual("secret");
+
+		// ReadOnly and IsEmpty
+		s.ReadOnly();
+		s.IsEmpty().AssertFalse();
+
+		// ToId
+		var id = s.ToId();
+		id.AssertEqual("secret".GetDeterministicHashCode());
+
+		// IsEqualTo
+		var s2 = "secret".Secure();
+		s.IsEqualTo(s2).AssertTrue();
+		s.IsEqualTo(null).AssertFalse();
+
+		// ThrowIfEmpty
+		ThrowsExactly<ArgumentNullException>(() => ((SecureString)null).ThrowIfEmpty("p"));
+		ThrowsExactly<ArgumentNullException>(() => new SecureString().ThrowIfEmpty("p"));
+	}
+
+	[TestMethod]
+	public void RemoveDiacritics_And_ToLatin_And_TruncateMiddle()
+	{
+		"café".RemoveDiacritics().AssertEqual("cafe");
+		"тест".ToLatin().AssertEqual("test");
+		"abcdefghij".TruncateMiddle(7).AssertEqual("ab...ij");
+	}
+
+	[TestMethod]
+	public void SplitByLineSeps_And_SplitLines_And_SplitObsolete()
+	{
+		"a\r\nb\nc\r".SplitByLineSeps().AssertEqual(["a", "b", "c"]);
+		"a\nb".SplitByN().AssertEqual(["a", "b"]);
+		"a|b|c".SplitBySep("|", false).AssertEqual(["a", "b", "c"]);
+	}
+
+	[TestMethod]
+	public void EqualsAndCompareIgnoreCase_And_UrlEscape_DataEscape()
+	{
+		"Ab".EqualsIgnoreCase("ab").AssertTrue();
+
+		var s = "a b";
+		s.DataEscape().DataUnEscape().AssertEqual(s);
+	}
+
+	[TestMethod]
+	public void Hex()
+	{
+		var bytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF };
+		var hex = bytes.Hex();
+		hex.Hex().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void Duplicates()
+	{
+		var items = new[] { "a", "A", "b", "B", "b" };
+		var dups = items.Duplicates().Select(x => x.ToLower()).OrderBy(x => x).ToArray();
+		dups.AssertEqual(["a", "b"]);
+
+		dups = [.. items.Duplicates(StringComparer.Ordinal).Select(x => x.ToLower()).OrderBy(x => x)];
+		dups.AssertEqual(["b"]);
+	}
+
+	[TestMethod]
+	public void Encoding_ByteArray_To_String_And_GetString_ArraySegment()
+	{
+		var str = "Hello";
+		// string -> bytes -> string via extensions
+		str.ASCII().ASCII().AssertEqual(str);
+		str.UTF8().UTF8().AssertEqual(str);
+		str.Unicode().Unicode().AssertEqual(str);
+		str.Cyrillic().Cyrillic().AssertEqual(str);
+
+		var bytes = Encoding.UTF8.GetBytes(str);
+		var seg = new ArraySegment<byte>(bytes);
+		Encoding.UTF8.GetString(seg).AssertEqual(str);
+	}
+
+	[TestMethod]
+	public void CharArray_ToString_And_ToString_Uint()
+	{
+		var arr = new[] { 'a', 'b', 'c' };
+		arr.ToString(2).AssertEqual("ab");
+		arr.ToString((uint)2).AssertEqual("ab");
+	}
+
+	[TestMethod]
+	public void Span_UTF8_Encoding_And_Decoding()
+	{
+		var str = "Hello World";
+
+		// String to bytes
+		var bytes = str.UTF8();
+
+		// Bytes to string via ReadOnlySpan
+		ReadOnlySpan<byte> byteSpan = bytes;
+		byteSpan.UTF8().AssertEqual(str);
+
+		// Encoding to destination span
+		ReadOnlySpan<char> charSpan = str.ToCharArray();
+		Span<byte> destination = new byte[100];
+		var count = charSpan.UTF8(destination);
+		count.AssertEqual(bytes.Length);
+		destination[..count].ToArray().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void Span_ASCII_Encoding_And_Decoding()
+	{
+		var str = "Hello";
+
+		// String to bytes
+		var bytes = str.ASCII();
+
+		// Bytes to string via ReadOnlySpan
+		ReadOnlySpan<byte> byteSpan = bytes;
+		byteSpan.ASCII().AssertEqual(str);
+
+		// Encoding to destination span
+		ReadOnlySpan<char> charSpan = str.ToCharArray();
+		Span<byte> destination = new byte[100];
+		var count = charSpan.ASCII(destination);
+		count.AssertEqual(bytes.Length);
+		destination[..count].ToArray().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void Span_Unicode_Encoding_And_Decoding()
+	{
+		var str = "Hello";
+
+		// String to bytes
+		var bytes = str.Unicode();
+
+		// Bytes to string via ReadOnlySpan
+		ReadOnlySpan<byte> byteSpan = bytes;
+		byteSpan.Unicode().AssertEqual(str);
+
+		// Encoding to destination span
+		ReadOnlySpan<char> charSpan = str.ToCharArray();
+		Span<byte> destination = new byte[100];
+		var count = charSpan.Unicode(destination);
+		count.AssertEqual(bytes.Length);
+		destination[..count].ToArray().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void Span_Default_Encoding_And_Decoding()
+	{
+		var str = "Hello";
+
+		// String to bytes
+		var bytes = str.Default();
+
+		// Bytes to string via ReadOnlySpan
+		ReadOnlySpan<byte> byteSpan = bytes;
+		byteSpan.Default().AssertEqual(str);
+
+		// Encoding to destination span
+		ReadOnlySpan<char> charSpan = str.ToCharArray();
+		Span<byte> destination = new byte[100];
+		var count = charSpan.Default(destination);
+		count.AssertEqual(bytes.Length);
+		destination[..count].ToArray().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void Span_Cyrillic_Encoding_And_Decoding()
+	{
+		var str = "Hello";
+
+		// String to bytes
+		var bytes = str.Cyrillic();
+
+		// Bytes to string via ReadOnlySpan
+		ReadOnlySpan<byte> byteSpan = bytes;
+		byteSpan.Cyrillic().AssertEqual(str);
+
+		// Encoding to destination span
+		ReadOnlySpan<char> charSpan = str.ToCharArray();
+		Span<byte> destination = new byte[100];
+		var count = charSpan.Cyrillic(destination);
+		count.AssertEqual(bytes.Length);
+		destination[..count].ToArray().AssertEqual(bytes);
+	}
+
+	[TestMethod]
+	public void Span_RussianText_UTF8()
+	{
+		var str = "Привет мир";
+
+		// String to bytes
+		var bytes = str.UTF8();
+
+		// Bytes to string via ReadOnlySpan
+		ReadOnlySpan<byte> byteSpan = bytes;
+		byteSpan.UTF8().AssertEqual(str);
+	}
+
+	[TestMethod]
+	public void Span_EmptyString_Encoding()
+	{
+		var str = "";
+
+		// UTF8
+		ReadOnlySpan<byte> utf8Bytes = str.UTF8();
+		utf8Bytes.UTF8().AssertEqual(str);
+
+		// ASCII
+		ReadOnlySpan<byte> asciiBytes = str.ASCII();
+		asciiBytes.ASCII().AssertEqual(str);
+	}
+
+	/// <summary>
+	/// Verifies that DictionarySourceEx handles different key types correctly.
+	/// The key cache should consider the dictionary key type.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_ShouldHandleDifferentKeyTypes()
+	{
+		// First use with int key
+		var intDict = new Dictionary<int, string> { { 123, "int-value" } };
+		var result1 = "{123}".PutEx(intDict);
+		result1.AssertEqual("int-value");
+
+		// Then use same selector with string key
+		var stringDict = new Dictionary<string, string> { { "123", "string-value" } };
+		var result2 = "{123}".PutEx(stringDict);
+
+		// Should return "string-value", not fail or return "int-value"
+		result2.AssertEqual("string-value",
+			"Same selector with different key types should work independently");
+	}
+
+	/// <summary>
+	/// Default SmartFormat resolves enum-keyed dictionaries via IDictionary ToString() fallback,
+	/// but DictionarySourceEx uses precise type conversion via To&lt;T&gt;() which is more reliable.
+	/// This test documents that both approaches work for simple enum keys.
+	/// </summary>
+	[TestMethod]
+	public void DefaultSmartFormat_EnumDictViaToString()
+	{
+		var formatter = Smart.CreateDefaultSmartFormat();
+		var dict = new Dictionary<TestDictKey, object>
+		{
+			{ TestDictKey.Alpha, 100 },
+			{ TestDictKey.Beta, 200 },
+		};
+
+		// default SmartFormat handles enum keys via IDictionary + ToString() comparison
+		formatter.Format("{Alpha};{Beta}", dict).AssertEqual("100;200");
+	}
+
+	/// <summary>
+	/// Verifies that PutEx (Smart.Default with DictionarySourceEx) resolves int-keyed dictionaries.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_IntKeys()
+	{
+		var dict = new Dictionary<int, object>
+		{
+			{ 1, "one" },
+			{ 2, "two" },
+			{ 42, 3.14 },
+		};
+
+		"{1}".PutEx(dict).AssertEqual("one");
+		"{2}".PutEx(dict).AssertEqual("two");
+		"{42}".PutEx(dict).AssertEqual("3.14");
+		"{1};{2}".PutEx(dict).AssertEqual("one;two");
+	}
+
+	/// <summary>
+	/// Verifies that PutEx resolves string-keyed dictionaries.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_StringKeys()
+	{
+		var dict = new Dictionary<string, object>
+		{
+			{ "Name", "Alice" },
+			{ "Age", 30 },
+		};
+
+		"{Name}".PutEx(dict).AssertEqual("Alice");
+		"{Age}".PutEx(dict).AssertEqual("30");
+		"{Name} is {Age}".PutEx(dict).AssertEqual("Alice is 30");
+	}
+
+	/// <summary>
+	/// Verifies that PutEx resolves enum-keyed dictionaries via DictionarySourceEx.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_EnumKeys()
+	{
+		var dict = new Dictionary<TestDictKey, object>
+		{
+			{ TestDictKey.Alpha, 100 },
+			{ TestDictKey.Beta, "hello" },
+			{ TestDictKey.Gamma, 9.99m },
+		};
+
+		"{Alpha}".PutEx(dict).AssertEqual("100");
+		"{Beta}".PutEx(dict).AssertEqual("hello");
+		"{Gamma}".PutEx(dict).AssertEqual("9.99");
+		"{Alpha};{Beta};{Gamma}".PutEx(dict).AssertEqual("100;hello;9.99");
+	}
+
+	/// <summary>
+	/// Verifies that PutEx resolves nested format with enum-keyed dictionary
+	/// (the pattern used in StockSharp TextExporter templates).
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_EnumKeys_NestedFormat()
+	{
+		var wrapper = new
+		{
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				{ TestDictKey.Beta, "hello" },
+			}
+		};
+
+		"{Changes:{Alpha};{Beta}}".PutEx(wrapper).AssertEqual("100;hello");
+	}
+
+	/// <summary>
+	/// Verifies that PutEx resolves long-keyed dictionaries.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_LongKeys()
+	{
+		var dict = new Dictionary<long, object>
+		{
+			{ 1000000000L, "billion" },
+			{ 42L, "answer" },
+		};
+
+		"{1000000000}".PutEx(dict).AssertEqual("billion");
+		"{42}".PutEx(dict).AssertEqual("answer");
+	}
+
+	/// <summary>
+	/// Both Smart.Default and CreateDefaultSmartFormat handle nested ; correctly
+	/// when all keys are present in the dictionary.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_NestedSemicolonAllKeysPresent()
+	{
+		var obj = new
+		{
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				{ TestDictKey.Beta, 200 },
+				{ TestDictKey.Gamma, 300 },
+			}
+		};
+
+		// Smart.Default works
+		"{Changes:{Alpha};{Beta};{Gamma}}".PutEx(obj)
+			.AssertEqual("100;200;300");
+
+		// CreateDefaultSmartFormat also works when all keys are present
+		var formatter = Smart.CreateDefaultSmartFormat();
+		formatter.Format("{Changes:{Alpha};{Beta};{Gamma}}", obj)
+			.AssertEqual("100;200;300");
+	}
+
+	/// <summary>
+	/// Default SmartFormat throws when a key is missing from the dictionary.
+	/// This reproduces the real Level1 export error: template references BestAskVolume
+	/// but the dictionary might not contain it.
+	/// </summary>
+	[TestMethod]
+	public void DefaultSmartFormat_MissingKeyThrows()
+	{
+		var obj = new
+		{
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				// Beta is missing!
+				{ TestDictKey.Gamma, 300 },
+			}
+		};
+
+		var formatter = Smart.CreateDefaultSmartFormat();
+
+		// missing key Beta → error
+		Throws<SmartFormat.Core.Formatting.FormattingException>(
+			() => formatter.Format("{Changes:{Alpha};{Beta};{Gamma}}", obj));
+	}
+
+	/// <summary>
+	/// DictionarySourceEx (Smart.Default) handles missing keys gracefully — returns null/empty.
+	/// </summary>
+	[TestMethod]
+	public void DictionarySourceEx_MissingKeyReturnsEmpty()
+	{
+		var obj = new
+		{
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				// Beta is missing!
+				{ TestDictKey.Gamma, 300 },
+			}
+		};
+
+		// DictionarySourceEx returns null for missing keys → empty string in output
+		"{Changes:{Alpha};{Beta};{Gamma}}".PutEx(obj)
+			.AssertEqual("100;;300");
+	}
+
+	/// <summary>
+	/// AddDictionarySourceEx extension method fixes CreateDefaultSmartFormat for missing keys.
+	/// </summary>
+	[TestMethod]
+	public void AddDictionarySourceEx_FixesMissingKeys()
+	{
+		var obj = new
+		{
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				// Beta is missing!
+				{ TestDictKey.Gamma, 300 },
+			}
+		};
+
+		var formatter = Smart.CreateDefaultSmartFormat().AddDictionarySourceEx();
+
+		// after adding DictionarySourceEx — missing keys produce empty output
+		formatter.Format("{Changes:{Alpha};{Beta};{Gamma}}", obj)
+			.AssertEqual("100;;300");
+	}
+
+	/// <summary>
+	/// Colon in format string (like HH:mm:ss) requires :d: prefix,
+	/// otherwise SmartFormat parses colons as selector separators.
+	/// </summary>
+	[TestMethod]
+	public void TimeFormat_ColonRequiresFormatterPrefix()
+	{
+		var dt = new DateTime(2025, 3, 15, 10, 30, 45);
+
+		// simple format without colons — works without prefix
+		"{0:yyyyMMdd}".PutEx(dt).AssertEqual("20250315");
+
+		// with :d: prefix (SmartFormat 3.x DefaultFormatter name)
+		"{0:d:HH\\:mm\\:ss}".PutEx(dt).AssertEqual("10:30:45");
+	}
+
+	/// <summary>
+	/// CreateSmartFormatterEx returns a fully configured formatter:
+	/// DictionarySourceEx + DefaultFormatter.Name = "default".
+	/// </summary>
+	[TestMethod]
+	public void CreateSmartFormatterEx_FullConfig()
+	{
+		var obj = new
+		{
+			ServerTime = new DateTime(2025, 3, 15, 10, 30, 45),
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				// Beta is missing
+				{ TestDictKey.Gamma, 300 },
+			}
+		};
+
+		var formatter = StringHelper.CreateSmartFormatterEx();
+
+		// :default: prefix works (DefaultFormatter.Name = "default")
+		formatter.Format("{ServerTime:default:yyyyMMdd}", obj)
+			.AssertEqual("20250315");
+
+		// missing dict keys produce empty output (DictionarySourceEx)
+		formatter.Format("{Changes:{Alpha};{Beta};{Gamma}}", obj)
+			.AssertEqual("100;;300");
+
+		// time format with colons — :default: prefix makes colons safe
+		formatter.Format("{ServerTime:default:HH:mm:ss}", obj)
+			.AssertEqual("10:30:45");
+
+		// full Level1-like template
+		formatter.Format("{ServerTime:default:yyyyMMdd};{ServerTime:default:HH:mm:ss};{Changes:{Alpha};{Gamma}}", obj)
+			.AssertEqual("20250315;10:30:45;100;300");
+	}
+
+	/// <summary>
+	/// Without :default: prefix, colons in time format are parsed as selector separators.
+	/// </summary>
+	[TestMethod]
+	public void CreateSmartFormatterEx_TimeColonsWithoutPrefix()
+	{
+		var obj = new { ServerTime = new DateTime(2025, 3, 15, 10, 30, 45) };
+		var formatter = StringHelper.CreateSmartFormatterEx();
+
+		// {ServerTime:HH:mm:ss} — colons parsed as selector chain ServerTime.HH.mm.ss → error
+		Throws<SmartFormat.Core.Formatting.FormattingException>(
+			() => formatter.Format("{ServerTime:HH:mm:ss}", obj));
+
+		// {ServerTime:default:HH:mm:ss} — works, :default: is the formatter name
+		formatter.Format("{ServerTime:default:HH:mm:ss}", obj)
+			.AssertEqual("10:30:45");
+	}
+
+	/// <summary>
+	/// Contrast: standard formatter fails on missing dict key,
+	/// CreateSmartFormatterEx handles it gracefully.
+	/// </summary>
+	[TestMethod]
+	public void StandardVsEx_MissingDictKey()
+	{
+		var obj = new
+		{
+			ServerTime = new DateTime(2025, 3, 15, 10, 30, 45),
+			Changes = (IDictionary<TestDictKey, object>)new Dictionary<TestDictKey, object>
+			{
+				{ TestDictKey.Alpha, 100 },
+				// Beta is missing
+				{ TestDictKey.Gamma, 300 },
+			}
+		};
+
+		const string template = "{Changes:{Alpha};{Beta};{Gamma}}";
+
+		// standard formatter — throws on missing key
+		var std = Smart.CreateDefaultSmartFormat();
+		Throws<SmartFormat.Core.Formatting.FormattingException>(
+			() => std.Format(template, obj));
+
+		// CreateSmartFormatterEx — missing key → empty string
+		var ex = StringHelper.CreateSmartFormatterEx();
+		ex.Format(template, obj).AssertEqual("100;;300");
+	}
+
+	/// <summary>
+	/// AddDictionarySourceEx validates null argument.
+	/// </summary>
+	[TestMethod]
+	public void AddDictionarySourceEx_NullThrows()
+	{
+		Throws<ArgumentNullException>(() => ((SmartFormatter)null).AddDictionarySourceEx());
+	}
+}

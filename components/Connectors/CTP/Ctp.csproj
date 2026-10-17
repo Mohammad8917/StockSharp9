@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common_connectors.props" />
+
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);CS3001;CS3003</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="NativeBridge\CMakeLists.txt;NativeBridge\ctp_bridge.cpp;NativeBridge\ctp_bridge.h" Pack="true" PackagePath="native-source\%(Filename)%(Extension)" />
+    <None Include="THIRD_PARTY_NOTICES.md" Pack="true" PackagePath="" />
+    <None Include="runtimes\win-x64\native\*" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="runtimes\win-x64\native" />
+    <None Include="runtimes\linux-x64\native\*" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="runtimes\linux-x64\native" />
+  </ItemGroup>
+</Project>

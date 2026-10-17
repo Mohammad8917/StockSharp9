@@ -1,0 +1,116 @@
+# Создание индикатора
+
+Создание собственного индикатора в [API](../../../../api.md) описано в пункте [Собственный индикатор](../../../../api/indicators/custom_indicator.md). Такие индикаторы полностью совместимы с **Дизайнер**.
+
+Чтобы создать индикатор, на панели **Схемы** необходимо выбрать папку **Индикаторы**, нажать правую кнопку мыши и в контекстном меню выбрать **Добавить**:
+
+![Designer индикатор с исходным кодом 00](../../../../../images/designer_source_code_indicator_00.png)
+
+Код индикатора будет выглядеть так:
+
+```python
+import clr
+import random
+
+clr.AddReference("StockSharp.BusinessEntities")
+clr.AddReference("StockSharp.Algo")
+
+from StockSharp.Algo.Indicators import BaseIndicator, DecimalIndicatorValue
+from indicator_extensions import *
+
+class empty_indicator(BaseIndicator):
+	"""
+	Пример индикатора, демонстрирующий сохранение и загрузку параметров.
+
+	Документация https://doc.stocksharp.com/topics/designer/strategies/using_code/python/create_own_indicator.html
+	
+	Изменяет входную цену на +20% или -20%.
+	"""
+	def __init__(self):
+		super(empty_indicator, self).__init__()
+		self._change = 20
+		self._counter = 0
+		self._isFormed = False
+
+	@property
+	def Change(self) -> int:
+		return self._change
+
+	@Change.setter
+	def Change(self, value):
+		self._change = value
+		self.Reset()
+
+	def CalcIsFormed(self):
+		"""Определяет, получил ли индикатор достаточно входных значений, чтобы считаться сформированным."""
+		return self._isFormed
+
+	def Reset(self):
+		"""Сбрасывает состояние индикатора и внутренние счетчики."""
+		super(empty_indicator, self).Reset()
+		self._isFormed = False
+		self._counter = 0
+
+	def OnProcess(self, input):
+		"""
+		Обрабатывает входное значение индикатора и применяет случайное изменение.
+		
+		:param input: Входное значение индикатора.
+		:return: Новое DecimalIndicatorValue после применения изменений.
+		"""
+		# Каждый 10-й вызов пытается вернуть пустое значение
+		if random.randint(0, 10) == 0:
+			return DecimalIndicatorValue(self, input.Time)
+
+		if self._counter == 5:
+	# Например, нашему индикатору нужно 5 входных значений, чтобы стать сформированным
+			self._isFormed = True
+		self._counter += 1
+
+		value = to_decimal(input)
+
+		# Применить случайное изменение +/- _change процентов к текущему значению
+		value += value * random.randint(-self._change, self._change) / 100.0
+
+		result = DecimalIndicatorValue(self, value, input.Time)
+		# Пометить значение как финальное на основе случайного выбора
+		result.IsFinal = bool(random.getrandbits(1))
+		return result
+
+	def Load(self, storage):
+		"""
+		Загружает параметры индикатора из постоянного хранилища.
+		
+		:param storage: Хранилище настроек для загрузки.
+		"""
+		super(empty_indicator, self).Load(storage)
+		self.Change = storage.GetValue("Change", self.Change)
+
+	def Save(self, storage):
+		"""
+		Сохраняет параметры индикатора в постоянное хранилище.
+		
+		:param storage: Хранилище настроек для сохранения.
+		"""
+		super(empty_indicator, self).Save(storage)
+		storage.SetValue("Change", self.Change)
+
+	def __str__(self):
+		return f"Change: {self.Change}"
+
+	def ToString(self):
+		return str(self)
+```
+
+Данный индикатор получает входящее значение и делает у него произвольное отклонение на значение, заданное параметром **Change**.
+
+Описание методов индикатора доступно в разделе [Собственный индикатор](../../../../api/indicators/custom_indicator.md).
+
+Чтобы добавить созданный индикатор на схему, необходимо использовать кубик [Индикатор](../../using_visual_designer/elements/common/indicator.md), и уже в нем задать необходимый индикатор:
+
+![Designer индикатор с исходным кодом 01](../../../../../images/designer_source_code_indicator_01.png)
+
+Параметр **Change**, ранее заданный в коде индикатора, показан в панели свойств.
+
+> [!WARNING] 
+> Индикаторы из Python кода невозможно использовать в стратегиях, созданных на Python коде. Их возможно использовать только в стратегиях, созданных [из кубиков](../../using_visual_designer.md).

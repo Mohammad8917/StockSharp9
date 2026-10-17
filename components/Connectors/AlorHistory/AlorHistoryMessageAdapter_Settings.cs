@@ -1,0 +1,74 @@
+namespace StockSharp.AlorHistory;
+
+using System.ComponentModel.DataAnnotations;
+
+using Ecng.ComponentModel;
+
+/// <summary>
+/// The message adapter for Alor history.
+/// </summary>
+[MediaIcon(Media.MediaNames.alor)]
+[Doc("topics/api/connectors/russia/alorhistory.html")]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.AlorHistoryKey,
+	Description = LocalizedStrings.MarketDataConnectorKey,
+	GroupName = LocalizedStrings.RussiaKey)]
+[MessageAdapterCategory(MessageAdapterCategories.Russia | MessageAdapterCategories.History |
+	MessageAdapterCategories.Candles | MessageAdapterCategories.Stock |
+	MessageAdapterCategories.Futures | MessageAdapterCategories.Options |
+	MessageAdapterCategories.Free)]
+public partial class AlorHistoryMessageAdapter
+{
+	private const string _defaultRestEndpoint = "https://api.alor.ru";
+
+	private string[] _exchanges = ["MOEX"];
+
+	/// <summary>
+	/// Exchanges.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ExchangeKey,
+		Description = LocalizedStrings.ExchangeKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public string Exchanges
+	{
+		get => _exchanges.JoinComma();
+		set => _exchanges = value.ThrowIfEmpty(nameof(value)).SplitByComma(true);
+	}
+
+	/// <summary>REST API endpoint.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.RestEndpointKey,
+		Description = LocalizedStrings.RestApiEndpointDescKey,
+		GroupName = LocalizedStrings.AddressesKey)]
+	[BasicSetting]
+	public string RestEndpoint { get; set; } = _defaultRestEndpoint;
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+
+		storage
+			.Set(nameof(Exchanges), Exchanges)
+			.Set(nameof(RestEndpoint), RestEndpoint);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+
+		Exchanges = storage.GetValue(nameof(Exchanges), Exchanges);
+		RestEndpoint = storage.GetValue(nameof(RestEndpoint), RestEndpoint);
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+		=> base.ToString() + ": " + Exchanges;
+}

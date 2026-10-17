@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common_connectors.props" />
+
+  <ItemGroup>
+    <PackageReference Include="Lightstreamer.DotNetStandard.Client" Version="$(LightstreamerVer)" />
+  </ItemGroup>
+</Project>

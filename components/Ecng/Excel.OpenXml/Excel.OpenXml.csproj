@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common.props" />
+  <PropertyGroup>
+    <RootNamespace>Ecng.Excel</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="DocumentFormat.OpenXml" Version="$(OpenXmlVer)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Excel\Excel.csproj" />
+  </ItemGroup>
+</Project>

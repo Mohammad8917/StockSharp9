@@ -1,0 +1,338 @@
+# Configuração do Ambiente
+
+## Requisitos
+
+Para trabalhar com StockSharp precisa de:
+
+- **.NET 10** (SDK e Runtime) - [transferir](https://dotnet.microsoft.com/download/dotnet/10.0)
+- **IDE** - Visual Studio 2022+, JetBrains Rider ou VS Code
+- **NuGet** - gestor de pacotes (integrado no Visual Studio e no Rider)
+
+Verifique se o SDK está instalado:
+
+```bash
+dotnet --version
+```
+
+## Criar um Projeto
+
+### Visual Studio 2022+
+
+1. **Ficheiro → Novo → Projeto**
+2. Selecione o modelo **Aplicação de consola** ou **Aplicação WPF**
+3. Defina a framework de destino como **.NET 10**
+
+### JetBrains Rider
+
+1. **Ficheiro → Nova solução**
+2. Selecione **.NET / .NET Core → Aplicação de consola**
+3. Defina **Framework de destino: net10.0**
+
+### Linha de Comandos (CLI)
+
+```bash
+# Aplicação de consola
+dotnet new console -n MyTradingApp --framework net10.0
+cd MyTradingApp
+
+# Aplicação WPF (apenas Windows)
+dotnet new wpf -n MyTradingGui --framework net10.0-windows
+```
+
+## Catálogo de Pacotes NuGet
+
+StockSharp é distribuído via NuGet. Abaixo está o catálogo completo de pacotes organizado por categoria.
+
+### Core
+
+| Pacote | Descrição |
+|---------|-------------|
+| [StockSharp.Messages](https://www.nuget.org/packages/StockSharp.Messages/) | Mensagens e contratos base. Fundação de toda a framework |
+| [StockSharp.BusinessEntities](https://www.nuget.org/packages/StockSharp.BusinessEntities/) | Entidades de negociação: Security, Order, Trade, Portfolio, etc. |
+| [StockSharp.Algo](https://www.nuget.org/packages/StockSharp.Algo/) | Núcleo de negociação algorítmica, Connector, subscrições, velas |
+| [StockSharp.Configuration](https://www.nuget.org/packages/StockSharp.Configuration/) | Gestão de configuração, definições de ligação |
+| [StockSharp.Localization](https://www.nuget.org/packages/StockSharp.Localization/) | Sistema de localização (inglês por predefinição) |
+
+### Estratégias e Indicadores
+
+| Pacote | Descrição |
+|---------|-------------|
+| [StockSharp.Algo.Strategies](https://www.nuget.org/packages/StockSharp.Algo.Strategies/) | Framework de estratégias - classe Strategy base, posições, PnL |
+| [StockSharp.Algo.Indicators](https://www.nuget.org/packages/StockSharp.Algo.Indicators/) | Mais de 100 indicadores técnicos (SMA, EMA, RSI, MACD, Bollinger, etc.) |
+
+### Testes
+
+| Pacote | Descrição |
+|---------|-------------|
+| [StockSharp.Algo.Testing](https://www.nuget.org/packages/StockSharp.Algo.Testing/) | Testes com dados históricos, emulação de negociação |
+
+### Armazenamento e Dados
+
+| Pacote | Descrição |
+|---------|-------------|
+| [StockSharp.Algo.Export](https://www.nuget.org/packages/StockSharp.Algo.Export/) | Exportação de dados de mercado (CSV, Excel, JSON, etc.) |
+| [StockSharp.Algo.Import](https://www.nuget.org/packages/StockSharp.Algo.Import/) | Importação de dados a partir de formatos externos |
+
+### Análise e Computação
+
+| Pacote | Descrição |
+|---------|-------------|
+| [StockSharp.Algo.Analytics](https://www.nuget.org/packages/StockSharp.Algo.Analytics/) | Interfaces de scripts analíticos |
+| [StockSharp.Algo.Compilation](https://www.nuget.org/packages/StockSharp.Algo.Compilation/) | Compilação de código em runtime |
+| [StockSharp.Algo.Gpu](https://www.nuget.org/packages/StockSharp.Algo.Gpu/) | Cálculos de indicadores acelerados por GPU (CUDA via ILGPU) |
+
+### Componentes GUI (Apenas Windows)
+
+| Pacote | Descrição |
+|---------|-------------|
+| [StockSharp.Xaml](https://www.nuget.org/packages/StockSharp.Xaml/) | Controlos WPF: tabelas de instrumentos, portefólios e ordens |
+| [StockSharp.Xaml.Charting](https://www.nuget.org/packages/StockSharp.Xaml.Charting/) | Gráficos de velas, indicadores, curvas de equity |
+| [StockSharp.Charting.Interfaces](https://www.nuget.org/packages/StockSharp.Charting.Interfaces/) | Interfaces de componentes de gráficos |
+| [StockSharp.Alerts.Interfaces](https://www.nuget.org/packages/StockSharp.Alerts.Interfaces/) | Interfaces do sistema de alertas |
+| [StockSharp.Diagram.Core](https://www.nuget.org/packages/StockSharp.Diagram.Core/) | Core do designer visual de estratégias |
+
+### Conectores (Bolsas e Brokers)
+
+Cada conector é um pacote NuGet separado. Principais conectores:
+
+| Pacote | Bolsa/Broker |
+|---------|----------------|
+| `StockSharp.Binance` | Binance |
+| `StockSharp.InteractiveBrokers` | Interactive Brokers |
+| `StockSharp.Fix` | Protocolo FIX (universal) |
+| `StockSharp.Connectors.Coinbase` | Coinbase |
+| `StockSharp.Connectors.BitStamp` | Bitstamp |
+| `StockSharp.Connectors.Bittrex` | Bittrex |
+
+> [!NOTE]
+> Para a lista completa de conectores, consulte a secção [Conectores](connectors.md). Alguns conectores só estão disponíveis através do [servidor NuGet privado](#private-nuget-server).
+
+### Localização
+
+O pacote base `StockSharp.Localization` inclui inglês. Idiomas adicionais são instalados como pacotes separados:
+
+| Pacote | Idioma |
+|---------|----------|
+| `StockSharp.Localization.ru` | Russo |
+| `StockSharp.Localization.zh` | Chinês |
+| `StockSharp.Localization.de` | Alemão |
+| `StockSharp.Localization.es` | Espanhol |
+| `StockSharp.Localization.ja` | Japonês |
+| `StockSharp.Localization.ko` | Coreano |
+| `StockSharp.Localization.All` | Todos os idiomas (meta-pacote) |
+
+Também disponíveis: `ar`, `bn`, `ca`, `cs`, `da`, `el`, `fa`, `fi`, `fr`, `he`, `hi`, `hu`, `it`, `jv`, `ms`, `my`, `nl`, `no`, `pa`, `pl`, `pt`, `ro`, `sk`, `sr`, `sv`, `ta`, `th`, `tl`, `tr`, `uk`, `uz`, `vi`.
+
+## Instalar Pacotes
+
+### Via CLI (Recomendado)
+
+```bash
+# Pacotes principais
+dotnet add package StockSharp.Algo
+dotnet add package StockSharp.Algo.Strategies
+
+# Conector (exemplo - Binance)
+dotnet add package StockSharp.Binance
+
+# Indicadores
+dotnet add package StockSharp.Algo.Indicators
+
+# Testes retrospectivos
+dotnet add package StockSharp.Algo.Testing
+
+# Localização (russo)
+dotnet add package StockSharp.Localization.ru
+```
+
+### Via Visual Studio
+
+1. Clique com o botão direito no projeto → **Gerir Pacotes NuGet...**
+2. Pesquise por `StockSharp`
+3. Selecione o pacote pretendido → **Instalar**
+
+Todas as dependências são instaladas automaticamente.
+
+### Via JetBrains Rider
+
+1. Clique com o botão direito no projeto → **Gerir Pacotes NuGet**
+2. Pesquise por `StockSharp`
+3. Selecione o pacote → **Instalar**
+
+### Via Consola do Gestor de Pacotes (Visual Studio)
+
+```powershell
+Install-Package StockSharp.Algo
+Install-Package StockSharp.Binance
+Install-Package StockSharp.Algo.Strategies
+```
+
+## Servidor NuGet Privado {#private-nuget-server}
+
+Alguns componentes (conectores cripto, etc.) só estão disponíveis através do servidor NuGet privado para utilizadores registados.
+
+### Método 1: Autenticação via Token no URL
+
+1. Registe-se no site da StockSharp.
+2. Copie o token da sua [conta pessoal](https://stocksharp.com/pt/profile/).
+3. Adicione a origem do pacote:
+
+**CLI:**
+
+```bash
+dotnet nuget add source "https://nuget.stocksharp.com/{SEU_TOKEN}/v3/index.json" --name StockSharpPrivate
+```
+
+**Visual Studio:** abra **Ferramentas → Opções → Gestor de Pacotes NuGet → Origens de Pacotes** e adicione uma nova origem com o URL `https://nuget.stocksharp.com/{SEU_TOKEN}/v3/index.json`.
+
+**Rider:** abra **Definições → Compilação, Execução, Implementação → NuGet → Origens** e adicione a origem.
+
+### Método 2: Autenticação via Nome de Utilizador e Palavra-passe
+
+1. Adicione uma origem de pacotes com o URL `https://nuget.stocksharp.com/x/v3/index.json`
+2. Ao tentar usar esta origem, aparecerá um pedido de login
+3. Introduza as credenciais da sua conta StockSharp (ou `x` como nome de utilizador e o seu token como palavra-passe)
+
+**CLI:**
+
+```bash
+dotnet nuget add source "https://nuget.stocksharp.com/x/v3/index.json" --name StockSharpPrivate --username SEU_LOGIN --password SUA_PALAVRA_PASSE --store-password-in-clear-text
+```
+
+> [!TIP]
+> Para reiniciar credenciais guardadas no Windows, abra **Painel de Controlo → Contas de Utilizador → Gestor de Credenciais** e elimine as entradas relacionadas com `nuget.stocksharp.com`.
+
+## Atualizar Pacotes
+
+### CLI
+
+```bash
+# Verificar atualizações disponíveis
+dotnet list package --outdated
+
+# Atualizar um pacote específico
+dotnet add package StockSharp.Algo
+```
+
+### Visual Studio
+
+1. **Gerir Pacotes NuGet...** → separador **Atualizações**
+2. Selecione pacotes → **Atualizar**
+
+### Rider
+
+1. **Gerir Pacotes NuGet** → separador **Atualizações**
+2. Selecione pacotes → **Atualizar**
+
+## Resolução de Problemas
+
+### Incompatibilidade de Versões
+
+Todos os pacotes StockSharp têm de ter a mesma versão. Se encontrar erros de tipo ou método, certifique-se de que todos os pacotes `StockSharp.*` estão atualizados para a mesma versão.
+
+### Pacote Não Encontrado no NuGet Público
+
+Alguns conectores só estão disponíveis através do [servidor privado](#private-nuget-server). Certifique-se de que a origem correta foi adicionada.
+
+### Problemas de GUI em Sistemas Não Windows
+
+Os componentes GUI (`StockSharp.Xaml`, `StockSharp.Xaml.Charting`) funcionam apenas no Windows. Em Linux/macOS, use aplicações de consola sem pacotes GUI.
+
+### Erros de Restauro de Pacotes
+
+```bash
+# Limpar a cache do NuGet
+dotnet nuget locals all --clear
+
+# Tentar restaurar novamente
+dotnet restore
+```
+
+## Estrutura do Ficheiro de Projeto (.csproj)
+
+### Mínimo (Bot de Negociação de Consola)
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StockSharp.Algo" Version="*" />
+    <PackageReference Include="StockSharp.Binance" Version="*" />
+  </ItemGroup>
+</Project>
+```
+
+### Alargado (Estratégia com Indicadores e Testes)
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Principal -->
+    <PackageReference Include="StockSharp.Algo" Version="*" />
+    <PackageReference Include="StockSharp.Configuration" Version="*" />
+
+    <!-- Estratégias e indicadores -->
+    <PackageReference Include="StockSharp.Algo.Strategies" Version="*" />
+    <PackageReference Include="StockSharp.Algo.Indicators" Version="*" />
+
+    <!-- Conector -->
+    <PackageReference Include="StockSharp.Binance" Version="*" />
+
+    <!-- Testes retrospectivos -->
+    <PackageReference Include="StockSharp.Algo.Testing" Version="*" />
+
+    <!-- Localização -->
+    <PackageReference Include="StockSharp.Localization.ru" Version="*" />
+  </ItemGroup>
+</Project>
+```
+
+### Aplicação WPF com Gráficos
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StockSharp.Algo" Version="*" />
+    <PackageReference Include="StockSharp.Algo.Strategies" Version="*" />
+    <PackageReference Include="StockSharp.Xaml.Charting" Version="*" />
+    <PackageReference Include="StockSharp.Binance" Version="*" />
+  </ItemGroup>
+</Project>
+```
+
+## Verificar a Instalação
+
+Crie uma aplicação mínima:
+
+```csharp
+using StockSharp.Algo;
+using StockSharp.BusinessEntities;
+
+Console.WriteLine("StockSharp configurado com sucesso!");
+
+var connector = new Connector();
+Console.WriteLine($"Conector criado: {connector}");
+```
+
+```bash
+dotnet run
+```
+
+## Exemplos
+
+Exemplos prontos de utilização do StockSharp estão disponíveis no [diretório de exemplos](https://github.com/stocksharp/stocksharp/tree/master/Samples) do repositório. Abrangem ligação a bolsas, subscrição de dados, construção de velas, indicadores, estratégias e testes.

@@ -1,0 +1,143 @@
+namespace StockSharp.BitGo;
+
+public partial class BitGoMessageAdapter
+{
+	private const string _defaultApiEndpoint = "https://app.bitgo.com/";
+	private const string _defaultSocketEndpoint =
+		"wss://app.bitgo.com/api/prime/trading/v1/ws";
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TokenKey,
+		Description = LocalizedStrings.TokenKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public SecureString Token { get; set; }
+
+	/// <summary>Go account identifier or exact account name.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AccountKey,
+		Description = LocalizedStrings.GoAccountIdOrExactNameOptionalWhenOnlyOneAccountIsAvailableDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 1)]
+	[BasicSetting]
+	public string Account { get; set; }
+
+	/// <summary>BitGo REST API or BitGo Express root.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.RestEndpointKey,
+		Description = LocalizedStrings.BitGoRestApiOrBitGoExpressRootDescKey,
+		GroupName = LocalizedStrings.AddressesKey,
+		Order = 2)]
+	[BasicSetting]
+	public string ApiEndpoint { get; set; } = _defaultApiEndpoint;
+
+	/// <summary>BitGo Prime WebSocket endpoint.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.WebSocketEndpointKey,
+		Description = LocalizedStrings.BitGoPrimeTradingWebSocketEndpointDescKey,
+		GroupName = LocalizedStrings.AddressesKey,
+		Order = 3)]
+	[BasicSetting]
+	public string SocketEndpoint { get; set; } = _defaultSocketEndpoint;
+
+	private TimeSpan _pollingInterval = TimeSpan.FromSeconds(10);
+
+	/// <summary>Private-state reconciliation interval.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IntervalKey,
+		Description = LocalizedStrings.IntervalKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 4)]
+	public TimeSpan PollingInterval
+	{
+		get => _pollingInterval;
+		set => _pollingInterval = value >= TimeSpan.FromSeconds(2) &&
+			value <= TimeSpan.FromMinutes(5)
+				? value
+				: throw new ArgumentOutOfRangeException(nameof(value), value,
+					"Polling interval must be between two seconds and five minutes.");
+	}
+
+	private int _historyLimit = 500;
+
+	/// <summary>Maximum orders and fills returned per subscription.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CountKey,
+		Description = LocalizedStrings.CountKey,
+		GroupName = LocalizedStrings.HistoryKey,
+		Order = 0)]
+	public int HistoryLimit
+	{
+		get => _historyLimit;
+		set => _historyLimit = value is >= 1 and <= 5000
+			? value
+			: throw new ArgumentOutOfRangeException(nameof(value), value,
+				"BitGo history limit must be between one and 5000.");
+	}
+
+	/// <summary>Include unsettled funds in the API's available balance.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IncludeUnsettledKey,
+		Description = LocalizedStrings.IncludeUnsettledFundsInTheApiAvailableBalanceCalculationDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 5)]
+	public bool IsIncludeUnsettledInAvailable { get; set; }
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+		storage
+			.Set(nameof(Token), Token)
+			.Set(nameof(Account), Account)
+			.Set(nameof(ApiEndpoint), ApiEndpoint)
+			.Set(nameof(SocketEndpoint), SocketEndpoint)
+			.Set(nameof(PollingInterval), PollingInterval)
+			.Set(nameof(HistoryLimit), HistoryLimit)
+			.Set(nameof(IsIncludeUnsettledInAvailable),
+				IsIncludeUnsettledInAvailable);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+		Token = storage.GetValue<SecureString>(nameof(Token));
+		Account = storage.GetValue<string>(nameof(Account));
+		ApiEndpoint = storage.GetValue(nameof(ApiEndpoint), ApiEndpoint);
+		SocketEndpoint = storage.GetValue(nameof(SocketEndpoint), SocketEndpoint);
+		PollingInterval = storage.GetValue(nameof(PollingInterval),
+			PollingInterval);
+		HistoryLimit = storage.GetValue(nameof(HistoryLimit), HistoryLimit);
+		IsIncludeUnsettledInAvailable = storage.GetValue(
+			nameof(IsIncludeUnsettledInAvailable),
+			IsIncludeUnsettledInAvailable);
+	}
+
+	/// <inheritdoc />
+	public override ValueTask<IMessageAdapter> CloneAsync(CancellationToken cancellationToken)
+		=> new(new BitGoMessageAdapter(TransactionIdGenerator)
+		{
+			Token = Token,
+			Account = Account,
+			ApiEndpoint = ApiEndpoint,
+			SocketEndpoint = SocketEndpoint,
+			PollingInterval = PollingInterval,
+			HistoryLimit = HistoryLimit,
+			IsIncludeUnsettledInAvailable =
+				IsIncludeUnsettledInAvailable,
+		});
+
+	/// <inheritdoc />
+	public override string ToString()
+		=> base.ToString() + (Account.IsEmpty() ? string.Empty : ": " + Account);
+}

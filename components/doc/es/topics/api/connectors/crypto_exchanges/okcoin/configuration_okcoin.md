@@ -1,0 +1,9 @@
+> [!CAUTION]
+> **Los servicios de negociación de OKCoin se desactivaron tras la transición de la plataforma a OKX. Este conector ya no funciona; la documentación se conserva únicamente como referencia.**
+
+# Configuración OKCoin
+
+Para trabajar con un conector, es necesario generar **clave (API Key)** y **secreto** en la cuenta personal de la bolsa y especificarlos en la configuración de conexión.
+
+> [!TIP]
+> Tenga en cuenta que **clave** y **secreto** no son **usuario** y **contraseña**. **clave** y **secreto** se generan por separado en su cuenta personal. Para trabajar con el conector no necesita **usuario** ni **contraseña**, y no debe especificarlos en ningún lugar.

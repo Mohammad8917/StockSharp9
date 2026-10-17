@@ -1,0 +1,387 @@
+namespace Ecng.Nuget;
+
+using System.Collections.Concurrent;
+
+using Ecng.Net;
+
+using Nito.AsyncEx;
+
+/// <summary>
+/// Nuget repository provider.
+/// </summary>
+public class NugetRepoProvider : CachingSourceProvider
+{
+	private class PrivatePackageSource : PackageSource
+	{
+		private static TaskCompletionSource<PrivatePackageSource> _tcs;
+		private static readonly Lock _tcsLock = new();
+
+		public static Task<PrivatePackageSource> GetInstance()
+			=> _tcs?.Task ?? throw new InvalidOperationException("Private package source is not initialized. Call GetAsync method first.");
+
+		private static async Task<PrivatePackageSource> GetImplAsync(string src, ILogReceiver logs, CancellationToken token)
+		{
+			var sourceRepository = Repository.Factory.GetCoreV3(src);
+			logs.AddInfoLog("trying to resolve nuget v3 service index at {0}", src);
+
+			try
+			{
+				await sourceRepository.GetResourceAsync<ServiceIndexResourceV3>(token).NoWait();
+				logs.AddInfoLog("nuget v3 success!");
+				return new PrivatePackageSource(src);
+			}
+			catch (Exception e)
+			{
+				logs.AddWarningLog("nuget v3 service index is not available: {0}", e);
+				throw new InvalidOperationException($"Failed to initialize private NuGet source at {src}. Check connection and credentials.", e);
+			}
+		}
+
+		public static async Task GetAsync(string privateUrl, ILogReceiver logs, CancellationToken token)
+		{
+			if (privateUrl.IsEmpty())
+				throw new ArgumentNullException(nameof(privateUrl));
+
+			var tcs = new TaskCompletionSource<PrivatePackageSource>();
+
+			using (_tcsLock.EnterScope())
+				_tcs ??= tcs;
+
+			if (tcs != _tcs)
+				await _tcs.Task.NoWait();
+			else
+			{
+				try
+				{
+					_tcs.SetResult(await GetImplAsync(privateUrl, logs, token).NoWait());
+				}
+				catch (Exception ex)
+				{
+					_tcs.SetException(ex);
+				}
+			}
+		}
+
+		private PrivatePackageSource(string addr) : base(addr, PrivateRepoKey) {}
+	}
+
+	private static readonly Lock _instanceGate = new();
+	// Single-flight singleton init: the gate is held only to publish the shared task, so the
+	// one-time InitBaseUrls HTTP call is never made while a lock is held.
+	private static Task<NugetRepoProvider> _instanceTask;
+	private static NugetRepoProvider _instance;
+
+	private const string _defaultPrivateUrl = "https://nuget.stocksharp.com/x/v3/index.json";
+
+	/// <summary>
+	/// Get instance.
+	/// </summary>
+	/// <param name="authToken">Auth token.</param>
+	/// <param name="packagesFolder"><see cref="Directory"/></param>
+	/// <param name="retryPolicy"><see cref="RetryPolicyInfo"/></param>
+	/// <param name="logs">Receiver for diagnostic messages emitted while resolving the private source. Required.</param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>Task.</returns>
+	public static Task<NugetRepoProvider> GetInstanceAsync(SecureString authToken, string packagesFolder, RetryPolicyInfo retryPolicy, ILogReceiver logs, CancellationToken token)
+		=> GetInstanceAsync(_defaultPrivateUrl, authToken, packagesFolder, retryPolicy, logs, token);
+
+	/// <summary>
+	/// Get instance.
+	/// </summary>
+	/// <param name="privateUrl">Private url.</param>
+	/// <param name="authToken">Auth token.</param>
+	/// <param name="packagesFolder"><see cref="Directory"/></param>
+	/// <param name="retryPolicy"><see cref="RetryPolicyInfo"/></param>
+	/// <param name="logs">Receiver for diagnostic messages emitted while resolving the private source. Required.</param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>Task.</returns>
+	public static async Task<NugetRepoProvider> GetInstanceAsync(string privateUrl, SecureString authToken, string packagesFolder, RetryPolicyInfo retryPolicy, ILogReceiver logs, CancellationToken token)
+	{
+		if (logs is null)
+			throw new ArgumentNullException(nameof(logs));
+
+		await PrivatePackageSource.GetAsync(privateUrl, logs, token).NoWait();
+
+		if (!packagesFolder.IsEmpty())
+			Directory.CreateDirectory(packagesFolder);
+
+		Task<NugetRepoProvider> task;
+
+		// Gate held only to publish the shared init task - never across the HTTP call below.
+		using (_instanceGate.EnterScope())
+			task = _instanceTask ??= CreateInstanceAsync(authToken, packagesFolder, retryPolicy);
+
+		return await task.WaitAsync(token).ConfigureAwait(false);
+	}
+
+	private static async Task<NugetRepoProvider> CreateInstanceAsync(SecureString authToken, string packagesFolder, RetryPolicyInfo retryPolicy)
+	{
+		NugetRepoProvider instance = null;
+
+		try
+		{
+			instance = new(authToken, await GetPackageSources(packagesFolder).NoWait(), retryPolicy);
+			await instance.InitBaseUrls(default).NoWait();
+			_instance = instance;
+			return instance;
+		}
+		catch
+		{
+			// The partially built instance is discarded on a failed init; dispose its HttpClients
+			// so a retry loop doesn't leak two of them per failed attempt.
+			instance?.DisposeHttp();
+
+			// Drop the faulted task so a later caller can retry instead of caching the failure.
+			using (_instanceGate.EnterScope())
+				_instanceTask = null;
+
+			throw;
+		}
+	}
+
+	private void DisposeHttp()
+	{
+		_publicHttp.Dispose();
+		_privateHttp?.Dispose();
+	}
+
+	/// <summary>
+	/// Get instance.
+	/// </summary>
+	/// <param name="authToken">Auth token.</param>
+	/// <param name="packagesFolder"><see cref="Directory"/></param>
+	/// <param name="retryPolicy"><see cref="RetryPolicyInfo"/></param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>Task.</returns>
+	[Obsolete("Use the overload that accepts an ILogReceiver and pass the logger explicitly.")]
+	public static Task<NugetRepoProvider> GetInstanceAsync(SecureString authToken, string packagesFolder, RetryPolicyInfo retryPolicy, CancellationToken token)
+		=> GetInstanceAsync(_defaultPrivateUrl, authToken, packagesFolder, retryPolicy, token);
+
+	/// <summary>
+	/// Get instance.
+	/// </summary>
+	/// <param name="privateUrl">Private url.</param>
+	/// <param name="authToken">Auth token.</param>
+	/// <param name="packagesFolder"><see cref="Directory"/></param>
+	/// <param name="retryPolicy"><see cref="RetryPolicyInfo"/></param>
+	/// <param name="token"><see cref="CancellationToken"/></param>
+	/// <returns>Task.</returns>
+	[Obsolete("Use the overload that accepts an ILogReceiver and pass the logger explicitly.")]
+	public static Task<NugetRepoProvider> GetInstanceAsync(string privateUrl, SecureString authToken, string packagesFolder, RetryPolicyInfo retryPolicy, CancellationToken token)
+		=> GetInstanceAsync(privateUrl, authToken, packagesFolder, retryPolicy,
+			LogManager.Instance?.Application ?? throw new InvalidOperationException("No ambient LogManager.Instance is available; use the GetInstanceAsync overload that accepts an ILogReceiver."),
+			token);
+
+	/// <summary>
+	/// Private nuget repository.
+	/// </summary>
+	public const string PrivateRepoKey = "stocksharp";
+	/// <summary>
+	/// nuget.org
+	/// </summary>
+	public const string NugetFeedRepoKey = "nugetorg";
+
+	private static readonly ISettings _settings = NullSettings.Instance;
+
+	/// <summary>
+	/// Settings.
+	/// </summary>
+	public ISettings Settings => ((PackageSourceProvider)PackageSourceProvider).Settings;
+
+	/// <summary>
+	/// <see cref="RetryPolicyInfo"/>
+	/// </summary>
+	public RetryPolicyInfo RetryPolicy { get; }
+
+	private readonly SourceRepository _privateRepo;
+	private readonly SourceRepository _nugetRepo;
+	private readonly FrameworkReducer _fwkReducer = new();
+	private readonly ConcurrentDictionary<PackageIdentity, (DateTime till, (PackageIdentity id, SourceRepository repo)[] deps)> _depsCache = [];
+	private readonly TimeSpan _cacheLen = TimeSpan.FromMinutes(10);
+	private readonly List<(SourceRepository repo, Uri baseUrl)> _repoUrls = [];
+
+	private readonly HttpClient _publicHttp = new();
+	private readonly HttpClient _privateHttp;
+
+	private NugetRepoProvider(SecureString authToken, IEnumerable<PackageSource> sources, RetryPolicyInfo retryPolicy)
+		: base(new PackageSourceProvider(_settings, sources))
+	{
+		var repos = GetRepositories().ToArray();
+
+		_privateRepo = repos.First(r => r.PackageSource.Name.EqualsIgnoreCase(PrivateRepoKey));
+		_nugetRepo = repos.First(r => r.PackageSource.Name.EqualsIgnoreCase(NugetFeedRepoKey));
+		RetryPolicy = retryPolicy ?? throw new ArgumentNullException(nameof(retryPolicy));
+
+		_privateHttp = NugetExtensions.CreatePrivateHttp(authToken.UnSecure());
+	}
+
+	private async Task InitBaseUrls(CancellationToken cancellationToken)
+	{
+		async Task initBaseUrl(SourceRepository repo)
+			=> _repoUrls.Add((repo, await repo.GetBaseUrl(cancellationToken).NoWait()));
+
+		await initBaseUrl(_nugetRepo).NoWait();
+		await initBaseUrl(_privateRepo).NoWait();
+	}
+
+	/// <summary>
+	/// Try to find version.
+	/// </summary>
+	/// <param name="packageId">The package id.</param>
+	/// <param name="versionRange">The version range.</param>
+	/// <param name="cache"><see cref="SourceCacheContext"/></param>
+	/// <param name="logger"><see cref="ILogger"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Found version, repository and base url.</returns>
+	public async Task<(NuGetVersion version, SourceRepository repo, Uri baseUrl)> TryFindVersion(string packageId, VersionRange versionRange, SourceCacheContext cache, ILogger logger, CancellationToken cancellationToken)
+	{
+        if (packageId.IsEmpty())
+			throw new ArgumentNullException(nameof(packageId));
+
+		foreach (var (repo, baseUrl) in _repoUrls)
+		{
+			var resource = await repo.GetResourceAsync<FindPackageByIdResource>(cancellationToken).NoWait();
+
+			var versions = await RetryPolicy.TryRepeat(t =>
+				resource.GetAllVersionsAsync(
+					packageId,
+					cache,
+					logger,
+					t),
+				RetryPolicy.ReadMaxCount, cancellationToken).NoWait();
+
+			var foundVer = versionRange.FindBestMatch(versions);
+
+			if (foundVer is null)
+				continue;
+
+			return (foundVer, repo, baseUrl);
+		}
+
+		throw new InvalidOperationException($"Package {packageId} for version range {versionRange} not found.");
+	}
+
+	/// <summary>
+	/// Get dependencies.
+	/// </summary>
+	/// <param name="identities">The package identities.</param>
+	/// <param name="framework">The framework.</param>
+	/// <param name="localFiles">The local files.</param>
+	/// <param name="cache"><see cref="SourceCacheContext"/></param>
+	/// <param name="logger"><see cref="ILogger"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Dependencies.</returns>
+	public async Task<IDictionary<PackageIdentity, IEnumerable<(PackageIdentity identity, SourceRepository repo)>>> GetDependenciesAsync(IEnumerable<PackageIdentity> identities, NuGetFramework framework, IDictionary<string, NuGetVersion> localFiles, SourceCacheContext cache, ILogger logger, CancellationToken cancellationToken)
+	{
+		if (identities is null)			throw new ArgumentNullException(nameof(identities));
+		if (framework is null)			throw new ArgumentNullException(nameof(framework));
+		if (localFiles is null)			throw new ArgumentNullException(nameof(localFiles));
+
+		var fwkComparer = NuGetFrameworkFullComparer.Instance;
+
+		var processedPackageIds = new Dictionary<string, NuGetVersion>(StringComparer.InvariantCultureIgnoreCase);
+		var cycledIds = new HashSet<PackageIdentity>();
+
+		async Task<IEnumerable<(PackageIdentity identity, SourceRepository repo)>> get(string packageId, VersionRange versionRange)
+		{
+			if (localFiles.TryGetValue(packageId, out var localVersion))
+			{
+				if (localVersion is null || versionRange.FindBestMatch([localVersion]) == localVersion)
+					return [];
+			}
+
+			var (foundVersion, repo, baseUrl) = await TryFindVersion(packageId, versionRange, cache, logger, cancellationToken).NoWait();
+
+			if (processedPackageIds.TryGetValue(packageId, out var existVer))
+			{
+				if (existVer >= foundVersion)
+					return [];
+			}
+
+			processedPackageIds[packageId] = foundVersion;
+
+			var foundId = new PackageIdentity(packageId, foundVersion);
+
+			if (_depsCache.TryGetValue(foundId, out var depsCache))
+			{
+				if (depsCache.till > DateTime.UtcNow)
+					return depsCache.deps;
+
+				_depsCache.TryRemove(foundId, out _);
+			}
+
+			if (!cycledIds.Add(foundId))
+			{
+				logger.LogError($"Cycled {foundId} dependency.");
+				return [];
+			}
+
+			var http = repo == _privateRepo ? _privateHttp : _publicHttp;
+			using var nuspec = await RetryPolicy.TryRepeat(t => http.GetNuspecAsync(baseUrl, packageId, foundVersion, t), RetryPolicy.ReadMaxCount, cancellationToken).NoWait();
+			var reader = new NuspecReader(nuspec);
+			var groups = reader.GetDependencyGroups().ToDictionary(g => g.TargetFramework);
+
+			var dependencies = new List<(PackageIdentity identity, SourceRepository repo)>
+			{
+				(foundId, repo)
+			};
+
+			if (groups.Count > 0)
+			{
+				var frameworks = new HashSet<NuGetFramework>(fwkComparer);
+				frameworks.UnionWith(groups.Keys);
+
+				var compatibleFwk = _fwkReducer.GetNearest(framework, frameworks);
+				//?? throw new InvalidOperationException($"Package {packageId} no compatible dependencies for framework {framework}.");
+
+				if (compatibleFwk is not null)
+				{
+					var group = groups[compatibleFwk];
+
+					foreach (var dep in group.Packages)
+						dependencies.AddRange(await get(dep.Id, dep.VersionRange).NoWait());
+				}
+			}
+
+			var arr = dependencies.OrderBy(d => d.identity.Id, StringComparer.InvariantCultureIgnoreCase).ToArray();
+
+			_depsCache[foundId] = (DateTime.UtcNow + _cacheLen, arr);
+
+			return arr;
+		}
+
+		var retVal = new Dictionary<PackageIdentity, IEnumerable<(PackageIdentity identity, SourceRepository repo)>>();
+
+		foreach (var identity in identities)
+			retVal.Add(identity, await get(identity.Id, new(identity.Version)).NoWait());
+
+		var allDependencies = retVal.Values
+			.SelectMany(x => x)
+			.GroupBy(x => x.identity.Id, StringComparer.InvariantCultureIgnoreCase)
+			.ToDictionary(
+				g => g.Key,
+				g => g.OrderByDescending(x => x.identity.Version).First(),
+				StringComparer.InvariantCultureIgnoreCase
+			);
+
+		return retVal.ToDictionary(
+			kvp => kvp.Key,
+			kvp => kvp.Value
+				.Select(dep => allDependencies[dep.identity.Id])
+				.Distinct()
+		);
+	}
+
+	private static async Task<IEnumerable<PackageSource>> GetPackageSources(string packagesFolder)
+	{
+		var sources = new List<PackageSource>();
+
+		if (!packagesFolder.IsEmpty())
+			sources.Add(new FeedTypePackageSource(packagesFolder, FeedType.FileSystemV2));
+
+		sources.Add(new PackageSource(NuGetConstants.V3FeedUrl, NugetFeedRepoKey));
+		sources.Add(await PrivatePackageSource.GetInstance().NoWait());
+
+		return sources;
+	}
+}

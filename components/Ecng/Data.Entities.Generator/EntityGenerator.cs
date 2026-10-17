@@ -1,0 +1,1554 @@
+namespace Ecng.Data;
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text;
+
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
+[Generator]
+public class EntityGenerator : IIncrementalGenerator
+{
+	private static readonly DiagnosticDescriptor _failureDescriptor = new(
+		id: "ECNGGEN001",
+		title: "Entity generator failed",
+		messageFormat: "Ecng entity generator threw an exception while generating sources: {0}",
+		category: "Ecng.Data.Entities.Generator",
+		defaultSeverity: DiagnosticSeverity.Error,
+		isEnabledByDefault: true);
+
+	void IIncrementalGenerator.Initialize(IncrementalGeneratorInitializationContext context)
+	{
+		context.RegisterSourceOutput(context.CompilationProvider, (spc, compilation) =>
+		{
+			try
+			{
+				RunGeneration(spc, compilation);
+			}
+			catch (Exception ex)
+			{
+				// Without this report a generator exception is swallowed by
+				// Roslyn — the build looks "succeeded" but no source is
+				// produced and the user has no idea why.
+				spc.ReportDiagnostic(Diagnostic.Create(_failureDescriptor, Location.None, ex.ToString()));
+			}
+		});
+	}
+
+	private static void RunGeneration(SourceProductionContext spc, Compilation compilation)
+	{
+		var globalNs = compilation.SourceModule.ContainingAssembly.GlobalNamespace;
+
+		var allPartialClasses = GetAllTypes(globalNs)
+			.Where(m => m.TypeKind == TypeKind.Class && !m.IsStatic)
+			.Where(m => m.DeclaringSyntaxReferences.Any(r =>
+				r.GetSyntax() is ClassDeclarationSyntax cls
+				&& cls.Modifiers.Any(mod => mod.Text == "partial")))
+			.ToArray();
+
+		var entityTypes = allPartialClasses.Where(m => HasIdentityInHierarchy(m)).ToArray();
+		var joinTypes = allPartialClasses.Where(m => !HasIdentityInHierarchy(m) && IsJoinEntity(m)).ToArray();
+
+		// Group by namespace for SchemaInitializer
+		var byNamespace = new Dictionary<string, List<string>>();
+
+		foreach (var entityType in entityTypes)
+		{
+			GenerateEntity(spc, entityType);
+
+			if (!entityType.IsAbstract)
+			{
+				var ns = entityType.ContainingNamespace.ToDisplayString();
+				if (!byNamespace.TryGetValue(ns, out var list))
+					byNamespace[ns] = list = new List<string>();
+				list.Add(entityType.Name);
+			}
+		}
+
+		foreach (var joinType in joinTypes)
+			GenerateJoinEntity(spc, joinType);
+
+		foreach (var kvp in byNamespace)
+			EmitSchemaInitializer(spc, kvp.Key, kvp.Value);
+	}
+
+	#region Type discovery
+
+	private static IEnumerable<INamedTypeSymbol> GetAllTypes(INamespaceSymbol ns)
+	{
+		foreach (var type in ns.GetTypeMembers())
+			yield return type;
+
+		foreach (var child in ns.GetNamespaceMembers())
+			foreach (var type in GetAllTypes(child))
+				yield return type;
+	}
+
+	private static bool HasIdentityInHierarchy(INamedTypeSymbol type)
+	{
+		var current = type;
+		while (current is not null)
+		{
+			if (HasIdentityMember(current))
+				return true;
+			current = current.BaseType;
+		}
+		return false;
+	}
+
+	private static bool HasIdentityMember(INamedTypeSymbol type)
+	{
+		return type.GetMembers().OfType<IPropertySymbol>()
+			.Any(p => HasAttribute(p, "IdentityAttribute") || p.Name == "Id");
+	}
+
+	/// <summary>
+	/// Returns true if the type implements IDbPersistable (directly or via base)
+	/// and has serializable properties but no Identity — i.e. a join/link entity.
+	/// </summary>
+	private static bool IsJoinEntity(INamedTypeSymbol type)
+	{
+		if (type.IsAbstract)
+			return false;
+
+		if (!ImplementsIDbPersistable(type))
+			return false;
+
+		var props = GetOwnProperties(type).ToArray();
+		return props.Length > 0;
+	}
+
+	private static bool ImplementsIDbPersistable(INamedTypeSymbol type)
+	{
+		return type.AllInterfaces.Any(i => i.Name == "IDbPersistable");
+	}
+
+	/// <summary>
+	/// Generates Save/Load for join entities (no Identity, no Schema registration).
+	/// </summary>
+	private static void GenerateJoinEntity(SourceProductionContext spc, INamedTypeSymbol entityType)
+	{
+		var entityName = entityType.Name;
+		var entityNs = entityType.ContainingNamespace.ToDisplayString();
+		var ownProps = GetOwnProperties(entityType).ToArray();
+
+		if (ownProps.Length == 0 || !CanHandleAllProps(ownProps))
+			return;
+
+		var sbSave = BuildSave(ownProps);
+		var sbLoad = BuildLoad(ownProps, []);
+
+		EmitSource(spc, entityNs, entityName, sbSave, sbLoad, null, null);
+	}
+
+	/// <summary>
+	/// Finds the class in the hierarchy that declares a member with [Identity].
+	/// </summary>
+	private static INamedTypeSymbol FindIdentityDeclaringType(INamedTypeSymbol type)
+	{
+		var current = type;
+		while (current is not null)
+		{
+			if (HasIdentityMember(current))
+				return current;
+			current = current.BaseType;
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Finds the actual identity property (by [Identity] attribute or name "Id").
+	/// </summary>
+	private static IPropertySymbol FindIdentityProperty(INamedTypeSymbol type)
+	{
+		var current = type;
+		while (current is not null)
+		{
+			foreach (var prop in current.GetMembers().OfType<IPropertySymbol>())
+			{
+				if (HasAttribute(prop, "IdentityAttribute") || prop.Name == "Id")
+					return prop;
+			}
+			current = current.BaseType;
+		}
+		return null;
+	}
+
+	#endregion
+
+	private static void GenerateEntity(SourceProductionContext spc, INamedTypeSymbol entityType)
+	{
+		var entityName = entityType.Name;
+		var entityNs = entityType.ContainingNamespace.ToDisplayString();
+		var ownProps = GetOwnProperties(entityType).ToArray();
+		var ownRelationManyProps = GetOwnRelationManyProperties(entityType).ToArray();
+		var isAbstract = entityType.IsAbstract;
+
+		if (isAbstract)
+		{
+			// Abstract base: generate Save/Load only (own properties), no Schema
+			if (ownProps.Length == 0 && ownRelationManyProps.Length == 0)
+				return;
+			if (ownProps.Length > 0 && !CanHandleAllProps(ownProps))
+				return;
+
+			var sbSave = ownProps.Length > 0 ? BuildSave(ownProps) : null;
+			var sbLoad = (ownProps.Length > 0 || ownRelationManyProps.Length > 0)
+				? BuildLoad(ownProps, ownRelationManyProps) : null;
+			var sbInitLists = ownRelationManyProps.Length > 0 ? BuildInitLists(ownRelationManyProps) : null;
+
+			EmitSource(spc, entityNs, entityName, sbSave, sbLoad, sbInitLists, null);
+		}
+		else
+		{
+			// Concrete class: Save/Load for own props + Schema for ALL hierarchy props
+			var allProps = GetAllHierarchyProperties(entityType).ToArray();
+
+			if (ownProps.Length == 0 && allProps.Length == 0 && ownRelationManyProps.Length == 0)
+				return;
+
+			// Skip entirely if any property in the hierarchy can't be handled
+			if (!CanHandleAllProps(allProps))
+				return;
+
+			var sbSave = ownProps.Length > 0 ? BuildSave(ownProps) : null;
+			var sbLoad = (ownProps.Length > 0 || ownRelationManyProps.Length > 0)
+				? BuildLoad(ownProps, ownRelationManyProps) : null;
+			var sbInitLists = ownRelationManyProps.Length > 0 ? BuildInitLists(ownRelationManyProps) : null;
+			var sbMeta = BuildMeta(entityType, entityName, allProps);
+
+			EmitSource(spc, entityNs, entityName, sbSave, sbLoad, sbInitLists, sbMeta);
+		}
+	}
+
+	#region BuildSave
+
+	private static StringBuilder BuildSave(IPropertySymbol[] props)
+	{
+		var sb = new StringBuilder();
+		sb.AppendLine($"\tpublic override void Save(SettingsStorage storage)");
+		sb.AppendLine("\t{");
+		sb.AppendLine("\t\tbase.Save(storage);");
+		sb.AppendLine();
+		sb.AppendLine("\t\tstorage");
+
+		foreach (var prop in props)
+			EmitSaveProperty(sb, prop);
+
+		sb.AppendLine("\t\t;");
+		sb.AppendLine("\t}");
+		return sb;
+	}
+
+	private static void EmitSaveProperty(StringBuilder sb, IPropertySymbol prop)
+	{
+		if (IsRelationSingle(prop))
+		{
+			sb.AppendLine($"\t\t\t.SetFk(nameof({prop.Name}), {prop.Name}?.Id)");
+		}
+		else if (prop.Type.TypeKind == TypeKind.Enum)
+		{
+			sb.AppendLine($"\t\t\t.Set(nameof({prop.Name}), ({GetEnumUnderlyingType(prop.Type)}){prop.Name})");
+		}
+		else if (GetMappedDbType(prop.Type) is { } mappedSaveType)
+		{
+			var q = IsNullableType(prop.Type) ? "?" : "";
+			sb.AppendLine($"\t\t\t.Set(nameof({prop.Name}), {prop.Name}{q}.To<{mappedSaveType}>())");
+		}
+		else if (IsInnerSchema(prop))
+		{
+			EmitSaveInnerSchema(sb, prop);
+		}
+		else
+		{
+			sb.AppendLine($"\t\t\t.Set(nameof({prop.Name}), {prop.Name})");
+		}
+	}
+
+	private static void EmitSaveInnerSchema(StringBuilder sb, IPropertySymbol prop)
+	{
+		var innerType = UnwrapNullable(prop.Type);
+		var innerProps = GetInnerTypeProperties(innerType);
+		var nameOverrides = GetNameOverrides(prop);
+
+		EmitSaveInnerSchemaRecursive(sb, innerProps, prop.Name, prop.Name, nameOverrides);
+	}
+
+	private static void EmitSaveInnerSchemaRecursive(StringBuilder sb, IPropertySymbol[] innerProps, string accessPath, string colPrefix, Dictionary<string, string> nameOverrides)
+	{
+		foreach (var inner in innerProps)
+		{
+			var colName = GetColumnName(colPrefix, inner.Name, nameOverrides);
+
+			if (IsRelationSingle(inner))
+			{
+				sb.AppendLine($"\t\t\t.SetFk(\"{colName}\", {accessPath}?.{inner.Name}?.Id)");
+			}
+			else if (inner.Type.TypeKind == TypeKind.Enum)
+			{
+				var underlying = GetEnumUnderlyingType(inner.Type);
+				sb.AppendLine($"\t\t\t.Set(\"{colName}\", ({underlying}?)({accessPath}?.{inner.Name}))");
+			}
+			else if (GetMappedDbType(inner.Type) is { } mappedInnerSaveType)
+			{
+				sb.AppendLine($"\t\t\t.Set(\"{colName}\", {accessPath}?.{inner.Name}?.To<{mappedInnerSaveType}>())");
+			}
+			else if (IsInnerSchemaProperty(inner))
+			{
+				var nestedProps = GetInnerTypeProperties(UnwrapNullable(inner.Type));
+				var nestedOverrides = GetNameOverrides(inner);
+				EmitSaveInnerSchemaRecursive(sb, nestedProps, $"{accessPath}?.{inner.Name}", colName, nestedOverrides);
+			}
+			else
+			{
+				sb.AppendLine($"\t\t\t.Set(\"{colName}\", {accessPath}?.{inner.Name})");
+			}
+		}
+	}
+
+	private static bool IsInnerSchemaProperty(IPropertySymbol prop)
+	{
+		if (IsRelationSingle(prop) || IsRelationMany(prop))
+			return false;
+		if (GetMappedDbType(prop.Type) is not null)
+			return false;
+
+		var t = UnwrapNullable(prop.Type);
+		if (t is IArrayTypeSymbol) return false;
+		if (t.TypeKind == TypeKind.Enum) return false;
+		if (t.SpecialType != SpecialType.None) return false;
+
+		var fullName = FullType(t);
+		if (fullName is "global::System.DateTime" or "global::System.DateTimeOffset"
+			or "global::System.TimeSpan" or "global::System.Guid"
+			or "global::System.DateOnly" or "global::System.TimeOnly")
+			return false;
+
+		return CanFlattenInnerType(t);
+	}
+
+	#endregion
+
+	#region BuildLoad
+
+	private static StringBuilder BuildLoad(IPropertySymbol[] props, IPropertySymbol[] relationManyProps)
+	{
+		var sb = new StringBuilder();
+		sb.AppendLine($"\tpublic override async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken ct)");
+		sb.AppendLine("\t{");
+		sb.AppendLine("\t\tawait base.LoadAsync(storage, db, ct);");
+		sb.AppendLine();
+
+		foreach (var prop in props)
+			EmitLoadProperty(sb, prop);
+
+		if (relationManyProps.Length > 0)
+			sb.AppendLine("\t\tInitLists(db);");
+
+		sb.AppendLine("\t}");
+		return sb;
+	}
+
+	private static StringBuilder BuildInitLists(IPropertySymbol[] relationManyProps)
+	{
+		var sb = new StringBuilder();
+		sb.AppendLine("\tpublic override void InitLists(IStorage db)");
+		sb.AppendLine("\t{");
+		sb.AppendLine("\t\tbase.InitLists(db);");
+		sb.AppendLine();
+
+		foreach (var prop in relationManyProps)
+			EmitLoadRelationMany(sb, prop);
+
+		sb.AppendLine("\t}");
+		return sb;
+	}
+
+	private static void EmitLoadProperty(StringBuilder sb, IPropertySymbol prop)
+	{
+		if (IsRelationSingle(prop))
+		{
+			var idType = GetRelationIdentityType(prop);
+			if (idType == "long")
+				sb.AppendLine($"\t\t{prop.Name} = await storage.LoadFkAsync<{FullType(prop.Type)}>(nameof({prop.Name}), db, ct);");
+			else
+				sb.AppendLine($"\t\t{prop.Name} = await storage.LoadFkAsync<{idType}, {FullType(prop.Type)}>(nameof({prop.Name}), db, ct);");
+		}
+		else if (GetMappedDbType(prop.Type) is { } mappedLoadType)
+		{
+			var originalType = FullType(UnwrapNullable(prop.Type));
+			if (IsNullableType(prop.Type))
+				sb.AppendLine($"\t\t{prop.Name} = storage.GetValue<{mappedLoadType}>(nameof({prop.Name}))?.To<{originalType}>();");
+			else
+				sb.AppendLine($"\t\t{prop.Name} = storage.GetValue<{mappedLoadType}>(nameof({prop.Name})).To<{originalType}>();");
+		}
+		else if (IsInnerSchema(prop))
+		{
+			EmitLoadInnerSchema(sb, prop);
+		}
+		else
+		{
+			sb.AppendLine($"\t\t{prop.Name} = storage.GetValue<{FullType(prop.Type)}>(nameof({prop.Name}));");
+		}
+	}
+
+	private static void EmitLoadInnerSchema(StringBuilder sb, IPropertySymbol prop)
+	{
+		var innerType = UnwrapNullable(prop.Type);
+		var innerProps = GetInnerTypeProperties(innerType);
+		var nameOverrides = GetNameOverrides(prop);
+		var typeName = FullType(innerType);
+
+		if (IsInnerSchemaNullable(prop))
+		{
+			sb.AppendLine($"\t\tif ({BuildInnerColumnsNullCondition(innerProps, prop.Name, nameOverrides)})");
+			sb.AppendLine("\t\t{");
+			sb.AppendLine($"\t\t\t{prop.Name} = null;");
+			sb.AppendLine("\t\t}");
+			sb.AppendLine("\t\telse");
+			sb.AppendLine("\t\t{");
+
+			if (HasRelationSingleDeep(innerProps))
+			{
+				var local = "__" + prop.Name;
+				sb.AppendLine($"\t\t\tvar {local} = new {typeName}");
+				sb.AppendLine("\t\t\t{");
+				EmitInnerInitWithoutRelationSingle(sb, innerProps, prop.Name, nameOverrides, "\t\t\t\t");
+				sb.AppendLine("\t\t\t};");
+				EmitInnerRelationSinglePostInit(sb, innerProps, prop.Name, nameOverrides, local, "\t\t\t");
+				sb.AppendLine($"\t\t\t{prop.Name} = {local};");
+			}
+			else
+			{
+				sb.AppendLine($"\t\t\t{prop.Name} = new {typeName}");
+				sb.AppendLine("\t\t\t{");
+				EmitLoadInnerSchemaRecursive(sb, innerProps, prop.Name, nameOverrides, "\t\t\t\t");
+				sb.AppendLine("\t\t\t};");
+			}
+
+			sb.AppendLine("\t\t}");
+			return;
+		}
+
+		// If the inner schema (or anything nested under it) carries a
+		// [RelationSingle] property, the loader needs to await on the FK
+		// fetch — and `await` is not legal inside an object initializer.
+		// Switch to a post-init pattern: build the inner object via an
+		// initializer for sync-only properties, then assign each FK
+		// through `localVar.path.X = await storage.LoadFkAsync(...)`.
+		if (HasRelationSingleDeep(innerProps))
+		{
+			var local = "__" + prop.Name;
+			sb.AppendLine($"\t\tvar {local} = new {typeName}");
+			sb.AppendLine("\t\t{");
+			EmitInnerInitWithoutRelationSingle(sb, innerProps, prop.Name, nameOverrides, "\t\t\t");
+			sb.AppendLine("\t\t};");
+			EmitInnerRelationSinglePostInit(sb, innerProps, prop.Name, nameOverrides, local, "\t\t");
+			sb.AppendLine($"\t\t{prop.Name} = {local};");
+			return;
+		}
+
+		sb.AppendLine($"\t\t{prop.Name} = new {typeName}");
+		sb.AppendLine("\t\t{");
+
+		EmitLoadInnerSchemaRecursive(sb, innerProps, prop.Name, nameOverrides, "\t\t\t");
+
+		sb.AppendLine("\t\t};");
+	}
+
+	private static bool HasRelationSingleDeep(IPropertySymbol[] innerProps)
+	{
+		foreach (var p in innerProps)
+		{
+			if (IsRelationSingle(p))
+				return true;
+			if (IsInnerSchemaProperty(p))
+			{
+				var nested = UnwrapNullable(p.Type);
+				if (HasRelationSingleDeep(GetInnerTypeProperties(nested)))
+					return true;
+			}
+		}
+		return false;
+	}
+
+	// Object-initializer body that intentionally skips [RelationSingle] members —
+	// they are filled in afterwards via EmitInnerRelationSinglePostInit.
+	private static bool IsInnerSchemaNullable(IPropertySymbol prop)
+	{
+		var (colNullable, _, _, _) = GetColumnAttribute(prop);
+		return colNullable ?? InferIsNullable(prop);
+	}
+
+	private static string BuildInnerColumnsNullCondition(IPropertySymbol[] innerProps, string colPrefix, Dictionary<string, string> nameOverrides)
+	{
+		var columns = new List<string>();
+		CollectInnerColumnNames(innerProps, colPrefix, nameOverrides, columns);
+
+		return columns.Count == 0
+			? "true"
+			: string.Join(" && ", columns.Select(c => $"storage.GetValue<object>(\"{c}\") is null"));
+	}
+
+	private static void CollectInnerColumnNames(IPropertySymbol[] innerProps, string colPrefix, Dictionary<string, string> nameOverrides, List<string> columns)
+	{
+		foreach (var inner in innerProps)
+		{
+			var colName = GetColumnName(colPrefix, inner.Name, nameOverrides);
+
+			if (IsInnerSchemaProperty(inner))
+			{
+				CollectInnerColumnNames(GetInnerTypeProperties(UnwrapNullable(inner.Type)), colName, GetNameOverrides(inner), columns);
+				continue;
+			}
+
+			columns.Add(colName);
+		}
+	}
+
+	private static void EmitInnerInitWithoutRelationSingle(StringBuilder sb, IPropertySymbol[] innerProps, string colPrefix, Dictionary<string, string> nameOverrides, string indent)
+	{
+		foreach (var inner in innerProps)
+		{
+			if (IsRelationSingle(inner))
+				continue;
+
+			var colName = GetColumnName(colPrefix, inner.Name, nameOverrides);
+
+			if (inner.Type.TypeKind == TypeKind.Enum)
+			{
+				sb.AppendLine($"{indent}{inner.Name} = ({FullType(inner.Type)})storage.GetValue<{GetEnumUnderlyingType(inner.Type)}>(\"{colName}\"),");
+			}
+			else if (GetMappedDbType(inner.Type) is { } mappedInnerLoadType)
+			{
+				var originalType = FullType(UnwrapNullable(inner.Type));
+				if (IsNullableType(inner.Type))
+					sb.AppendLine($"{indent}{inner.Name} = storage.GetValue<{mappedInnerLoadType}>(\"{colName}\")?.To<{originalType}>(),");
+				else
+					sb.AppendLine($"{indent}{inner.Name} = storage.GetValue<{mappedInnerLoadType}>(\"{colName}\").To<{originalType}>(),");
+			}
+			else if (IsInnerSchemaProperty(inner))
+			{
+				var nestedType = UnwrapNullable(inner.Type);
+				var nestedProps = GetInnerTypeProperties(nestedType);
+				var nestedOverrides = GetNameOverrides(inner);
+				var nestedTypeName = FullType(nestedType);
+
+				sb.AppendLine($"{indent}{inner.Name} = new {nestedTypeName}");
+				sb.AppendLine($"{indent}{{");
+				EmitInnerInitWithoutRelationSingle(sb, nestedProps, colName, nestedOverrides, indent + "\t");
+				sb.AppendLine($"{indent}}},");
+			}
+			else
+			{
+				sb.AppendLine($"{indent}{inner.Name} = storage.GetValue<{FullType(inner.Type)}>(\"{colName}\"),");
+			}
+		}
+	}
+
+	// Statement-level FK loads for every [RelationSingle] member, qualified
+	// by the dotted access path from the local variable down to the member.
+	private static void EmitInnerRelationSinglePostInit(StringBuilder sb, IPropertySymbol[] innerProps, string colPrefix, Dictionary<string, string> nameOverrides, string accessPath, string indent)
+	{
+		foreach (var inner in innerProps)
+		{
+			var colName = GetColumnName(colPrefix, inner.Name, nameOverrides);
+
+			if (IsRelationSingle(inner))
+			{
+				var innerIdType = GetRelationIdentityType(inner);
+				if (innerIdType == "long")
+					sb.AppendLine($"{indent}{accessPath}.{inner.Name} = await storage.LoadFkAsync<{FullType(inner.Type)}>(\"{colName}\", db, ct);");
+				else
+					sb.AppendLine($"{indent}{accessPath}.{inner.Name} = await storage.LoadFkAsync<{innerIdType}, {FullType(inner.Type)}>(\"{colName}\", db, ct);");
+			}
+			else if (IsInnerSchemaProperty(inner))
+			{
+				var nestedType = UnwrapNullable(inner.Type);
+				EmitInnerRelationSinglePostInit(sb, GetInnerTypeProperties(nestedType), colName, GetNameOverrides(inner), accessPath + "." + inner.Name, indent);
+			}
+		}
+	}
+
+	private static void EmitLoadInnerSchemaRecursive(StringBuilder sb, IPropertySymbol[] innerProps, string colPrefix, Dictionary<string, string> nameOverrides, string indent)
+	{
+		foreach (var inner in innerProps)
+		{
+			var colName = GetColumnName(colPrefix, inner.Name, nameOverrides);
+
+			if (IsRelationSingle(inner))
+			{
+				var innerIdType = GetRelationIdentityType(inner);
+				if (innerIdType == "long")
+					sb.AppendLine($"{indent}{inner.Name} = await storage.LoadFkAsync<{FullType(inner.Type)}>(\"{colName}\", db, ct),");
+				else
+					sb.AppendLine($"{indent}{inner.Name} = await storage.LoadFkAsync<{innerIdType}, {FullType(inner.Type)}>(\"{colName}\", db, ct),");
+			}
+			else if (inner.Type.TypeKind == TypeKind.Enum)
+			{
+				sb.AppendLine($"{indent}{inner.Name} = ({FullType(inner.Type)})storage.GetValue<{GetEnumUnderlyingType(inner.Type)}>(\"{colName}\"),");
+			}
+			else if (GetMappedDbType(inner.Type) is { } mappedInnerLoadType)
+			{
+				var originalType = FullType(UnwrapNullable(inner.Type));
+				if (IsNullableType(inner.Type))
+					sb.AppendLine($"{indent}{inner.Name} = storage.GetValue<{mappedInnerLoadType}>(\"{colName}\")?.To<{originalType}>(),");
+				else
+					sb.AppendLine($"{indent}{inner.Name} = storage.GetValue<{mappedInnerLoadType}>(\"{colName}\").To<{originalType}>(),");
+			}
+			else if (IsInnerSchemaProperty(inner))
+			{
+				var nestedType = UnwrapNullable(inner.Type);
+				var nestedProps = GetInnerTypeProperties(nestedType);
+				var nestedOverrides = GetNameOverrides(inner);
+				var nestedTypeName = FullType(nestedType);
+
+				sb.AppendLine($"{indent}{inner.Name} = new {nestedTypeName}");
+				sb.AppendLine($"{indent}{{");
+				EmitLoadInnerSchemaRecursive(sb, nestedProps, colName, nestedOverrides, indent + "\t");
+				sb.AppendLine($"{indent}}},");
+			}
+			else
+			{
+				sb.AppendLine($"{indent}{inner.Name} = storage.GetValue<{FullType(inner.Type)}>(\"{colName}\"),");
+			}
+		}
+	}
+
+	private static void EmitLoadRelationMany(StringBuilder sb, IPropertySymbol prop)
+	{
+		var attr = prop.GetAttributes().First(a => a.AttributeClass?.Name == "RelationManyAttribute");
+
+		// Get ListType from constructor argument
+		var listType = attr.ConstructorArguments.Length > 0 ? attr.ConstructorArguments[0].Value as INamedTypeSymbol : null;
+		if (listType is null)
+			return;
+
+		var listTypeName = FullType(listType);
+
+		// Collect named argument initializers
+		var inits = new List<string>();
+		foreach (var namedArg in attr.NamedArguments)
+		{
+			if (namedArg.Key == "BulkLoad" && namedArg.Value.Value is true)
+				inits.Add("BulkLoad = true");
+			else if (namedArg.Key == "CacheCount" && namedArg.Value.Value is true)
+				inits.Add("CacheCount = true");
+			else if (namedArg.Key == "BufferSize" && namedArg.Value.Value is int bufSize && bufSize > 0)
+				inits.Add($"BufferSize = {bufSize}");
+		}
+
+		var initStr = inits.Count > 0 ? $" {{ {string.Join(", ", inits)} }}" : "";
+		sb.AppendLine($"\t\t{prop.Name} = new {listTypeName}(db, this){initStr};");
+	}
+
+	#endregion
+
+	#region BuildMeta
+
+	private static StringBuilder BuildMeta(INamedTypeSymbol entityType, string entityName, IPropertySymbol[] allProps)
+	{
+		var sb = new StringBuilder();
+		sb.AppendLine($"\tprivate static readonly Schema _schema = CreateSchema();");
+		sb.AppendLine();
+		sb.AppendLine($"\tprivate static Schema CreateSchema()");
+		sb.AppendLine("\t{");
+
+		var (entityAttrName, noCache) = GetEntityAttribute(entityType);
+		var tableName = entityAttrName ?? entityName;
+		var typeIndexLookup = BuildTypeIndexLookup(entityType, tableName);
+		var typeColumnOverrides = BuildTypeColumnOverrideLookup(entityType);
+
+		sb.AppendLine("\t\tvar columns = new List<SchemaColumn>()");
+		sb.AppendLine("\t\t{");
+
+		foreach (var prop in allProps)
+			EmitMetaColumns(sb, prop, typeIndexLookup, typeColumnOverrides);
+
+		sb.AppendLine("\t\t};");
+		sb.AppendLine();
+		sb.AppendLine($"\t\tvar meta = new Schema");
+		sb.AppendLine("\t\t{");
+
+		var isView = IsViewEntity(entityType);
+		var identityProp = FindIdentityProperty(entityType);
+		var idName = identityProp?.Name ?? "Id";
+		var idType = identityProp is not null ? FullType(identityProp.Type) : "long";
+
+		sb.AppendLine($"\t\t\tTableName = \"{tableName}\",");
+		sb.AppendLine($"\t\t\tEntityType = typeof({entityName}),");
+		sb.AppendLine($"\t\t\tFactory = () => new {entityName}(),");
+		sb.AppendLine($"\t\t\tIdentity = new() {{ Name = nameof({idName}), ClrType = typeof({idType}), IsReadOnly = true, IsUnique = true, IsIndex = true }},");
+		sb.AppendLine("\t\t\tColumns = columns,");
+
+		if (noCache)
+			sb.AppendLine("\t\t\tNoCache = true,");
+
+		if (isView)
+			sb.AppendLine("\t\t\tIsView = true,");
+
+		sb.AppendLine("\t\t};");
+		sb.AppendLine();
+		sb.AppendLine("\t\tSchemaRegistry.Register(meta);");
+		sb.AppendLine("\t\treturn meta;");
+		sb.AppendLine("\t}");
+		sb.AppendLine();
+		sb.AppendLine("\tSchema IDbPersistable.Schema => _schema;");
+		return sb;
+	}
+
+	private static void EmitMetaColumns(StringBuilder sb, IPropertySymbol prop, Dictionary<string, ColumnIndexes> typeIndexLookup, Dictionary<string, ColumnOverride> typeColumnOverrides)
+	{
+		// A type-level [ColumnOverride] names this column from the entity, which is the only
+		// way to reach a column the entity inherits rather than declares. It outranks whatever
+		// the property itself says.
+		var typeOverride = typeColumnOverrides.TryGetValue(prop.Name, out var overridden) ? overridden : null;
+		var typeNullable = typeOverride?.IsNullable;
+
+		if (IsInnerSchema(prop))
+		{
+			var innerType = UnwrapNullable(prop.Type);
+			var innerProps = GetInnerTypeProperties(innerType);
+			var nameOverrides = GetNameOverrides(prop);
+			var columnOverrides = GetColumnOverrides(prop);
+			var (colNullable, _, _, _) = GetColumnAttribute(prop);
+			var outerNullable = typeNullable ?? colNullable ?? InferIsNullable(prop);
+
+			EmitMetaColumnsRecursive(sb, innerProps, prop.Name, nameOverrides, columnOverrides, outerNullable, typeIndexLookup);
+		}
+		else
+		{
+			var parts = new List<string> { $"Name = nameof({prop.Name})" };
+
+			var unwrapped = UnwrapNullable(prop.Type);
+
+			if (IsRelationSingle(prop))
+			{
+				parts.Add($"ClrType = typeof({GetRelationIdentityType(prop)})");
+				parts.Add($"ReferencedEntityType = typeof({FullType(UnwrapNullable(prop.Type))})");
+			}
+			else if (unwrapped.TypeKind == TypeKind.Enum)
+				parts.Add($"ClrType = typeof({GetEnumUnderlyingType(prop.Type)})");
+			else if (GetMappedDbType(prop.Type) is { } mappedMetaType)
+				parts.Add($"ClrType = typeof({mappedMetaType})");
+			else
+				parts.Add($"ClrType = typeof({FullType(prop.Type)})");
+
+			// A plain id column may declare its FK target via [ForeignKey(typeof(X))].
+			if (!IsRelationSingle(prop) && GetForeignKeyType(prop) is { } fkType)
+				parts.Add($"ReferencedEntityType = typeof({fkType})");
+
+			// Uniqueness and indexedness follow every participation the column has, whether it
+			// was declared on the property or on the entity, the way the reflection path merges
+			// them (SchemaRegistry.MergeTypeLevelIndexes).
+			var indexes = GetColumnIndexes(prop.Name, prop, typeIndexLookup);
+
+			if (indexes.HasUnique)
+				parts.Add("IsUnique = true");
+			if (indexes.Entries is not null)
+			{
+				parts.Add("IsIndex = true");
+				parts.Add($"Indexes = new SchemaColumnIndex[] {{ {indexes.Entries} }}");
+			}
+
+			var (colNullable, colMaxLen, colPrecision, colScale) = GetColumnAttribute(prop);
+			var nullable = typeNullable ?? colNullable ?? InferIsNullable(prop);
+			colMaxLen = ResolveMaxLength(typeOverride, colMaxLen);
+			(colPrecision, colScale) = ResolveDigits(typeOverride, colPrecision, colScale);
+			if (nullable)
+				parts.Add("IsNullable = true");
+			if (colMaxLen > 0)
+				parts.Add($"MaxLength = {colMaxLen}");
+			if (colPrecision > 0)
+				parts.Add($"Precision = {colPrecision}");
+			if (colScale > 0)
+				parts.Add($"Scale = {colScale}");
+
+			sb.AppendLine($"\t\t\tnew() {{ {string.Join(", ", parts)} }},");
+		}
+	}
+
+	private static void EmitMetaColumnsRecursive(StringBuilder sb, IPropertySymbol[] innerProps, string colPrefix, Dictionary<string, string> nameOverrides, Dictionary<string, ColumnOverride> columnOverrides, bool outerNullable, Dictionary<string, ColumnIndexes> typeIndexLookup)
+	{
+		foreach (var inner in innerProps)
+		{
+			var colName = GetColumnName(colPrefix, inner.Name, nameOverrides);
+			var (colNullable, colMaxLen, colPrecision, colScale) = GetColumnAttribute(inner);
+
+			var columnOverride = columnOverrides.TryGetValue(inner.Name, out var overridden) ? overridden : null;
+			var nullable = columnOverride?.IsNullable ?? (outerNullable || (colNullable ?? InferIsNullable(inner)));
+			colMaxLen = ResolveMaxLength(columnOverride, colMaxLen);
+			(colPrecision, colScale) = ResolveDigits(columnOverride, colPrecision, colScale);
+
+			if (IsInnerSchemaProperty(inner))
+			{
+				var nestedType = UnwrapNullable(inner.Type);
+				var nestedProps = GetInnerTypeProperties(nestedType);
+				var nestedOverrides = GetNameOverrides(inner);
+				var nestedColumnOverrides = GetColumnOverrides(inner);
+				EmitMetaColumnsRecursive(sb, nestedProps, colName, nestedOverrides, nestedColumnOverrides, nullable, typeIndexLookup);
+				continue;
+			}
+
+			var parts = new List<string> { $"Name = \"{colName}\"" };
+			var unwrappedInner = UnwrapNullable(inner.Type);
+
+			if (IsRelationSingle(inner))
+			{
+				parts.Add($"ClrType = typeof({GetRelationIdentityType(inner)})");
+				parts.Add($"ReferencedEntityType = typeof({FullType(UnwrapNullable(inner.Type))})");
+			}
+			else if (unwrappedInner.TypeKind == TypeKind.Enum)
+				parts.Add($"ClrType = typeof({GetEnumUnderlyingType(inner.Type)})");
+			else if (GetMappedDbType(inner.Type) is { } mappedInnerMetaType)
+				parts.Add($"ClrType = typeof({mappedInnerMetaType})");
+			else
+				parts.Add($"ClrType = typeof({FullType(inner.Type)})");
+
+			if (!IsRelationSingle(inner) && GetForeignKeyType(inner) is { } fkType)
+				parts.Add($"ReferencedEntityType = typeof({fkType})");
+
+			var indexes = GetColumnIndexes(colName, inner, typeIndexLookup);
+
+			if (indexes.HasUnique)
+				parts.Add("IsUnique = true");
+			if (indexes.Entries is not null)
+			{
+				parts.Add("IsIndex = true");
+				parts.Add($"Indexes = new SchemaColumnIndex[] {{ {indexes.Entries} }}");
+			}
+
+			if (nullable)
+				parts.Add("IsNullable = true");
+			if (colMaxLen > 0)
+				parts.Add($"MaxLength = {colMaxLen}");
+			if (colPrecision > 0)
+				parts.Add($"Precision = {colPrecision}");
+			if (colScale > 0)
+				parts.Add($"Scale = {colScale}");
+
+			sb.AppendLine($"\t\t\tnew() {{ {string.Join(", ", parts)} }},");
+		}
+	}
+
+	#endregion
+
+	#region Emit
+
+	private static void EmitSource(SourceProductionContext spc, string entityNs, string entityName, StringBuilder sbSave, StringBuilder sbLoad, StringBuilder sbInitLists, StringBuilder sbMeta)
+	{
+		var sb = new StringBuilder();
+		sb.AppendLine("// <auto-generated />");
+		sb.AppendLine($"namespace {entityNs};");
+		sb.AppendLine();
+		sb.AppendLine("using System;");
+		sb.AppendLine("using System.Collections.Generic;");
+		sb.AppendLine("using System.Threading;");
+		sb.AppendLine("using System.Threading.Tasks;");
+		sb.AppendLine();
+		sb.AppendLine("using Ecng.Common;");
+		sb.AppendLine("using Ecng.Serialization;");
+		sb.AppendLine();
+		if (sbMeta is not null)
+			sb.AppendLine($"partial class {entityName} : IDbPersistable");
+		else
+			sb.AppendLine($"partial class {entityName}");
+		sb.AppendLine("{");
+
+		if (sbSave is not null)
+		{
+			sb.Append(sbSave);
+			sb.AppendLine();
+		}
+
+		if (sbLoad is not null)
+		{
+			sb.Append(sbLoad);
+			sb.AppendLine();
+		}
+
+		if (sbInitLists is not null)
+		{
+			sb.Append(sbInitLists);
+			sb.AppendLine();
+		}
+
+		if (sbMeta is not null)
+			sb.Append(sbMeta);
+
+		sb.AppendLine("}");
+
+		spc.AddSource($"{entityNs.Replace('.', '_')}_{entityName}_DbPersistable.cs", sb.ToString());
+	}
+
+	private static void EmitSchemaInitializer(SourceProductionContext spc, string entityNs, List<string> concreteNames)
+	{
+		var sb = new StringBuilder();
+		sb.AppendLine("// <auto-generated />");
+		sb.AppendLine($"namespace {entityNs};");
+		sb.AppendLine();
+		sb.AppendLine("using System.Runtime.CompilerServices;");
+		sb.AppendLine();
+		sb.AppendLine("static file class SchemaInitializer");
+		sb.AppendLine("{");
+		sb.AppendLine("\t[ModuleInitializer]");
+		sb.AppendLine("\tinternal static void Init()");
+		sb.AppendLine("\t{");
+
+		foreach (var name in concreteNames)
+			sb.AppendLine($"\t\tRuntimeHelpers.RunClassConstructor(typeof({name}).TypeHandle);");
+
+		sb.AppendLine("\t}");
+		sb.AppendLine("}");
+
+		spc.AddSource($"{entityNs.Replace('.', '_')}_SchemaInitializer.cs", sb.ToString());
+	}
+
+	#endregion
+
+	#region Property helpers
+
+	private static IEnumerable<IPropertySymbol> GetOwnProperties(INamedTypeSymbol type)
+	{
+		return type.GetMembers().OfType<IPropertySymbol>()
+			.Where(p => !p.IsReadOnly
+				&& !p.IsStatic
+				&& !p.IsIndexer
+				&& p.ExplicitInterfaceImplementations.Length == 0
+				&& !HasAttribute(p, "IgnoreAttribute")
+				&& !HasAttribute(p, "IdentityAttribute")
+				&& p.Name != "Id"
+				&& !IsRelationMany(p));
+	}
+
+	private static IPropertySymbol[] GetOwnRelationManyProperties(INamedTypeSymbol type)
+	{
+		return type.GetMembers().OfType<IPropertySymbol>()
+			.Where(p => !p.IsStatic
+				&& !p.IsIndexer
+				&& p.ExplicitInterfaceImplementations.Length == 0
+				&& IsRelationMany(p))
+			.ToArray();
+	}
+
+	private static IPropertySymbol[] GetAllHierarchyProperties(INamedTypeSymbol type)
+	{
+		var identityType = FindIdentityDeclaringType(type);
+
+		var chain = new List<INamedTypeSymbol>();
+		var current = type;
+		while (current is not null)
+		{
+			chain.Add(current);
+
+			if (SymbolEqualityComparer.Default.Equals(current, identityType))
+				break;
+
+			current = current.BaseType;
+		}
+
+		// Walk base -> derived so base columns come first, and keep the first (base) declaration of
+		// any name so a property overridden in a derived entity yields a single column.
+		chain.Reverse();
+
+		var seen = new HashSet<string>();
+		var props = new List<IPropertySymbol>();
+
+		foreach (var t in chain)
+			foreach (var p in GetOwnProperties(t))
+				if (seen.Add(p.Name))
+					props.Add(p);
+
+		return props.ToArray();
+	}
+
+	/// <summary>
+	/// Gets writable non-static properties of an inner type, walking inheritance.
+	/// </summary>
+	private static IPropertySymbol[] GetInnerTypeProperties(ITypeSymbol type)
+	{
+		type = UnwrapNullable(type);
+		var props = new List<IPropertySymbol>();
+		var current = type as INamedTypeSymbol;
+		while (current is not null && current.SpecialType == SpecialType.None)
+		{
+			props.InsertRange(0, current.GetMembers().OfType<IPropertySymbol>()
+				.Where(p => !p.IsReadOnly && !p.IsStatic && !p.IsIndexer
+					&& !HasAttribute(p, "IgnoreAttribute")
+					&& !IsRelationMany(p)));
+			current = current.BaseType;
+		}
+		return props.ToArray();
+	}
+
+	/// <summary>
+	/// Reads [NameOverride] attributes from a property.
+	/// Returns Dictionary mapping innerPropName → columnName.
+	/// </summary>
+	private static Dictionary<string, string> GetNameOverrides(IPropertySymbol prop)
+	{
+		var result = new Dictionary<string, string>();
+		foreach (var attr in prop.GetAttributes())
+		{
+			if (attr.AttributeClass?.Name != "NameOverrideAttribute")
+				continue;
+			if (attr.ConstructorArguments.Length < 2)
+				continue;
+			var innerProp = attr.ConstructorArguments[0].Value as string;
+			var colName = attr.ConstructorArguments[1].Value as string;
+			if (innerProp is not null && colName is not null)
+				result[innerProp] = colName;
+		}
+		return result;
+	}
+
+	/// <summary>
+	/// Reads [ColumnOverride] attributes from a property, keyed by the inner property name.
+	/// </summary>
+	private static Dictionary<string, ColumnOverride> GetColumnOverrides(IPropertySymbol prop)
+		=> ReadColumnOverrides(prop.GetAttributes(), StringComparer.Ordinal);
+
+	// Mirrors SchemaRegistry.ReadColumnOverrides, so both schema paths merge the declarations alike.
+	private static Dictionary<string, ColumnOverride> ReadColumnOverrides(IEnumerable<AttributeData> attrs, StringComparer comparer)
+	{
+		var result = new Dictionary<string, ColumnOverride>(comparer);
+
+		foreach (var attr in attrs)
+		{
+			if (attr.AttributeClass?.Name != "ColumnOverrideAttribute")
+				continue;
+
+			if (attr.ConstructorArguments.Length == 0 || attr.ConstructorArguments[0].Value is not string propName || propName.Length == 0)
+				continue;
+
+			bool? isNullable = null;
+			var maxLength = 0;
+			var precision = 0;
+			var scale = 0;
+
+			foreach (var named in attr.NamedArguments)
+			{
+				switch (named.Key)
+				{
+					case "IsNullable":
+						isNullable = named.Value.Value is true;
+						break;
+					case "MaxLength":
+						maxLength = named.Value.Value is int l ? l : 0;
+						break;
+					case "Precision":
+						precision = named.Value.Value is int p ? p : 0;
+						break;
+					case "Scale":
+						scale = named.Value.Value is int s ? s : 0;
+						break;
+				}
+			}
+
+			if (!result.TryGetValue(propName, out var entry))
+				result[propName] = entry = new();
+
+			if (isNullable is not null)
+				entry.IsNullable = isNullable;
+
+			if (maxLength > 0)
+				entry.MaxLength = maxLength;
+
+			if (precision > 0)
+			{
+				entry.Precision = precision;
+				entry.Scale = scale;
+			}
+			else if (scale > 0)
+				entry.Scale = scale;
+		}
+
+		return result;
+	}
+
+	/// <summary>
+	/// What one [ColumnOverride] (or several naming the same column) replaces on that column.
+	/// </summary>
+	private sealed class ColumnOverride
+	{
+		public bool? IsNullable { get; set; }
+		public int MaxLength { get; set; }
+		public int Precision { get; set; }
+		public int Scale { get; set; }
+	}
+
+	private static int ResolveMaxLength(ColumnOverride columnOverride, int maxLength)
+		=> columnOverride is { MaxLength: > 0 } ? columnOverride.MaxLength : maxLength;
+
+	// An override precision replaces both digits and makes its scale literal; an override scale alone
+	// replaces only the scale, the way ColumnAttribute pairs a lone scale with the default precision.
+	private static (int precision, int scale) ResolveDigits(ColumnOverride columnOverride, int precision, int scale)
+	{
+		if (columnOverride is null)
+			return (precision, scale);
+
+		if (columnOverride.Precision > 0)
+			return (columnOverride.Precision, columnOverride.Scale);
+
+		return (precision, columnOverride.Scale > 0 ? columnOverride.Scale : scale);
+	}
+
+	private static string GetColumnName(string outerPropName, string innerPropName, Dictionary<string, string> nameOverrides)
+	{
+		if (nameOverrides.TryGetValue(innerPropName, out var colName))
+			return colName;
+		return outerPropName + innerPropName;
+	}
+
+	#endregion
+
+	#region Type classification
+
+	/// <summary>
+	/// Returns true if the property type is "complex" — not a primitive, enum, DateTime, byte[], or similar simple type.
+	/// Complex types are either mapped types (handled via type mapping), InnerSchema (flattened), or unknown (entity skipped).
+	/// </summary>
+	private static bool IsComplexType(IPropertySymbol prop)
+	{
+		if (IsRelationSingle(prop))
+			return false;
+
+		var type = UnwrapNullable(prop.Type);
+
+		// byte[] is simple (stored as binary column)
+		if (type is IArrayTypeSymbol arrayType)
+			return arrayType.ElementType.SpecialType != SpecialType.System_Byte;
+
+		// Enums are simple
+		if (type.TypeKind == TypeKind.Enum)
+			return false;
+
+		// Check for known simple special types (string, int, long, bool, decimal, byte, char, etc.)
+		if (type.SpecialType != SpecialType.None)
+			return false;
+
+		// Check well-known types by name
+		var fullName = FullType(type);
+		return fullName switch
+		{
+			"global::System.DateTime" => false,
+			"global::System.DateTimeOffset" => false,
+			"global::System.TimeSpan" => false,
+			"global::System.Guid" => false,
+			"global::System.DateOnly" => false,
+			"global::System.TimeOnly" => false,
+			_ => true,
+		};
+	}
+
+	/// <summary>
+	/// Returns the mapped DB column type name for types with registered type mappings.
+	/// Mirrors runtime SchemaRegistry.RegisterTypeMapping registrations.
+	/// </summary>
+	private static string GetMappedDbType(ITypeSymbol type)
+	{
+		type = UnwrapNullable(type);
+		var fullName = type.ContainingNamespace?.ToDisplayString() + "." + type.Name;
+		return fullName switch
+		{
+			"Ecng.ComponentModel.Price" => "string",
+			_ => null,
+		};
+	}
+
+	private static bool IsNullableType(ITypeSymbol type)
+		=> type is INamedTypeSymbol { IsGenericType: true } named
+			&& named.ConstructedFrom.SpecialType == SpecialType.System_Nullable_T;
+
+	private static ITypeSymbol UnwrapNullable(ITypeSymbol type)
+	{
+		if (type is INamedTypeSymbol { IsGenericType: true } named
+			&& named.ConstructedFrom.SpecialType == SpecialType.System_Nullable_T)
+			return named.TypeArguments[0];
+		return type;
+	}
+
+	/// <summary>
+	/// Check if the property is an InnerSchema type whose inner properties can all be flattened.
+	/// </summary>
+	private static bool IsInnerSchema(IPropertySymbol prop)
+	{
+		if (IsRelationSingle(prop) || IsRelationMany(prop))
+			return false;
+		if (!IsComplexType(prop))
+			return false;
+		if (GetMappedDbType(prop.Type) is not null)
+			return false;
+		return CanFlattenInnerType(UnwrapNullable(prop.Type));
+	}
+
+	/// <summary>
+	/// Check if all inner properties of a type are simple enough to flatten into columns.
+	/// Recursively checks nested inner types.
+	/// </summary>
+	private static bool CanFlattenInnerType(ITypeSymbol type)
+		=> CanFlattenInnerType(type, new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+
+	private static bool CanFlattenInnerType(ITypeSymbol type, HashSet<ITypeSymbol> visiting)
+	{
+		// Guard against self- or mutually-referential property types, which would otherwise recurse
+		// forever and StackOverflow the compiler (SchemaRegistry.IsInnerSchemaType does the same).
+		if (!visiting.Add(type))
+			return false;
+
+		try
+		{
+			var innerProps = GetInnerTypeProperties(type);
+			if (innerProps.Length == 0)
+				return false;
+
+			foreach (var inner in innerProps)
+			{
+				if (IsRelationSingle(inner)) continue;
+				if (GetMappedDbType(inner.Type) is not null) continue;
+
+				var t = UnwrapNullable(inner.Type);
+
+				// byte[] is OK
+				if (t is IArrayTypeSymbol arr)
+				{
+					if (arr.ElementType.SpecialType == SpecialType.System_Byte)
+						continue;
+					return false;
+				}
+
+				if (t.TypeKind == TypeKind.Enum) continue;
+				if (t.SpecialType != SpecialType.None) continue;
+
+				var fullName = FullType(t);
+				if (fullName is "global::System.DateTime" or "global::System.DateTimeOffset"
+					or "global::System.TimeSpan" or "global::System.Guid"
+					or "global::System.DateOnly" or "global::System.TimeOnly")
+					continue;
+
+				// recursively check nested inner types
+				if (CanFlattenInnerType(t, visiting))
+					continue;
+
+				return false; // unknown complex inner type
+			}
+			return true;
+		}
+		finally
+		{
+			visiting.Remove(type);
+		}
+	}
+
+	/// <summary>
+	/// Check if ALL properties can be handled (simple, FK, Price, or flattenable InnerSchema).
+	/// </summary>
+	private static bool CanHandleAllProps(IPropertySymbol[] props)
+	{
+		foreach (var prop in props)
+		{
+			if (!IsComplexType(prop)) continue;
+			if (GetMappedDbType(prop.Type) is not null) continue;
+			if (IsInnerSchema(prop)) continue;
+			return false;
+		}
+		return true;
+	}
+
+	#endregion
+
+	#region Symbol helpers
+
+	private static bool IsRelationSingle(IPropertySymbol prop)
+		=> HasAttribute(prop, "RelationSingleAttribute");
+
+	/// <summary>
+	/// For a [RelationSingle] property, finds the identity type of the referenced entity.
+	/// Returns "long" if not found.
+	/// </summary>
+	private static string GetRelationIdentityType(IPropertySymbol prop)
+	{
+		var refType = prop.Type as INamedTypeSymbol;
+		if (refType is null)
+			return "long";
+
+		var idProp = FindIdentityProperty(refType);
+		return idProp is not null ? FullType(idProp.Type) : "long";
+	}
+
+	private static bool IsRelationMany(IPropertySymbol prop)
+		=> HasAttribute(prop, "RelationManyAttribute");
+
+	private static bool IsViewEntity(INamedTypeSymbol type)
+		=> HasAttribute(type, "ViewProcessorAttribute");
+
+	private static bool HasAttribute(ISymbol symbol, string attrName)
+		=> symbol.GetAttributes().Any(a => a.AttributeClass?.Name == attrName);
+
+	// Roslyn reports the attribute class exactly as written, so a subclass such as
+	// [NonEmptyUnique] (-> Unique -> Index) does not answer to any of its base names. Walk the
+	// hierarchy, or every derived index attribute is silently skipped.
+	private static bool DerivesFrom(INamedTypeSymbol type, string attrName)
+	{
+		for (var current = type; current is not null; current = current.BaseType)
+		{
+			if (current.Name == attrName)
+				return true;
+		}
+
+		return false;
+	}
+
+	// [Identity] is an IndexAttribute too, but it drives the primary key and is emitted from
+	// there, so it must not also become an ordinary index — the reflection path skips it the
+	// same way (SchemaRegistry.CreateFromReflection).
+	private static bool IsIndexAttribute(AttributeData attr)
+		=> attr.AttributeClass is { } cls
+			&& DerivesFrom(cls, "IndexAttribute")
+			&& !DerivesFrom(cls, "IdentityAttribute");
+
+	private static bool IsUniqueAttribute(AttributeData attr)
+		=> IsIndexAttribute(attr) && DerivesFrom(attr.AttributeClass, "UniqueAttribute");
+
+	private static string GetForeignKeyType(IPropertySymbol prop)
+	{
+		var attr = prop.GetAttributes().FirstOrDefault(a => a.AttributeClass?.Name == "ForeignKeyAttribute");
+
+		if (attr is null || attr.ConstructorArguments.Length == 0)
+			return null;
+
+		return attr.ConstructorArguments[0].Value is INamedTypeSymbol t ? FullType(t) : null;
+	}
+
+	/// <summary>
+	/// The index participations of one column as emitted source, plus whether any of them is
+	/// unique. Used both for what the type-level declarations contribute and for the merged set.
+	/// </summary>
+	private readonly struct ColumnIndexes(string entries, bool hasUnique)
+	{
+		public string Entries { get; } = entries;
+		public bool HasUnique { get; } = hasUnique;
+	}
+
+	// Builds a column-name -> emitted "SchemaColumnIndex.From(...)" list from type-level
+	// [Index]/[Unique] declarations, mirroring SchemaRegistry's type-level index expansion.
+	private static Dictionary<string, ColumnIndexes> BuildTypeIndexLookup(INamedTypeSymbol entityType, string tableName)
+	{
+		var lookup = new Dictionary<string, List<string>>();
+		var unique = new HashSet<string>();
+
+		foreach (var attr in entityType.GetAttributes())
+		{
+			if (!IsIndexAttribute(attr))
+				continue;
+
+			var cols = GetDeclaredColumns(attr);
+
+			if (cols.Length == 0)
+				continue;
+
+			var explicitName = attr.NamedArguments.FirstOrDefault(a => a.Key == "Name").Value.Value as string;
+			var indexName = !string.IsNullOrEmpty(explicitName)
+				? $"\"{explicitName}\""
+				: (cols.Length == 1 ? "null" : $"\"IX_{tableName}_{string.Join("_", cols)}\"");
+
+			var attrExpr = RenderAttribute(attr);
+			var isUnique = IsUniqueAttribute(attr);
+
+			for (var i = 0; i < cols.Length; i++)
+			{
+				var entry = $"SchemaColumnIndex.From({attrExpr}, {indexName}, {i})";
+
+				if (!lookup.TryGetValue(cols[i], out var list))
+					lookup[cols[i]] = list = new List<string>();
+
+				list.Add(entry);
+
+				if (isUnique)
+					unique.Add(cols[i]);
+			}
+		}
+
+		return lookup.ToDictionary(kv => kv.Key, kv => new ColumnIndexes(string.Join(", ", kv.Value), unique.Contains(kv.Key)));
+	}
+
+	// The column-list constructor is declared as params, so one column arrives as a bare string
+	// and several as an array; both spellings name the same index.
+	private static string[] GetDeclaredColumns(AttributeData attr)
+	{
+		if (attr.ConstructorArguments.Length == 0)
+			return [];
+
+		var first = attr.ConstructorArguments[0];
+
+		var values = first.Kind == TypedConstantKind.Array
+			? first.Values.Select(v => v.Value as string)
+			: Enumerable.Repeat(first.Value as string, 1);
+
+		return values.Where(s => !string.IsNullOrEmpty(s)).ToArray();
+	}
+
+	// Builds a column-name -> override map from type-level [ColumnOverride] declarations, mirroring
+	// SchemaRegistry's type-level override. Naming the column from the entity is what lets an entity
+	// reshape a column it inherits from a base class, where no property-level attribute can reach.
+	private static Dictionary<string, ColumnOverride> BuildTypeColumnOverrideLookup(INamedTypeSymbol entityType)
+		=> ReadColumnOverrides(entityType.GetAttributes(), StringComparer.OrdinalIgnoreCase);
+
+	// Combines property-level [Index]/[Unique] with the type-level entries for the column. Entries
+	// is the comma-joined "SchemaColumnIndex.From(...)" list, or null when the column has none.
+	private static ColumnIndexes GetColumnIndexes(string columnName, IPropertySymbol prop, Dictionary<string, ColumnIndexes> typeIndexLookup)
+	{
+		var entries = new List<string>();
+		var hasUnique = false;
+
+		foreach (var attr in prop.GetAttributes())
+		{
+			if (!IsIndexAttribute(attr))
+				continue;
+
+			var explicitName = attr.NamedArguments.FirstOrDefault(a => a.Key == "Name").Value.Value as string;
+			var order = attr.NamedArguments.FirstOrDefault(a => a.Key == "Order").Value.Value is int o ? o : 0;
+			var nameStr = string.IsNullOrEmpty(explicitName) ? "null" : $"\"{explicitName}\"";
+
+			entries.Add($"SchemaColumnIndex.From({RenderAttribute(attr)}, {nameStr}, {order})");
+			hasUnique |= IsUniqueAttribute(attr);
+		}
+
+		if (typeIndexLookup.TryGetValue(columnName, out var typeLevel))
+		{
+			entries.Add(typeLevel.Entries);
+			hasUnique |= typeLevel.HasUnique;
+		}
+
+		return new(entries.Count > 0 ? string.Join(", ", entries) : null, hasUnique);
+	}
+
+	private static (bool? isNullable, int maxLength, int precision, int scale) GetColumnAttribute(IPropertySymbol prop)
+	{
+		var attr = prop.GetAttributes().FirstOrDefault(a => a.AttributeClass?.Name == "ColumnAttribute");
+		if (attr is null)
+			return (null, 0, 0, 0);
+
+		bool? isNullable = null;
+		var maxLength = 0;
+		var precision = 0;
+		var scale = 0;
+
+		foreach (var arg in attr.NamedArguments)
+		{
+			switch (arg.Key)
+			{
+				case "IsNullable":
+					isNullable = arg.Value.Value is true;
+					break;
+				case "MaxLength":
+					maxLength = arg.Value.Value is int v ? v : 0;
+					break;
+				case "Precision":
+					precision = arg.Value.Value is int p ? p : 0;
+					break;
+				case "Scale":
+					scale = arg.Value.Value is int s ? s : 0;
+					break;
+			}
+		}
+
+		return (isNullable, maxLength, precision, scale);
+	}
+
+	private static bool InferIsNullable(IPropertySymbol prop)
+		=> IsNullableType(prop.Type);
+
+	private static (string name, bool noCache) GetEntityAttribute(INamedTypeSymbol type)
+	{
+		var attr = type.GetAttributes().FirstOrDefault(a => a.AttributeClass?.Name == "EntityAttribute");
+		if (attr is null)
+			return (null, false);
+
+		string name = null;
+		var noCache = false;
+
+		foreach (var arg in attr.NamedArguments)
+		{
+			switch (arg.Key)
+			{
+				case "Name":
+					name = arg.Value.Value as string;
+					break;
+				case "NoCache":
+					noCache = arg.Value.Value is true;
+					break;
+			}
+		}
+
+		return (name, noCache);
+	}
+
+	private static string GetEnumUnderlyingType(ITypeSymbol type)
+	{
+		type = UnwrapNullable(type);
+
+		if (type is INamedTypeSymbol named && named.EnumUnderlyingType is not null)
+			return named.EnumUnderlyingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+		return "int";
+	}
+
+	private static string FullType(ITypeSymbol type)
+		=> type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+	// Reproduces the attribute declaration as a constructor call instead of interpreting it. A
+	// derived attribute fills part of its state in its own constructor — NonEmptyUnique builds
+	// its Condition there — and a generator cannot run that constructor, so the declaration is
+	// handed to the generated code and evaluated once when the schema is built.
+	private static string RenderAttribute(AttributeData attr)
+	{
+		var args = attr.ConstructorArguments.SelectMany(FlattenArgument);
+		var expr = $"new {FullType(attr.AttributeClass)}({string.Join(", ", args)})";
+
+		var init = attr.NamedArguments
+			.Select(na => $"{na.Key} = {RenderConstant(na.Value)}")
+			.ToArray();
+
+		return init.Length > 0 ? $"{expr} {{ {string.Join(", ", init)} }}" : expr;
+	}
+
+	// A params argument reaches Roslyn as a single array constant; spelling its elements back out
+	// as separate arguments picks the same overload the source did.
+	private static IEnumerable<string> FlattenArgument(TypedConstant arg)
+		=> arg.Kind == TypedConstantKind.Array && !arg.IsNull
+			? arg.Values.Select(RenderConstant)
+			: Enumerable.Repeat(RenderConstant(arg), 1);
+
+	private static string RenderConstant(TypedConstant value)
+	{
+		if (value.IsNull)
+			return "null";
+
+		if (value.Kind == TypedConstantKind.Array)
+		{
+			var elementType = value.Type is IArrayTypeSymbol array ? FullType(array.ElementType) : "object";
+			return $"new {elementType}[] {{ {string.Join(", ", value.Values.Select(RenderConstant))} }}";
+		}
+
+		if (value.Kind == TypedConstantKind.Type)
+			return value.Value is ITypeSymbol type ? $"typeof({FullType(type)})" : "null";
+
+		if (value.Kind == TypedConstantKind.Enum)
+			return $"({FullType(value.Type)}){Convert.ToString(value.Value, CultureInfo.InvariantCulture)}";
+
+		return value.Value switch
+		{
+			string s => SymbolDisplay.FormatLiteral(s, quote: true),
+			char c => SymbolDisplay.FormatLiteral(c, quote: true),
+			bool b => b ? "true" : "false",
+			_ => Convert.ToString(value.Value, CultureInfo.InvariantCulture),
+		};
+	}
+
+	#endregion
+}

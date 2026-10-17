@@ -1,0 +1,19 @@
+# cTrader Connector
+[Русский](README_ru.md) | [中文](README_zh.md) | [Español](README_es.md) | [Deutsch](README_de.md) | [Português](README_pt.md) | [日本語](README_ja.md)
+
+The **cTrader connector** connects StockSharp to an FX/CFD broker or trading platform. It translates provider-specific data and operations into the unified StockSharp message model, so applications can use the same subscriptions and workflows across different venues.
+
+## Key capabilities
+
+- Typical coverage: FX and CFDs.
+- Instrument discovery and provider reference data.
+- Market data supported by the adapter: Level 1 quotes, order books and candles.
+- Provider-supported order submission and execution workflows.
+- Portfolio, balance, position, and execution-state updates.
+- Provider-specific transport, sessions, and data formats are hidden behind the standard StockSharp API.
+
+## Typical use
+
+Use this connector for live strategies, trading terminals, order-management services, and monitoring tools that need direct access to the provider.
+
+Available instruments, data depth, trading permissions, rate limits, and service availability are controlled by cTrader and by the connected account or API plan.

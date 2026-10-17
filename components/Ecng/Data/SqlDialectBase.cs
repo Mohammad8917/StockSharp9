@@ -1,0 +1,482 @@
+﻿namespace Ecng.Data;
+
+using System.Data.Common;
+using System.Threading.Tasks;
+
+using Ecng.Common;
+
+/// <summary>
+/// Base class for SQL dialect implementations.
+/// </summary>
+public abstract class SqlDialectBase : ISqlDialect
+{
+	/// <summary>
+	/// The precision of the default decimal type, and the one a decimal column gets when it declares only a scale.
+	/// </summary>
+	public const int DefaultDecimalPrecision = 18;
+
+	/// <summary>
+	/// The scale of the default decimal type.
+	/// </summary>
+	public const int DefaultDecimalScale = 8;
+
+	/// <inheritdoc />
+	public virtual string ConcatOperator => "+";
+
+	/// <inheritdoc />
+	public virtual string TrueLiteral => "1";
+
+	/// <inheritdoc />
+	public virtual string FalseLiteral => "0";
+
+	/// <inheritdoc />
+	public virtual string BooleanCastSqlType => "bit";
+
+	/// <inheritdoc />
+	public virtual string DecimalComparisonCastSqlType => null;
+
+	/// <inheritdoc />
+	public virtual string GetIntegerToDecimalCastSqlType(int precision) => $"decimal({precision},0)";
+
+	/// <inheritdoc />
+	public virtual bool KeepsDecimalDigits => true;
+
+	/// <inheritdoc />
+	public virtual bool CanAlterColumnWithDependents => true;
+
+	/// <inheritdoc />
+	public virtual bool CanAlterColumn => true;
+
+	/// <inheritdoc />
+	public virtual string UnicodePrefix => "N";
+
+	/// <inheritdoc />
+	public virtual string EmptyBinaryLiteral => "X''";
+
+	/// <inheritdoc />
+	public virtual string LenFunction => "len";
+
+	/// <inheritdoc />
+	public virtual string IsNullFunction => "isnull";
+
+	/// <inheritdoc />
+	public virtual void AppendDatePartOpen(StringBuilder sb, string part)
+	{
+		sb.Append($"datePart({part},");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDatePartClose(StringBuilder sb)
+	{
+		sb.Append(')');
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDateAdd(StringBuilder sb, string part, string amountSql, string sourceSql)
+	{
+		sb.Append($"dateAdd({part},{amountSql},{sourceSql})");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDateDiff(StringBuilder sb, string part, string startSql, string endSql)
+	{
+		// SQL Server native DATEDIFF(part, startdate, enddate) == enddate - startdate.
+		sb.Append($"dateDiff({part},{startSql},{endSql})");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDecimalModulo(StringBuilder sb, string dividendSql, string divisorSql)
+	{
+		sb.Append($"{dividendSql} % {divisorSql}");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>GREATEST exists on SQL Server only from 2022, so the portable CASE is used.</remarks>
+	public virtual void AppendGreatest(StringBuilder sb, string leftSql, string rightSql)
+	{
+		sb.Append($"(case when {leftSql} >= {rightSql} then {leftSql} else {rightSql} end)");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>LEAST exists on SQL Server only from 2022, so the portable CASE is used.</remarks>
+	public virtual void AppendLeast(StringBuilder sb, string leftSql, string rightSql)
+	{
+		sb.Append($"(case when {leftSql} <= {rightSql} then {leftSql} else {rightSql} end)");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>
+	/// ROUND of a decimal rounds half away from zero on every supported database; none rounds it half to even.
+	/// FLOOR and CEILING have no digits argument, so they only round to a whole number.
+	/// </remarks>
+	public virtual void AppendRound(StringBuilder sb, string valueSql, string digitsSql, MidpointRounding mode)
+	{
+		switch (mode)
+		{
+			case MidpointRounding.AwayFromZero:
+				sb.Append($"Round({valueSql}, {digitsSql ?? "0"})");
+				break;
+
+			case MidpointRounding.ToZero:
+				AppendTruncate(sb, valueSql, digitsSql);
+				break;
+
+			case MidpointRounding.ToNegativeInfinity when digitsSql is null:
+				sb.Append($"floor({valueSql})");
+				break;
+
+			case MidpointRounding.ToPositiveInfinity when digitsSql is null:
+				sb.Append($"ceiling({valueSql})");
+				break;
+
+			default:
+				throw new NotSupportedException($"Rounding {mode}{(digitsSql is null ? string.Empty : " to a number of digits")} is not supported by {GetType().Name}.");
+		}
+	}
+
+	/// <summary>
+	/// Appends an expression that drops the digits of a value beyond <paramref name="digitsSql"/>,
+	/// rounding toward zero.
+	/// </summary>
+	/// <param name="sb">Target builder.</param>
+	/// <param name="valueSql">SQL of the value.</param>
+	/// <param name="digitsSql">SQL of the number of fractional digits to keep, or <see langword="null"/> for a whole number.</param>
+	/// <remarks>A non-zero third argument makes SQL Server's ROUND truncate.</remarks>
+	protected virtual void AppendTruncate(StringBuilder sb, string valueSql, string digitsSql)
+	{
+		sb.Append($"Round({valueSql}, {digitsSql ?? "0"}, 1)");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendTrimOpen(StringBuilder sb)
+	{
+		sb.Append("LTrim(RTrim(");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendTrimClose(StringBuilder sb)
+	{
+		sb.Append("))");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendFallbackOrderBy(StringBuilder sb) { }
+
+	/// <inheritdoc />
+	public virtual void AppendPaginationParams(StringBuilder sb, string skipParamExpr, string takeParamExpr)
+	{
+		// Default: SqlServer order (OFFSET first, then FETCH)
+		if (skipParamExpr is not null)
+			sb.AppendLine(FormatSkip(skipParamExpr));
+		if (takeParamExpr is not null)
+			sb.AppendLine(FormatTake(takeParamExpr));
+	}
+
+	/// <inheritdoc />
+	public virtual string BatchSeparator => string.Empty;
+
+	/// <inheritdoc />
+	public abstract int MaxParameters { get; }
+
+	/// <inheritdoc />
+	public abstract string ParameterPrefix { get; }
+
+	/// <inheritdoc />
+	public abstract string QuoteIdentifier(string identifier);
+
+	/// <inheritdoc />
+	public abstract string GetSqlTypeName(Type clrType);
+
+	/// <inheritdoc />
+	public virtual string GetSqlTypeName(Type clrType, int maxLength)
+		=> GetSqlTypeName(clrType);
+
+	/// <inheritdoc />
+	public virtual object ConvertToDbValue(object value, Type clrType)
+	{
+		if (value is null)
+			return DBNull.Value;
+
+		// TimeSpan stored as ticks (BIGINT)
+		if (value is TimeSpan ts)
+			return ts.Ticks;
+
+		return value;
+	}
+
+	/// <inheritdoc />
+	public virtual void PrepareParameter(DbParameter parameter) { }
+
+	/// <inheritdoc />
+	public virtual object ConvertFromDbValue(object value, Type targetType)
+	{
+		if (value is null || value is DBNull)
+			return null;
+
+		// TimeSpan from ticks
+		if ((targetType.GetUnderlyingType() ?? targetType) == typeof(TimeSpan) && value is long ticks)
+			return new TimeSpan(ticks);
+
+		return value;
+	}
+
+	/// <inheritdoc />
+	public abstract string GetIdentityColumnSuffix();
+
+	/// <inheritdoc />
+	public virtual string GetIdentityColumnSuffix(string pkConstraintName)
+	{
+		var suffix = GetIdentityColumnSuffix();
+
+		// Every dialect spells the identity column as "<auto-increment bits> PRIMARY KEY"
+		// in some order, so naming the constraint means inserting CONSTRAINT <name>
+		// directly before PRIMARY KEY — the one position all of them accept. It matters
+		// for SQLite in particular, where AUTOINCREMENT must stay a column-level clause
+		// trailing PRIMARY KEY, so the constraint cannot be moved to table level.
+		const string primaryKey = "PRIMARY KEY";
+
+		var index = suffix.IndexOf(primaryKey, StringComparison.OrdinalIgnoreCase);
+
+		return index < 0
+			? suffix
+			: suffix.Insert(index, $"CONSTRAINT {QuoteIdentifier(pkConstraintName)} ");
+	}
+
+	/// <inheritdoc />
+	public virtual string GetForeignKeyConstraint(string tableName, string columnName, string refTableName, string refColumnName)
+		=> $"CONSTRAINT {QuoteIdentifier(SchemaNaming.ForeignKey(tableName, columnName))} FOREIGN KEY ({QuoteIdentifier(columnName)}) REFERENCES {QuoteIdentifier(refTableName)} ({QuoteIdentifier(refColumnName)})";
+
+	/// <inheritdoc />
+	public virtual bool SupportsAddForeignKeyViaAlter => true;
+
+	/// <inheritdoc />
+	public virtual void AppendAddForeignKey(StringBuilder sb, string tableName, string columnName, string refTableName, string refColumnName)
+	{
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} ADD {GetForeignKeyConstraint(tableName, columnName, refTableName, refColumnName)}");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDropForeignKey(StringBuilder sb, string tableName, string constraintName)
+	{
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} DROP CONSTRAINT {QuoteIdentifier(constraintName)}");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendCreateIndex(StringBuilder sb, string indexName, string tableName, string columnName, bool unique)
+	{
+		sb.Append("CREATE ");
+
+		if (unique)
+			sb.Append("UNIQUE ");
+
+		sb.Append($"INDEX {QuoteIdentifier(indexName)} ON {QuoteIdentifier(tableName)} ({QuoteIdentifier(columnName)})");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDropIndex(StringBuilder sb, string tableName, string indexName)
+		=> sb.Append($"DROP INDEX {QuoteIdentifier(indexName)}");
+
+	/// <inheritdoc />
+	public abstract void AppendCreateTable(StringBuilder sb, string tableName, string columnDefs);
+
+	/// <inheritdoc />
+	public abstract void AppendDropTable(StringBuilder sb, string tableName);
+
+	/// <inheritdoc />
+	public abstract void AppendPagination(StringBuilder sb, long? skip, long? take, bool hasOrderBy);
+
+	/// <inheritdoc />
+	public abstract void AppendUpsert(StringBuilder sb, string tableName, string[] allColumns, string[] keyColumns);
+
+	/// <inheritdoc />
+	public virtual void AppendInsertReturningClause(StringBuilder sb, string idColumn)
+	{
+		// Default: no RETURNING. SqlServer/SQLite read identity through a
+		// separate scope_identity()/last_insert_rowid() select.
+	}
+
+	/// <inheritdoc />
+	public virtual bool SupportsInsertReturning => false;
+
+	/// <inheritdoc />
+	public virtual string GetIdentitySelect(string idCol) => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string FormatSkip(string skip) => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string FormatTake(string take) => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string Now() => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string UtcNow() => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string SysNow() => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string SysUtcNow() => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string NewId() => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual string GetColumnDefinition(Type clrType, bool isNullable, int maxLength = 0, int precision = 0, int scale = 0)
+		=> $"{GetColumnTypeName(clrType, maxLength, precision, scale)} {(isNullable ? "NULL" : "NOT NULL")}";
+
+	/// <inheritdoc />
+	public virtual string GetColumnTypeName(Type clrType, int maxLength, int precision, int scale)
+		=> GetSqlTypeName(clrType);
+
+	/// <inheritdoc />
+	public virtual int GetStoredMaxLength(Type clrType, int maxLength)
+		=> maxLength == int.MaxValue ? -1 : maxLength;
+
+	/// <summary>
+	/// A decimal type with the declared digits, <see cref="DefaultDecimalPrecision"/> standing in for an
+	/// undeclared precision.
+	/// </summary>
+	protected static string FormatDecimal(string typeName, int precision, int scale)
+		=> $"{typeName}({(precision > 0 ? precision : DefaultDecimalPrecision)},{scale})";
+
+	/// <inheritdoc />
+	public virtual void AppendAddColumn(StringBuilder sb, string tableName, string columnName, string columnDef)
+	{
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} ADD {QuoteIdentifier(columnName)} {columnDef}");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendAlterColumn(StringBuilder sb, string tableName, string columnName, Type clrType, bool isNullable, int maxLength, int precision, int scale, DbColumnInfo live)
+	{
+		var colDef = GetColumnDefinition(clrType, isNullable, maxLength, precision, scale);
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} ALTER COLUMN {QuoteIdentifier(columnName)} {colDef}");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendAlterNullability(StringBuilder sb, string tableName, string columnName, bool isNullable, DbColumnInfo live)
+		=> throw new NotSupportedException($"{GetType().Name} cannot change the nullability of {tableName}.{columnName} on its own.");
+
+	/// <inheritdoc />
+	public virtual void AppendDropColumn(StringBuilder sb, string tableName, string columnName)
+	{
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} DROP COLUMN {QuoteIdentifier(columnName)}");
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendUpdateWhereNull(StringBuilder sb, string tableName, string columnName, string defaultLiteral)
+	{
+		sb.Append($"UPDATE {QuoteIdentifier(tableName)} SET {QuoteIdentifier(columnName)} = {defaultLiteral} WHERE {QuoteIdentifier(columnName)} IS NULL;");
+	}
+
+	/// <inheritdoc />
+	public virtual string NormalizeDbType(string dbTypeName) => dbTypeName.Trim().ToUpperInvariant();
+
+	/// <inheritdoc />
+	public virtual void AppendUpdateBy(StringBuilder sb, string tableName, string[] setColumns, string[] whereColumns)
+	{
+		if (whereColumns.Length == 0)
+			throw new InvalidOperationException($"Cannot generate UPDATE for '{tableName}': no key columns specified for WHERE clause.");
+
+		sb.AppendLine($"update {QuoteIdentifier(tableName)}");
+		sb.AppendLine("set");
+
+		for (var i = 0; i < setColumns.Length; i++)
+		{
+			var comma = i < setColumns.Length - 1 ? "," : "";
+			sb.AppendLine($"\t{QuoteIdentifier(setColumns[i])} = {ParameterPrefix}{setColumns[i]}{comma}");
+		}
+
+		sb.AppendLine("where");
+		for (var i = 0; i < whereColumns.Length; i++)
+		{
+			if (i > 0)
+				sb.Append(" and ");
+			sb.Append($"{QuoteIdentifier(whereColumns[i])} = {ParameterPrefix}{whereColumns[i]}");
+		}
+	}
+
+	/// <inheritdoc />
+	public virtual void AppendDeleteBy(StringBuilder sb, string tableName, string[] whereColumns)
+	{
+		if (whereColumns.Length == 0)
+			throw new InvalidOperationException($"Cannot generate DELETE for '{tableName}': no key columns specified for WHERE clause.");
+
+		sb.AppendLine("delete");
+		sb.Append($"from {QuoteIdentifier(tableName)}");
+		sb.AppendLine();
+		sb.AppendLine("where");
+		for (var i = 0; i < whereColumns.Length; i++)
+		{
+			if (i > 0)
+				sb.Append(" and ");
+			sb.Append($"{QuoteIdentifier(whereColumns[i])} = {ParameterPrefix}{whereColumns[i]}");
+		}
+	}
+
+	/// <inheritdoc />
+	public virtual string GetDefaultLiteral(Type clrType)
+	{
+		clrType = clrType.IsNullable() ? clrType.GetUnderlyingType() : clrType;
+
+		if (clrType == typeof(string))
+			return UnicodePrefix + "''";
+		if (clrType == typeof(bool))
+			return FalseLiteral;
+		if (clrType == typeof(DateTime) || clrType == typeof(DateTimeOffset))
+			return "'0001-01-01T00:00:00'";
+		if (clrType == typeof(TimeSpan))
+			return "0";
+		// A DATE or TIME column rejects an empty string, so the fallback below would make
+		// the generated migration unrunnable rather than merely oddly defaulted.
+		if (clrType == typeof(DateOnly))
+			return "'0001-01-01'";
+		if (clrType == typeof(TimeOnly))
+			return "'00:00:00'";
+		if (clrType == typeof(Guid))
+			return "'00000000-0000-0000-0000-000000000000'";
+		if (clrType == typeof(byte[]))
+			return EmptyBinaryLiteral;
+		if (clrType.IsNumeric())
+			return "0";
+
+		return UnicodePrefix + "''";
+	}
+
+	/// <inheritdoc />
+	public virtual Task<IReadOnlyList<DbColumnInfo>> ReadDbSchemaAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+		=> throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual Task<IReadOnlyList<DbForeignKeyInfo>> ReadDbForeignKeysAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+		=> throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual Task<IReadOnlyList<DbIndexInfo>> ReadDbIndexesAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+		=> throw new NotSupportedException();
+
+	/// <inheritdoc />
+	/// <remarks>
+	/// A database without the concept has nothing to report, and an empty list reads as "everything is
+	/// unpacked" - which is what an entity declaring no compression expects.
+	/// </remarks>
+	public virtual Task<IReadOnlyList<DbTableCompressionInfo>> ReadDbCompressionsAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+		=> ((IReadOnlyList<DbTableCompressionInfo>)[]).FromResult();
+
+	/// <inheritdoc />
+	public virtual void AppendSetCompression(StringBuilder builder, string tableName, DataCompressions compression)
+		=> throw new NotSupportedException();
+}

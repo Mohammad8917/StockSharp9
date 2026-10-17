@@ -1,0 +1,11 @@
+# 真の値幅
+
+**真の値幅 (TR)** は、現在の市場ボラティリティを示し、高値、安値、終値の変動範囲を判定します。
+
+このインジケーターを使用するには、[TrueRange](xref:StockSharp.Algo.Indicators.TrueRange) クラスを使用する必要があります。
+
+![真の値幅のチャート](../../../../images/indicatortruerange.png)
+
+## 推奨コンテンツ
+
+[UO](uo.md)

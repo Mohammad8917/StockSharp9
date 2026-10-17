@@ -1,0 +1,221 @@
+namespace StockSharp.Bmll;
+
+/// <summary>The message adapter for BMLL historical market data APIs.</summary>
+[MediaIcon(Media.MediaNames.bmll)]
+[Doc("topics/api/connectors/stock_market/bmll.html")]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.BmllKey,
+	Description = LocalizedStrings.MarketDataConnectorKey,
+	GroupName = LocalizedStrings.MarketDataKey)]
+[MessageAdapterCategory(MessageAdapterCategories.US | MessageAdapterCategories.Europe |
+	MessageAdapterCategories.Asia | MessageAdapterCategories.Paid |
+	MessageAdapterCategories.History | MessageAdapterCategories.Stock |
+	MessageAdapterCategories.Futures | MessageAdapterCategories.Options |
+	MessageAdapterCategories.Ticks | MessageAdapterCategories.MarketDepth |
+	MessageAdapterCategories.OrderLog)]
+public partial class BmllMessageAdapter : MessageAdapter, ITokenAdapter,
+	ILoginPasswordAdapter, IAddressAdapter<Uri>
+{
+	/// <summary>Authentication scheme.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AuthorizationKey,
+		Description = LocalizedStrings.AuthorizationKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public BmllAuthenticationModes AuthenticationMode { get; set; }
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.LoginKey,
+		Description = LocalizedStrings.LoginKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 1)]
+	[BasicSetting]
+	public string Login { get; set; }
+
+	/// <summary>Path to the PEM-encoded RSA private key registered with BMLL.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PrivateKeyPathKey,
+		Description = LocalizedStrings.PathToThePemEncodedRsaPrivateKeyRegisteredWithBmllDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 2)]
+	[BasicSetting]
+	public string PrivateKeyPath { get; set; }
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PrivateKeyPassphraseKey,
+		Description = LocalizedStrings.OptionalPassphraseProtectingTheBmllPrivateKeyDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 3)]
+	[BasicSetting]
+	public SecureString Password { get; set; }
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TokenKey,
+		Description = LocalizedStrings.TokenKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 4)]
+	[BasicSetting]
+	public SecureString Token { get; set; }
+
+	/// <summary>Optional BMLL API key accompanying the bearer token.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ApiKeyKey,
+		Description = LocalizedStrings.OptionalBmllXApiKeyAccompanyingTheBearerTokenDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 5)]
+	[BasicSetting]
+	public SecureString ApiKey { get; set; }
+
+	/// <summary>BMLL data API base address.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AddressKey,
+		Description = LocalizedStrings.ServerAddressKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 6)]
+	[BasicSetting]
+	public Uri Address { get; set; } = new("https://api.data.bmlltech.com/");
+
+	/// <summary>BMLL authentication API base address.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AuthenticationAddressKey,
+		Description = LocalizedStrings.BmllAuthenticationApiBaseAddressDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 7)]
+	[BasicSetting]
+	public Uri AuthenticationAddress { get; set; } =
+		new("https://auth.data.bmlltech.com/");
+
+	/// <summary>Dataset used for tick subscriptions.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TradesDatasetKey,
+		Description = LocalizedStrings.EntitledBmllDatasetUsedForTickSubscriptionsDescKey,
+		GroupName = LocalizedStrings.DatasetsKey,
+		Order = 8)]
+	[BasicSetting]
+	public string TradesDataset { get; set; } = "trades";
+
+	/// <summary>Dataset used for order-log and market-depth subscriptions.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.Level3DatasetKey,
+		Description = LocalizedStrings.EntitledBmllLevel3DatasetUsedForOrderLogAndDepthDescKey,
+		GroupName = LocalizedStrings.DatasetsKey,
+		Order = 9)]
+	[BasicSetting]
+	public string Level3Dataset { get; set; } = "l3";
+
+	/// <summary>Interval between asynchronous query status polls.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.QueryPollingIntervalKey,
+		Description = LocalizedStrings.IntervalBetweenAsynchronousQueryStatusPollsDescKey,
+		GroupName = LocalizedStrings.QueriesKey,
+		Order = 10)]
+	public TimeSpan QueryPollingInterval { get; set; } = TimeSpan.FromSeconds(1);
+
+	/// <summary>Maximum time to wait for one asynchronous query.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.QueryTimeoutKey,
+		Description = LocalizedStrings.MaximumTimeToWaitForOneAsynchronousQueryDescKey,
+		GroupName = LocalizedStrings.QueriesKey,
+		Order = 11)]
+	public TimeSpan QueryTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
+	/// <summary>Maximum records emitted by one subscription.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.RecordLimitKey,
+		Description = LocalizedStrings.MaximumRecordsEmittedByOneSubscriptionDescKey,
+		GroupName = LocalizedStrings.LimitsKey,
+		Order = 12)]
+	public int MaxRecords { get; set; } = 1000000;
+
+	/// <summary>Maximum price levels emitted in one reconstructed depth snapshot.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DepthLimitKey,
+		Description = LocalizedStrings.MaximumPriceLevelsEmittedInOneReconstructedDepthSnapshotDescKey,
+		GroupName = LocalizedStrings.LimitsKey,
+		Order = 13)]
+	public int MaxDepth { get; set; } = 50;
+
+	/// <summary>Number of UTC dates requested when history has no explicit start.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DefaultHistoryDaysKey,
+		Description = LocalizedStrings.NumberOfUtcDatesRequestedWhenHistoryHasNoExplicitStartDescKey,
+		GroupName = LocalizedStrings.HistoryKey,
+		Order = 14)]
+	public int DefaultHistoryDays { get; set; } = 1;
+
+	/// <summary>Emit only BMLL trades marked printable.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PrintableTradesOnlyKey,
+		Description = LocalizedStrings.EmitOnlyBmllTradesMarkedPrintableToAvoidDuplicateReportsDescKey,
+		GroupName = LocalizedStrings.TradesKey,
+		Order = 15)]
+	public bool IsPrintableOnly { get; set; } = true;
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+		storage
+			.Set(nameof(AuthenticationMode), AuthenticationMode)
+			.Set(nameof(Login), Login)
+			.Set(nameof(PrivateKeyPath), PrivateKeyPath)
+			.Set(nameof(Password), Password)
+			.Set(nameof(Token), Token)
+			.Set(nameof(ApiKey), ApiKey)
+			.Set(nameof(Address), Address)
+			.Set(nameof(AuthenticationAddress), AuthenticationAddress)
+			.Set(nameof(TradesDataset), TradesDataset)
+			.Set(nameof(Level3Dataset), Level3Dataset)
+			.Set(nameof(QueryPollingInterval), QueryPollingInterval)
+			.Set(nameof(QueryTimeout), QueryTimeout)
+			.Set(nameof(MaxRecords), MaxRecords)
+			.Set(nameof(MaxDepth), MaxDepth)
+			.Set(nameof(DefaultHistoryDays), DefaultHistoryDays)
+			.Set(nameof(IsPrintableOnly), IsPrintableOnly);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+		AuthenticationMode = storage.GetValue(nameof(AuthenticationMode), AuthenticationMode);
+		Login = storage.GetValue<string>(nameof(Login));
+		PrivateKeyPath = storage.GetValue<string>(nameof(PrivateKeyPath));
+		Password = storage.GetValue<SecureString>(nameof(Password));
+		Token = storage.GetValue<SecureString>(nameof(Token));
+		ApiKey = storage.GetValue<SecureString>(nameof(ApiKey));
+		Address = storage.GetValue(nameof(Address), Address);
+		AuthenticationAddress = storage.GetValue(nameof(AuthenticationAddress),
+			AuthenticationAddress);
+		TradesDataset = storage.GetValue(nameof(TradesDataset), TradesDataset);
+		Level3Dataset = storage.GetValue(nameof(Level3Dataset), Level3Dataset);
+		QueryPollingInterval = storage.GetValue(nameof(QueryPollingInterval),
+			QueryPollingInterval);
+		QueryTimeout = storage.GetValue(nameof(QueryTimeout), QueryTimeout);
+		MaxRecords = storage.GetValue(nameof(MaxRecords), MaxRecords);
+		MaxDepth = storage.GetValue(nameof(MaxDepth), MaxDepth);
+		DefaultHistoryDays = storage.GetValue(nameof(DefaultHistoryDays), DefaultHistoryDays);
+		IsPrintableOnly = storage.GetValue(nameof(IsPrintableOnly), IsPrintableOnly);
+	}
+}

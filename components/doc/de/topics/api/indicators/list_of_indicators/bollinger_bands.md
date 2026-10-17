@@ -1,0 +1,25 @@
+# Bollinger-Bänder
+
+**Bollinger-Bänder** sind ein oszillierender Indikator zur Messung der Marktvolatilität. Er ermöglicht die Einschätzung, ob der Preis im Vergleich zum gleitenden Durchschnitt hoch oder niedrig ist. Das mittlere Band entspricht dem einfachen gleitenden Durchschnitt des Preises. Die oberen und unteren Bänder sind Niveaus, auf denen der Preis relativ zum gleitenden Durchschnitt als hoch oder niedrig betrachtet werden kann.
+
+Zur Verwendung des Indikators sollte die Klasse [BollingerBands](xref:StockSharp.Algo.Indicators.BollingerBands) verwendet werden.
+##### Berechnung
+
+Zur Berechnung der Bollinger-Bänder werden die folgenden Parameter mit entsprechenden Einstellungen verwendet:
+- Typ der Standardabweichung - normalerweise double;
+- Periode des gleitenden Durchschnitts - nach Ermessen des Traders.
+
+Der Indikator besteht somit aus drei Linien: mittlere, obere und untere Linie, jeweils mit eigener Formel:
+
+Mittlere Linie (ML) = gleitender Durchschnitt (SMA (Close, N))
+Oberes Band = ML + (D x Standardabweichung)
+Unteres Band = ML - (D x Standardabweichung), wobei
+
+D - die in den Einstellungen festgelegte Kanalbreite, Standardabweichung (StdDev) - Standardabweichung, berechnet mit der Formel: SQRT(Sum(Close, n))^2, n)/n), wobei
+Sum - Summe über n Perioden, n - Berechnungsperiode, SQRT - Quadratwurzel, Close - Schlusskurs.
+
+![Bollinger-Bänder Diagramm](../../../../images/indicatorbollingerbands.png)
+
+## Siehe auch
+
+[CHV](chv.md)

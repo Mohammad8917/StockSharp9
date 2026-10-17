@@ -1,0 +1,419 @@
+﻿//////////////////////////////////////////////////////////////////////////////
+// This source code and all associated files and resources are copyrighted by
+// the author(s). This source code and all associated files and resources may
+// be used as long as they are used according to the terms and conditions set
+// forth in The Code Project Open License (CPOL).
+//
+// Copyright (c) 2012 Jonathan Wood
+// http://www.blackbeltcoder.com
+//
+
+namespace Ecng.IO;
+
+using System.Diagnostics;
+
+/// <summary>
+/// Determines how empty lines are interpreted when reading CSV files.
+/// These values do not affect empty lines that occur within quoted fields
+/// or empty lines that appear at the end of the input file.
+/// </summary>
+public enum EmptyLineBehavior
+{
+	/// <summary>
+	/// Empty lines are interpreted as a line with zero columns.
+	/// </summary>
+	NoColumns,
+	/// <summary>
+	/// Empty lines are interpreted as a line with a single empty column.
+	/// </summary>
+	EmptyColumn,
+	/// <summary>
+	/// Empty lines are skipped over as though they did not exist.
+	/// </summary>
+	Ignore,
+	/// <summary>
+	/// An empty line is interpreted as the end of the input file.
+	/// </summary>
+	EndOfFile,
+}
+
+/// <summary>
+/// Common base class for CSV reader and writer classes.
+/// </summary>
+public abstract class CsvFileCommon : Disposable
+{
+	/// <summary>
+	/// These are special characters in CSV files. If a column contains any
+	/// of these characters, the entire column is wrapped in double quotes.
+	/// </summary>
+	protected char[] SpecialChars = [';', '"', '\r', '\n'];
+
+	// Indexes into SpecialChars for characters with specific meaning
+	private const int _delimiterIndex = 0;
+	private const int _quoteIndex = 1;
+
+	/// <summary>
+	/// Gets/sets the character used for column delimiters.
+	/// </summary>
+	public char Delimiter
+	{
+		get => SpecialChars[_delimiterIndex];
+		set => SpecialChars[_delimiterIndex] = value;
+	}
+
+	/// <summary>
+	/// Gets/sets the character used for column quotes.
+	/// </summary>
+	public char Quote
+	{
+		get => SpecialChars[_quoteIndex];
+		set => SpecialChars[_quoteIndex] = value;
+	}
+
+	/// <summary>
+	/// Gets the underlying stream.
+	/// </summary>
+	public abstract Stream BaseStream { get; }
+}
+
+/// <summary>
+/// Class for reading from comma-separated-value (CSV) files
+/// </summary>
+public class CsvFileReader : CsvFileCommon, IDisposable
+{
+	// Private members
+	private readonly TextReader _reader;
+	private int _currPos;
+	private readonly EmptyLineBehavior _emptyLineBehavior;
+	private readonly string _lineSeparator;
+
+	/// <summary>
+	/// The current line being read.
+	/// </summary>
+	public string CurrLine { get; private set; }
+
+	/// <inheritdoc />
+	public override Stream BaseStream => (_reader as StreamReader)?.BaseStream;
+
+	/// <summary>
+	/// Initializes a new instance of the CsvFileReader class for the
+	/// specified stream.
+	/// </summary>
+	/// <param name="stream">The stream to read from</param>
+	/// <param name="lineSeparator">The line separator to use.</param>
+	/// <param name="emptyLineBehavior">Determines how empty lines are handled</param>
+	public CsvFileReader(Stream stream, string lineSeparator,
+		EmptyLineBehavior emptyLineBehavior = EmptyLineBehavior.NoColumns)
+		: this(new StreamReader(stream), lineSeparator, emptyLineBehavior)
+	{
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the CsvFileReader class for the
+	/// specified file path.
+	/// </summary>
+	/// <param name="path">The name of the CSV file to read from</param>
+	/// <param name="lineSeparator">The line separator to use.</param>
+	/// <param name="emptyLineBehavior">Determines how empty lines are handled</param>
+	public CsvFileReader(string path, string lineSeparator,
+		EmptyLineBehavior emptyLineBehavior = EmptyLineBehavior.NoColumns)
+		: this(new StreamReader(path), lineSeparator, emptyLineBehavior)
+	{
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the CsvFileReader class for the
+	/// specified file path.
+	/// </summary>
+	/// <param name="reader">The file reader.</param>
+	/// <param name="lineSeparator">The line separator to use.</param>
+	/// <param name="emptyLineBehavior">Determines how empty lines are handled</param>
+	public CsvFileReader(TextReader reader, string lineSeparator,
+		EmptyLineBehavior emptyLineBehavior = EmptyLineBehavior.NoColumns)
+	{
+		if (lineSeparator.IsEmpty())
+			throw new ArgumentNullException(nameof(lineSeparator));
+
+		_reader = reader;
+		_lineSeparator = lineSeparator;
+		_emptyLineBehavior = emptyLineBehavior;
+	}
+
+	/// <summary>
+	/// Asynchronously reads a row of columns from the current CSV file. Returns false if no
+	/// more data could be read because the end of the file was reached.
+	/// </summary>
+	/// <param name="columns">Collection to hold the columns read</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public async ValueTask<bool> ReadRowAsync(List<string> columns, CancellationToken cancellationToken = default)
+	{
+		if (columns is null)
+			throw new ArgumentNullException(nameof(columns));
+
+	ReadNextLineAsync:
+		CurrLine = await _reader.ReadLineAsync(cancellationToken).NoWait();
+		_currPos = 0;
+
+		if (CurrLine is null)
+			return false;
+
+		if (CurrLine.Length == 0)
+		{
+			switch (_emptyLineBehavior)
+			{
+				case EmptyLineBehavior.NoColumns:
+					columns.Clear();
+					return true;
+				case EmptyLineBehavior.Ignore:
+					goto ReadNextLineAsync;
+				case EmptyLineBehavior.EndOfFile:
+					return false;
+			}
+		}
+
+		string column;
+		var numColumns = 0;
+
+		while (true)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			
+			if (_currPos < CurrLine.Length && CurrLine[_currPos] == Quote)
+				column = await ReadQuotedColumnAsync(cancellationToken).NoWait();
+			else
+				column = ReadUnquotedColumn();
+			
+			if (numColumns < columns.Count)
+				columns[numColumns] = column;
+			else
+				columns.Add(column);
+
+			numColumns++;
+
+			if (CurrLine is null || _currPos == CurrLine.Length)
+				break;
+
+			Debug.Assert(CurrLine[_currPos] == Delimiter);
+			_currPos++;
+		}
+
+		if (numColumns < columns.Count)
+			columns.RemoveRange(numColumns, columns.Count - numColumns);
+
+		return true;
+	}
+
+	private async Task<string> ReadQuotedColumnAsync(CancellationToken cancellationToken)
+	{
+		Debug.Assert(_currPos < CurrLine.Length && CurrLine[_currPos] == Quote);
+		_currPos++;
+
+		StringBuilder builder = new();
+
+		while (true)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+
+			while (_currPos == CurrLine.Length)
+			{
+				CurrLine = await _reader.ReadLineAsync(cancellationToken).NoWait();
+				
+				_currPos = 0;
+
+				if (CurrLine is null)
+					return builder.ToString();
+
+				builder.Append(_lineSeparator);
+			}
+
+			if (CurrLine[_currPos] == Quote)
+			{
+				var nextPos = _currPos + 1;
+
+				if (nextPos < CurrLine.Length && CurrLine[nextPos] == Quote)
+					_currPos++;
+				else
+					break;
+			}
+
+			builder.Append(CurrLine[_currPos++]);
+		}
+
+		if (_currPos < CurrLine.Length)
+		{
+			Debug.Assert(CurrLine[_currPos] == Quote);
+
+			_currPos++;
+			builder.Append(ReadUnquotedColumn());
+		}
+
+		return builder.ToString();
+	}
+
+	private string ReadUnquotedColumn()
+	{
+		var startPos = _currPos;
+
+		_currPos = CurrLine.IndexOf(Delimiter, _currPos);
+
+		if (_currPos == -1)
+			_currPos = CurrLine.Length;
+
+		if (_currPos > startPos)
+			return CurrLine.Substring(startPos, _currPos - startPos);
+
+		return string.Empty;
+	}
+
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		_reader.Dispose();
+		base.DisposeManaged();
+	}
+}
+
+/// <summary>
+/// Class for writing to comma-separated-value (CSV) files.
+/// </summary>
+public class CsvFileWriter : CsvFileCommon, IDisposable, IAsyncCommitable
+{
+	private readonly StreamWriter _writer;
+
+	private string _oneQuote;
+	private string _twoQuotes;
+	private string _quotedFormat;
+
+	/// <summary>
+	/// Initializes a new instance of the CsvFileWriter class for the
+	/// specified stream.
+	/// </summary>
+	/// <param name="stream">The stream to write to</param>
+	/// <param name="encoding">The text encoding.</param>
+	public CsvFileWriter(Stream stream, Encoding encoding = null)
+		: this(encoding != null ? new StreamWriter(stream, encoding) : new(stream))
+	{
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the CsvFileWriter class for the
+	/// specified file path.
+	/// </summary>
+	/// <param name="path">The name of the CSV file to write to</param>
+	public CsvFileWriter(string path)
+		: this(new StreamWriter(path))
+	{
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the CsvFileWriter class for the
+	/// specified writer.
+	/// </summary>
+	/// <param name="writer"><see cref="StreamWriter"/></param>
+	public CsvFileWriter(StreamWriter writer)
+	{
+		_writer = writer ?? throw new ArgumentNullException(nameof(writer));
+	}
+
+	/// <summary>
+	/// Gets or sets the character used to separate lines in the CSV file.
+	/// </summary>
+	public string LineSeparator
+	{
+		get => _writer.NewLine;
+		set => _writer.NewLine = value;
+	}
+
+	/// <inheritdoc />
+	public override Stream BaseStream => _writer.BaseStream;
+
+	/// <summary>
+	/// Asynchronously writes a row of columns to the current CSV file.
+	/// </summary>
+	/// <param name="columns">The list of columns to write</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	public async ValueTask WriteRowAsync(IEnumerable<string> columns, CancellationToken cancellationToken = default)
+	{
+		if (columns is null)
+			throw new ArgumentNullException(nameof(columns));
+
+		var i = 0;
+
+		foreach (var c in columns)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+
+			if (i > 0)
+			{
+				await _writer.WriteAsync(Delimiter.ToString().AsMemory(), cancellationToken).NoWait();
+			}
+
+			await _writer.WriteAsync(Encode(c ?? string.Empty).AsMemory(), cancellationToken).NoWait();
+
+			i++;
+		}
+
+		await _writer.WriteLineAsync().NoWait();
+	}
+
+	/// <summary>
+	/// Asynchronously flushes the writer.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task FlushAsync(CancellationToken cancellationToken = default)
+	{
+		return _writer.FlushAsync(cancellationToken);
+	}
+
+	/// <summary>
+	/// Encodes a column's value for output.
+	/// </summary>
+	/// <param name="column"></param>
+	/// <returns></returns>
+	public string Encode(string column)
+	{
+		// Ensure we're using current quote character
+		if (_oneQuote is null || _oneQuote[0] != Quote)
+		{
+			_oneQuote = $"{Quote}";
+			_twoQuotes = $"{Quote}{Quote}";
+			_quotedFormat = $"{Quote}{{0}}{Quote}";
+		}
+
+		// Write this column
+		if (column.IndexOfAny(SpecialChars) != -1)
+			column = _quotedFormat.Put(column.Replace(_oneQuote, _twoQuotes));
+
+		return column;
+	}
+
+	/// <summary>
+	/// Truncates the underlying stream used by the <see cref="CsvFileWriter"/> by clearing its content.
+	/// </summary>
+	public void Truncate() => _writer.Truncate();
+
+	/// <summary>
+	/// Asynchronously commits the transaction by flushing data and propagating commit to the underlying stream if it supports transactions.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public async ValueTask CommitAsync(CancellationToken cancellationToken = default)
+	{
+		await _writer.FlushAsync(cancellationToken).NoWait();
+
+		if (_writer.BaseStream is IAsyncCommitable tfs)
+			await tfs.CommitAsync(cancellationToken).NoWait();
+		else if (_writer.BaseStream is ICommitable syncTfs)
+			syncTfs.Commit();
+	}
+
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		_writer.Dispose();
+		base.DisposeManaged();
+	}
+}

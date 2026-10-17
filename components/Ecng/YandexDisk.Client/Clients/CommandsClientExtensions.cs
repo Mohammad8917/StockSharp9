@@ -1,0 +1,152 @@
+﻿using System;
+
+namespace YandexDisk.Client.Clients
+{
+    /// <summary>
+    /// Extended file commands
+    /// </summary>
+    [PublicAPI]
+    public static class CommandsClientExtensions
+    {
+        /// <summary>
+        /// Default pull period for waiting operation.
+        /// </summary>
+        public static readonly TimeSpan DefaultPullPeriod = TimeSpan.FromSeconds(3);
+
+        private static async Task WaitOperationAsync([NotNull] this ICommandsClient client, [NotNull] Link operationLink, CancellationToken cancellationToken, TimeSpan? pullPeriod)
+        {
+            if (pullPeriod == null)
+            {
+                pullPeriod = DefaultPullPeriod;
+            }
+
+            Operation operation;
+            do
+            {
+                await Task.Delay(pullPeriod.Value, cancellationToken).ConfigureAwait(false);
+                operation = await client.GetOperationStatus(operationLink, cancellationToken).ConfigureAwait(false);
+            } while (operation.Status == OperationStatus.InProgress);
+
+            // The loop only exits once the server-side operation has settled. A Failure status was
+            // previously discarded, so a failed copy/move/delete/trash operation was reported to the
+            // caller as success; surface it as an error instead.
+            if (operation.Status == OperationStatus.Failure)
+                throw new InvalidOperationException("Yandex.Disk operation failed.");
+        }
+
+        /// <summary>
+        /// Copy file or folder on Disk from one path to another and wait until operation is done
+        /// </summary>
+        public static async Task CopyAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] CopyFileRequest request, CancellationToken cancellationToken = default(CancellationToken), TimeSpan? pullPeriod = null)
+        {
+            var link = await client.CopyAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (link.HttpStatusCode == HttpStatusCode.Accepted)
+            {
+                await client.WaitOperationAsync(link, cancellationToken, pullPeriod).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Move file or folder on Disk from one path to another and wait until operation is done
+        /// </summary>
+        public static async Task MoveAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] MoveFileRequest request, CancellationToken cancellationToken = default(CancellationToken), TimeSpan? pullPeriod = null)
+        {
+            var link = await client.MoveAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (link.HttpStatusCode == HttpStatusCode.Accepted)
+            {
+                await client.WaitOperationAsync(link, cancellationToken, pullPeriod).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Delete file or folder on Disk and wait until operation is done
+        /// </summary>
+        public static async Task DeleteAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] DeleteFileRequest request, CancellationToken cancellationToken = default(CancellationToken), TimeSpan? pullPeriod = null)
+        {
+            var link = await client.DeleteAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (link.HttpStatusCode == HttpStatusCode.Accepted)
+            {
+                await client.WaitOperationAsync(link, cancellationToken, pullPeriod).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Empty trash
+        /// </summary>
+        public static async Task EmptyTrashAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] string path, CancellationToken cancellationToken = default(CancellationToken), TimeSpan? pullPeriod = null)
+        {
+            var link = await client.EmptyTrashAsync(path, cancellationToken).ConfigureAwait(false);
+
+            if (link.HttpStatusCode == HttpStatusCode.Accepted)
+            {
+                await client.WaitOperationAsync(link, cancellationToken, pullPeriod).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Restore files from trash
+        /// </summary>
+        public static async Task RestoreFromTrashAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] RestoreFromTrashRequest request, CancellationToken cancellationToken = default(CancellationToken), TimeSpan? pullPeriod = null)
+        {
+            var link = await client.RestoreFromTrashAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (link.HttpStatusCode == HttpStatusCode.Accepted)
+            {
+                await client.WaitOperationAsync(link, cancellationToken, pullPeriod).ConfigureAwait(false);
+            }
+        }
+
+
+        #region Obsoleted
+        /// <summary>
+        /// Copy file or folder on Disk from one path to another and wait until operation is done
+        /// </summary>
+        [Obsolete("Method is obsolete. Please use CopyAndWaitAsync(ICommandsClient, CopyFileRequest, CancellationToken, TimeSpan) instead.")]
+        public static Task CopyAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] CopyFileRequest request, CancellationToken cancellationToken, int pullPeriod)
+        {
+            return CopyAndWaitAsync(client, request, cancellationToken, TimeSpan.FromSeconds(pullPeriod));
+        }
+
+
+        /// <summary>
+        /// Move file or folder on Disk from one path to another and wait until operation is done
+        /// </summary>
+        [Obsolete("Method is obsolete. Please use MoveAndWaitAsync(ICommandsClient, MoveFileRequest, CancellationToken, TimeSpan) instead.")]
+        public static Task MoveAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] MoveFileRequest request, CancellationToken cancellationToken, int pullPeriod)
+        {
+            return MoveAndWaitAsync(client, request, cancellationToken, TimeSpan.FromSeconds(pullPeriod));
+        }
+
+        /// <summary>
+        /// Delete file or folder on Disk and wait until operation is done
+        /// </summary>
+        [Obsolete("Method is obsolete. Please use DeleteAndWaitAsync(ICommandsClient, DeleteFileRequest, CancellationToken, TimeSpan) instead.")]
+        public static Task DeleteAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] DeleteFileRequest request, CancellationToken cancellationToken, int pullPeriod)
+        {
+            return DeleteAndWaitAsync(client, request, cancellationToken, TimeSpan.FromSeconds(pullPeriod));
+        }
+
+        /// <summary>
+        /// Empty trash
+        /// </summary>
+        [Obsolete("Method is obsolete. Please use EmptyTrashAndWaitAsync(ICommandsClient, string, CancellationToken, TimeSpan) instead.")]
+        public static Task EmptyTrashAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] string path, CancellationToken cancellationToken, int pullPeriod)
+        {
+            return EmptyTrashAndWaitAsync(client, path, cancellationToken, TimeSpan.FromSeconds(pullPeriod));
+        }
+
+        /// <summary>
+        /// Restore files from trash
+        /// </summary>
+        [Obsolete("Method is obsolete. Please use RestoreFromTrashAndWaitAsync(ICommandsClient, RestoreFromTrashRequest, CancellationToken, TimeSpan) instead.")]
+        public static Task RestoreFromTrashAndWaitAsync([NotNull] this ICommandsClient client, [NotNull] RestoreFromTrashRequest request, CancellationToken cancellationToken, int pullPeriod)
+        {
+            return RestoreFromTrashAndWaitAsync(client, request, cancellationToken, TimeSpan.FromSeconds(pullPeriod));
+        }
+
+        #endregion
+    }
+}

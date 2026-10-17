@@ -1,0 +1,58 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Condition="$(TargetFramework.StartsWith('net6'))">
+    <LangVersion>12.0</LangVersion>
+    <MsExtensionsVer>8.*</MsExtensionsVer>
+    <MsCodeAnalysisVer>4.12.0</MsCodeAnalysisVer>
+    <MsCodeAnalysisAnalyzersVer>3.3.4</MsCodeAnalysisAnalyzersVer>
+    <FSharpVer>43.9.300</FSharpVer>
+    <MsTestVer>3.11.1</MsTestVer>
+    <MsTestSdkVer>17.13.0</MsTestSdkVer>
+    <BclTimeProviderVer>10.*</BclTimeProviderVer>
+    <!-- net6.0 is past end-of-life and many transitive packages (10.x) no longer claim
+         net6.0 support. Silence the TFM-support warning for the net6 build only (not net10),
+         since net6 is kept intentionally. -->
+    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetFramework.StartsWith('netstandard')) OR $(TargetFramework.StartsWith('net10'))">
+    <LangVersion>latest</LangVersion>
+    <MsCodeAnalysisVer>5.*</MsCodeAnalysisVer>
+    <MsCodeAnalysisAnalyzersVer>5.*</MsCodeAnalysisAnalyzersVer>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetFramework.StartsWith('net10'))">
+    <MsExtensionsVer>10.*</MsExtensionsVer>
+    <FSharpVer>43.*</FSharpVer>
+    <MsTestVer>4.*</MsTestVer>
+    <MsTestSdkVer>18.*</MsTestSdkVer>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <EcngVer>1.0.*</EcngVer>
+    <MicrosoftAspNetWebApiClientVer>6.*</MicrosoftAspNetWebApiClientVer>
+
+    <SystemReflectionEmitLightweightVer>4.*</SystemReflectionEmitLightweightVer>
+    <SystemMemoryVer>4.*</SystemMemoryVer>
+    <NewtonJsonVer>13.*</NewtonJsonVer>
+    <RestSharpVer>112.*</RestSharpVer>
+    <NDdeVer>4.*</NDdeVer>
+    <NitoVer>5.*</NitoVer>
+    <MarkdigVer>1.*</MarkdigVer>
+    <CsWin32Ver>0.3.106</CsWin32Ver>
+    <WmiLightVer>7.2.0</WmiLightVer>
+    <AzureStorageBlobsVer>12.*</AzureStorageBlobsVer>
+    <AWSSDKVer>4.*</AWSSDKVer>
+    <IronPythonVer>3.*</IronPythonVer>
+    <NuGetApiVer>7.9.0</NuGetApiVer>
+    <MsSqlClientVer>7.*</MsSqlClientVer>
+    <!-- 11.0 preview: pulls SQLitePCLRaw.bundle_e_sqlite3 3.0.3 (SQLite >= 3.50.2)
+         transitively, clearing NU1903/CVE-2025-6965. The 10.* line still ships the
+         vulnerable native lib 2.1.11. Move back to a stable 11.* once it releases. -->
+    <MsDataSqliteVer>11.0.0-preview.5.26302.115</MsDataSqliteVer>
+    <OpenXmlVer>3.*</OpenXmlVer>
+    <SharpCompressVer>1.*</SharpCompressVer>
+    <NpgsqlVer>10.*</NpgsqlVer>
+    <SmartFormatVer>3.*</SmartFormatVer>
+    <StbImageSharpVer>2.30.16</StbImageSharpVer>
+  </PropertyGroup>
+</Project>

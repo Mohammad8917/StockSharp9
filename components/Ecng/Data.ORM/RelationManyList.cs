@@ -1,0 +1,837 @@
+﻿namespace Ecng.Serialization;
+
+using System.Data;
+
+using Nito.AsyncEx;
+
+/// <summary>
+/// Abstract base class for a many-relation list backed by <see cref="IStorage"/>.
+/// </summary>
+/// <typeparam name="TEntity">Entity type.</typeparam>
+/// <typeparam name="TId">Entity identifier type.</typeparam>
+/// <param name="storage">The underlying storage provider.</param>
+public abstract class RelationManyList<TEntity, TId>(IStorage storage) : IRelationManyList<TEntity>
+	where TEntity : IDbPersistable
+{
+	#region private class RelationManyListEnumerator
+
+	private sealed class RelationManyListEnumerator(RelationManyList<TEntity, TId> list, CancellationToken cancellationToken) : IAsyncEnumerator<TEntity>
+	{
+		private readonly RelationManyList<TEntity, TId> _list = list ?? throw new ArgumentNullException(nameof(list));
+		private readonly CancellationToken _cancellationToken = cancellationToken;
+		private long _startIndex;
+		private IEnumerator<TEntity> _range;
+
+		TEntity IAsyncEnumerator<TEntity>.Current
+			=> _range is null ? default : _range.Current;
+
+		ValueTask IAsyncDisposable.DisposeAsync()
+		{
+			_range?.Dispose();
+			return default;
+		}
+
+		async ValueTask<bool> IAsyncEnumerator<TEntity>.MoveNextAsync()
+		{
+			async ValueTask<bool> InitRange()
+			{
+				_range = (await _list.GetRangeAsync(_startIndex, _list.BufferSize, false, Meta.Identity?.Name, ListSortDirection.Ascending, _cancellationToken).NoWait()).GetEnumerator();
+				_startIndex += _list.BufferSize;
+
+				return _range.MoveNext();
+			}
+
+			if (_range is null)
+			{
+				if (!await InitRange())
+					return false;
+			}
+			else
+			{
+				if (!_range.MoveNext())
+				{
+					_range.Dispose();
+
+					if (!await InitRange())
+						return false;
+				}
+			}
+
+			return true;
+		}
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Gets or sets whether this list is read-only.
+	/// </summary>
+	public virtual bool IsReadOnly { get; protected set; }
+
+	private int? _count;
+
+	/// <summary>
+	/// Converts the list to an <see cref="IQueryable{T}"/>.
+	/// </summary>
+	public virtual IQueryable<TEntity> ToQueryable() => CreateQueryable();
+
+	/// <summary>
+	/// Hands the list over as a query, loading it first when it is one that is kept in memory.
+	/// </summary>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	/// <returns>A query over the held copy for a list kept in memory, over the storage for one that is not.</returns>
+	/// <remarks>
+	/// <see cref="ToQueryable"/> cannot wait, so before the table is loaded it hands over a reference to
+	/// storage, and a query composed with it keeps that reference for its whole life. Waiting removes the
+	/// choice: for a kept table what comes back is the held copy, always.
+	/// </remarks>
+	public virtual async ValueTask<IQueryable<TEntity>> ToQueryableAsync(CancellationToken cancellationToken)
+	{
+		if (BulkLoad)
+			await PreloadAsync(cancellationToken).NoWait();
+
+		return CreateQueryable();
+	}
+
+	/// <summary>
+	/// Creates an <see cref="IQueryable{T}"/> over the list data.
+	/// </summary>
+	protected virtual IQueryable<TEntity> CreateQueryable()
+	{
+		if (BulkLoad)
+		{
+			if (BulkInitialized())
+			{
+				var (sync, dict) = CachedEntitiesPair;
+
+				using var _ = sync.ReaderLock();
+				// Re-check under the lock: a concurrent ResetCache can clear the dictionary and
+				// reset the flag between the check above and this snapshot, which would otherwise
+				// yield an empty queryable for a populated table.
+				if (_bulkInitialized)
+					return dict.Values.ToArray().AsQueryable();
+			}
+		}
+
+		return new DefaultQueryable<TEntity>(new DefaultQueryProvider<TEntity>(this), null);
+	}
+
+	private static Schema _meta;
+
+	/// <summary>
+	/// Gets the schema metadata for <typeparamref name="TEntity"/>.
+	/// </summary>
+	public static Schema Meta => _meta ??= SchemaRegistry.Get(typeof(TEntity));
+
+	private class StringIdComparer : IEqualityComparer<object>
+	{
+		private readonly StringComparer _underlying = StringComparer.InvariantCultureIgnoreCase;
+
+		bool IEqualityComparer<object>.Equals(object x, object y) => _underlying.Equals(x, y);
+		int IEqualityComparer<object>.GetHashCode(object obj) => _underlying.GetHashCode(obj);
+	}
+
+	// Reference-type wrapper so a concurrent reader either sees a fully
+	// constructed pair or null — never a torn read. (A nullable struct
+	// `(AsyncReaderWriterLock, Dictionary<,>)?` here was producing
+	// transient NREs under parallel access because nullable-struct reads
+	// are not atomic for payloads larger than 8 bytes.)
+	private sealed class BulkCachePair(AsyncReaderWriterLock sync, Dictionary<TId, TEntity> dict)
+	{
+		public AsyncReaderWriterLock Sync { get; } = sync;
+		public Dictionary<TId, TEntity> Dict { get; } = dict;
+
+		public void Deconstruct(out AsyncReaderWriterLock sync, out Dictionary<TId, TEntity> dict)
+		{
+			sync = Sync;
+			dict = Dict;
+		}
+	}
+
+	private BulkCachePair _cachedEntitiesPair;
+	private readonly Lock _cachedEntitiesInitLock = new();
+
+	/// <summary>
+	/// Read-only view of the lazily-built bulk-load cache, keyed by entity
+	/// identity. Returns <see langword="null"/> when the cache has not been
+	/// initialised yet (e.g. before the first read on a <see cref="BulkLoad"/>
+	/// list). Useful for diagnostics — and lets tests assert on cache state
+	/// without reaching into private fields.
+	/// </summary>
+	public IReadOnlyDictionary<TId, TEntity> CachedEntities => Volatile.Read(ref _cachedEntitiesPair)?.Dict;
+
+	private BulkCachePair CachedEntitiesPair
+	{
+		get
+		{
+			var existing = Volatile.Read(ref _cachedEntitiesPair);
+			if (existing is not null)
+				return existing;
+
+			using (_cachedEntitiesInitLock.EnterScope())
+			{
+				existing = Volatile.Read(ref _cachedEntitiesPair);
+				if (existing is not null)
+					return existing;
+
+				var dict = Meta.Identity != null && typeof(TId) == typeof(string)
+					? new Dictionary<TId, TEntity>(new StringIdComparer().To<IEqualityComparer<TId>>())
+					: [];
+
+				var pair = new BulkCachePair(new AsyncReaderWriterLock(), dict);
+				Volatile.Write(ref _cachedEntitiesPair, pair);
+				return pair;
+			}
+		}
+	}
+
+	/// <summary>
+	/// Gets the underlying storage provider.
+	/// </summary>
+	public IStorage Storage { get; } = storage ?? throw new ArgumentNullException(nameof(storage));
+
+	/// <summary>
+	/// Gets or sets whether the whole list is kept in memory, filled on first access or by <see cref="PreloadAsync"/>.
+	/// </summary>
+	/// <remarks>
+	/// Filling it here, when the flag is set, would read the table while the list is still being built --
+	/// before a buffer size or a filter set next to it in the same initialiser has been applied. Whoever
+	/// builds the list knows when it is ready; that is when to preload it.
+	/// </remarks>
+	public bool BulkLoad { get; set; }
+
+	/// <summary>
+	/// Gets or sets whether to cache the entity count.
+	/// </summary>
+	public bool CacheCount { get; set; }
+
+	/// <summary>
+	/// Gets or sets the cache expiration timeout.
+	/// </summary>
+	public TimeSpan CacheTimeOut { get; set; } = TimeSpan.MaxValue;
+
+	private DateTime? _cacheExpire;
+	private bool _bulkInitialized;
+	private readonly Lock _bulkInitGate = new();
+	// Single-flight for the first-time bulk load: the table is paged in OUTSIDE any lock and only
+	// published into the dictionary under a short writer lock, so the writer lock is never held
+	// across the DB round-trips. The shared task de-duplicates concurrent initialisers.
+	private Task _bulkInitTask;
+
+	private bool BulkInitialized()
+	{
+		if (_bulkInitialized)
+		{
+			if (_cacheExpire < DateTime.UtcNow)
+				ResetCache();
+		}
+
+		return _bulkInitialized;
+	}
+
+	/// <summary>
+	/// Resets the in-memory cache, forcing data to be reloaded from storage.
+	/// </summary>
+	public virtual void ResetCache()
+	{
+		var (sync, dict) = CachedEntitiesPair;
+
+		using var _ = sync.WriterLock();
+
+		dict.Clear();
+		_bulkInitialized = false;
+		_cacheExpire = null;
+		_indexes.Clear();
+
+		using (_cachedEntitiesInitLock.EnterScope())
+			_count = null;
+	}
+
+	/// <summary>
+	/// Reads an entity by its identifier.
+	/// </summary>
+	public virtual ValueTask<TEntity> ReadById(TId id, CancellationToken cancellationToken)
+	{
+		if (id is null)
+			throw new ArgumentNullException(nameof(id));
+
+		var identity = Meta.Identity;
+
+		if (identity is null)
+			throw new InvalidOperationException($"Meta {Meta.Name} doesn't have identity.");
+
+		return Storage.GetByIdAsync<TId, TEntity>(id, cancellationToken);
+	}
+
+	#region Save
+
+	/// <summary>
+	/// Saves an entity by adding it if new, or updating it if it already exists.
+	/// </summary>
+	public async ValueTask<TEntity> SaveAsync(TEntity item, CancellationToken cancellationToken)
+	{
+		if (Meta.Identity is null)
+			throw new InvalidOperationException($"Meta {Meta.Name} doesn't have identity.");
+
+		return await IsSaved(item, cancellationToken).NoWait()
+			? await UpdateAsync(item, cancellationToken).NoWait()
+			: await AddAsync(item, cancellationToken).NoWait();
+	}
+
+	#endregion
+
+	#region Update
+
+	/// <summary>
+	/// Updates an existing entity in storage.
+	/// </summary>
+	public async ValueTask<TEntity> UpdateAsync(TEntity entity, CancellationToken cancellationToken)
+	{
+		if (IsReadOnly)
+			throw new ReadOnlyException();
+
+		entity = await OnUpdate(entity, cancellationToken).NoWait();
+
+		if (BulkLoad && BulkInitialized())
+		{
+			var id = GetCacheId(entity);
+
+			bool isNew;
+
+			var (sync, dict) = CachedEntitiesPair;
+
+			using (await sync.WriterLockAsync(cancellationToken).ConfigureAwait(false))
+			{
+				isNew = !dict.ContainsKey(id);
+				dict[id] = entity;
+			}
+
+			if (isNew)
+				await IncrementCount(cancellationToken).NoWait();
+
+			_indexes.Clear();
+		}
+
+		return entity;
+	}
+
+	private async ValueTask IncrementCount(CancellationToken cancellationToken)
+	{
+		if (_count is null)
+		{
+			var c = (int)(await OnGetCount(default, cancellationToken).NoWait());
+			using (_cachedEntitiesInitLock.EnterScope())
+				_count ??= c;
+		}
+		else
+		{
+			using (_cachedEntitiesInitLock.EnterScope())
+				_count++;
+		}
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Determines whether the specified entity has already been saved to storage.
+	/// </summary>
+	protected abstract ValueTask<bool> IsSaved(TEntity item, CancellationToken cancellationToken);
+
+	#region BaseListEx<E> Members
+
+	/// <summary>
+	/// Gets the count of non-deleted entities.
+	/// </summary>
+	public ValueTask<int> CountAsync(CancellationToken cancellationToken)
+		=> CountAsync(false, cancellationToken);
+
+	/// <summary>
+	/// Gets the count of entities, optionally including deleted ones.
+	/// </summary>
+	public async ValueTask<int> CountAsync(bool deleted, CancellationToken cancellationToken)
+	{
+		// The bulk cache and the _count cache both track only the non-deleted view
+		// (the dictionary is populated solely for !deleted, and _count is maintained by
+		// Add/Remove of non-deleted rows). Counting deleted rows must therefore bypass
+		// both caches and query storage directly.
+		if (deleted)
+			return (int)await OnGetCount(deleted, cancellationToken).NoWait();
+
+		if (BulkLoad)
+		{
+			var (sync, dict) = CachedEntitiesPair;
+
+			if (BulkInitialized())
+			{
+				using (await sync.ReaderLockAsync(cancellationToken).ConfigureAwait(false))
+				{
+					// Re-check under the lock: a concurrent ResetCache can clear the dictionary
+					// between the check above and this snapshot, which would otherwise count an
+					// emptied table. If it was reset, fall through to re-initialise.
+					if (_bulkInitialized)
+						return dict.Count;
+				}
+			}
+
+			// Not initialised (or just expired): load once via GetRangeAsync, then count. Done once
+			// per call - no re-check loop, otherwise a tiny CacheTimeOut would re-expire and spin.
+			await GetRangeAsync(0, long.MaxValue, deleted, default, default, cancellationToken).NoWait();
+
+			using (await sync.ReaderLockAsync(cancellationToken).ConfigureAwait(false))
+				return dict.Count;
+		}
+		else
+		{
+			if (CacheCount)
+			{
+				if (_count is null)
+				{
+					var c = (int)await OnGetCount(deleted, cancellationToken).NoWait();
+					using (_cachedEntitiesInitLock.EnterScope())
+						_count ??= c;
+				}
+
+				return _count.Value;
+			}
+			else
+				return (int)await OnGetCount(deleted, cancellationToken).NoWait();
+		}
+	}
+
+	/// <summary>
+	/// Adds a new entity to the list and storage.
+	/// </summary>
+	public async ValueTask<TEntity> AddAsync(TEntity item, CancellationToken cancellationToken)
+	{
+		if (IsReadOnly)
+			throw new ReadOnlyException();
+
+		if (item is null)
+			throw new ArgumentNullException(nameof(item));
+
+		item = await OnAdd(item, cancellationToken).NoWait();
+
+		if (BulkLoad)
+		{
+			if (BulkInitialized())
+			{
+				var (sync, dict) = CachedEntitiesPair;
+
+				// Idempotent put: the row was successfully saved, so refresh/keep the cache
+				// entry instead of Add(), which throws if a concurrent (or pre-populated)
+				// bulk cache already holds this id.
+				using (await sync.WriterLockAsync(cancellationToken).ConfigureAwait(false))
+					dict[GetCacheId(item)] = item;
+
+				_indexes.Clear();
+			}
+			else
+				await GetRangeAsync(cancellationToken).NoWait();
+		}
+
+		await IncrementCount(cancellationToken).NoWait();
+
+		return item;
+	}
+
+	/// <summary>
+	/// Removes all entities from the list and storage.
+	/// </summary>
+	public async ValueTask ClearAsync(CancellationToken cancellationToken)
+	{
+		if (IsReadOnly)
+			throw new ReadOnlyException();
+
+		await OnClear(cancellationToken).NoWait();
+
+		if (BulkLoad)
+		{
+			await GetRangeAsync(cancellationToken).NoWait();
+
+			var (sync, dict) = CachedEntitiesPair;
+
+			using var _ = await sync.WriterLockAsync(cancellationToken).ConfigureAwait(false);
+			dict.Clear();
+		}
+
+		using (_cachedEntitiesInitLock.EnterScope())
+			_count = 0;
+	}
+
+	/// <summary>
+	/// Determines whether the list contains the specified entity.
+	/// </summary>
+	public abstract ValueTask<bool> ContainsAsync(TEntity item, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Copies entities to the specified array starting at the given index.
+	/// </summary>
+	public async ValueTask CopyToAsync(TEntity[] array, int index, CancellationToken cancellationToken)
+		=> ((ICollection<TEntity>)await GetRangeAsync(0, long.MaxValue, false, default, default, cancellationToken).NoWait()).CopyTo(array, index);
+
+	/// <summary>
+	/// Removes the specified entity from the list and storage.
+	/// </summary>
+	public async ValueTask<bool> RemoveAsync(TEntity item, CancellationToken cancellationToken)
+	{
+		if (IsReadOnly)
+			throw new ReadOnlyException();
+
+		var retVal = await OnRemove(item, cancellationToken).NoWait();
+
+		if (retVal && BulkLoad)
+		{
+			if (BulkInitialized())
+			{
+				var (sync, dict) = CachedEntitiesPair;
+
+				using (await sync.WriterLockAsync(cancellationToken).ConfigureAwait(false))
+					dict.Remove(GetCacheId(item));
+
+				_indexes.Clear();
+			}
+		}
+
+		if (retVal)
+		{
+			using (_cachedEntitiesInitLock.EnterScope())
+			{
+				if (_count != null)
+					_count--;
+			}
+		}
+
+		return retVal;
+	}
+
+	private ValueTask<IEnumerable<TEntity>> GetRangeAsync(CancellationToken cancellationToken)
+		=> GetRangeAsync(0, long.MaxValue, false, default, default, cancellationToken);
+
+	/// <summary>
+	/// Gets a range of entities with paging, sorting, and optional deleted filter.
+	/// </summary>
+	public async ValueTask<IEnumerable<TEntity>> GetRangeAsync(long startIndex, long count, bool deleted, string sortExpression, ListSortDirection direction, CancellationToken cancellationToken)
+	{
+		var orderByColumn = sortExpression;
+
+		if (count == 0)
+			return [];
+
+		var oldStartIndex = startIndex;
+		var oldCount = count;
+
+		static IEnumerable<TEntity> ApplySkipTake(IEnumerable<TEntity> source, long skip, long take)
+		{
+			if (skip > 0)
+				source = source.Skip((int)skip);
+
+			if (take != long.MaxValue)
+			{
+				if (take >= int.MaxValue)
+					throw new OverflowException(nameof(take));
+
+				source = source.Take((int)take);
+			}
+
+			return source;
+		}
+
+		IEnumerable<TEntity> OrderAndPage(IEnumerable<TEntity> snapshot)
+		{
+			if (orderByColumn is not null)
+			{
+				object KeySelector(TEntity entity)
+				{
+					if (orderByColumn == Meta.Identity?.Name)
+						return entity.GetIdentity();
+
+					var s = new SettingsStorage();
+					entity.Save(s);
+					s.TryGetValue(orderByColumn, out var v);
+					return v;
+				}
+
+				snapshot = direction == ListSortDirection.Ascending ? snapshot.OrderBy(KeySelector) : snapshot.OrderByDescending(KeySelector);
+			}
+
+			return ApplySkipTake(snapshot, oldStartIndex, oldCount);
+		}
+
+		if (!deleted && BulkLoad)
+		{
+			var (sync, dict) = CachedEntitiesPair;
+
+			if (BulkInitialized())
+			{
+				using (await sync.ReaderLockAsync(cancellationToken).ConfigureAwait(false))
+				{
+					// Re-check under the lock: a concurrent ResetCache (manual or CacheTimeOut
+					// expiry) can clear the dictionary and reset _bulkInitialized between the
+					// check above and this snapshot, which would otherwise return an empty result
+					// for a populated table. If it was reset, fall through to re-initialise.
+					if (_bulkInitialized)
+						return OrderAndPage([.. dict.Values]);
+				}
+			}
+
+			// Not initialised (or just expired): page the table in OUTSIDE any lock (single-flight)
+			// and publish it under a short writer lock, then snapshot. Done once per call - no
+			// re-check loop, otherwise a tiny CacheTimeOut would re-expire and spin forever.
+			await EnsureBulkLoadedAsync(orderByColumn, direction, cancellationToken).NoWait();
+
+			using (await sync.ReaderLockAsync(cancellationToken).ConfigureAwait(false))
+				return OrderAndPage([.. dict.Values]);
+		}
+
+		List<TEntity> entities = [];
+
+		while (count > 0)
+		{
+			var pageSize = count.Min(BufferSize);
+
+			var buffer = await OnGetGroup(startIndex, pageSize, deleted, orderByColumn, direction, cancellationToken).NoWait();
+
+			entities.AddRange(buffer);
+
+			if (buffer.Length < pageSize)
+				break;
+
+			count -= pageSize;
+			startIndex += pageSize;
+		}
+
+		return entities;
+	}
+
+	/// <summary>
+	/// Reads the whole list into memory now, when <see cref="BulkLoad"/> asks for it to be kept there.
+	/// </summary>
+	/// <remarks>
+	/// Left alone, the list fills itself on the first read -- so whoever reads first waits for the whole
+	/// table and everyone arriving meanwhile queues behind them. Calling this hands that cost to a moment
+	/// the caller picks, typically while the host is starting. Without <see cref="BulkLoad"/> there is
+	/// nothing to fill and this does nothing.
+	/// </remarks>
+	public Task PreloadAsync(CancellationToken cancellationToken = default)
+		=> BulkLoad ? EnsureBulkLoadedAsync(null, ListSortDirection.Ascending, cancellationToken) : Task.CompletedTask;
+
+	private Task EnsureBulkLoadedAsync(string orderByColumn, ListSortDirection direction, CancellationToken cancellationToken)
+	{
+		Task task;
+
+		// The gate is held only to publish the shared load task - never across the DB read below.
+		// Start a fresh load when none is in flight: a completed task is a previous load that a
+		// ResetCache / CacheTimeOut expiry has since invalidated (and a faulted one must be retried).
+		// Self-clearing the field inside the load is unsafe because OnGetGroup can complete
+		// synchronously, running the whole load (and the clear) before the ??= assignment lands.
+		using (_bulkInitGate.EnterScope())
+		{
+			if (_bulkInitTask is null || _bulkInitTask.IsCompleted)
+				_bulkInitTask = LoadBulkAsync(orderByColumn, direction);
+
+			task = _bulkInitTask;
+		}
+
+		// Each caller honours its own cancellation without cancelling the shared load for others.
+		return task.WaitAsync(cancellationToken);
+	}
+
+	private async Task LoadBulkAsync(string orderByColumn, ListSortDirection direction)
+	{
+		// Page the whole table in WITHOUT holding any lock, until a short page signals the end.
+		List<TEntity> loaded = [];
+		long offset = 0;
+		TEntity[] buffer;
+
+		do
+		{
+			buffer = await OnGetGroup(offset, BufferSize, false, orderByColumn, direction, default).NoWait();
+			loaded.AddRange(buffer);
+			offset += BufferSize;
+		}
+		while (buffer.Length == BufferSize);
+
+		var (sync, dict) = CachedEntitiesPair;
+
+		// Publish under a short writer lock - no I/O inside.
+		using (await sync.WriterLockAsync(default).ConfigureAwait(false))
+		{
+			if (!_bulkInitialized)
+			{
+				dict.Clear();
+
+				foreach (var entity in loaded)
+					dict.Add(GetCacheId(entity), entity);
+
+				_bulkInitialized = true;
+
+				if (CacheTimeOut < TimeSpan.MaxValue)
+					_cacheExpire = DateTime.UtcNow + CacheTimeOut;
+			}
+		}
+	}
+
+	private int _bufferSize = 20;
+
+	/// <summary>
+	/// Gets or sets the page size used for batched loading from storage.
+	/// </summary>
+	public int BufferSize
+	{
+		get => _bufferSize;
+		set
+		{
+			if (value <= 0)
+				throw new ArgumentOutOfRangeException();
+
+			_bufferSize = value;
+		}
+	}
+
+	IAsyncEnumerator<TEntity> IAsyncEnumerable<TEntity>.GetAsyncEnumerator(CancellationToken cancellationToken)
+		=> new RelationManyListEnumerator(this, cancellationToken);
+
+	#endregion
+
+	#region Virtual CRUD Methods
+
+	/// <summary>
+	/// Gets the total count of entities from storage.
+	/// </summary>
+	protected virtual ValueTask<long> OnGetCount(bool deleted, CancellationToken cancellationToken)
+		=> Storage.GetCountAsync<TEntity>(cancellationToken);
+
+	/// <summary>
+	/// Adds an entity to the underlying storage.
+	/// </summary>
+	protected virtual ValueTask<TEntity> OnAdd(TEntity entity, CancellationToken cancellationToken)
+		=> Storage.AddAsync(entity, cancellationToken);
+
+	/// <summary>
+	/// Retrieves a page of entities from the underlying storage.
+	/// </summary>
+	protected virtual ValueTask<TEntity[]> OnGetGroup(long startIndex, long count, bool deleted, string orderBy, ListSortDirection direction, CancellationToken cancellationToken)
+		=> Storage.GetGroupAsync<TEntity>(startIndex, count, deleted, orderBy, direction, cancellationToken);
+
+	/// <summary>
+	/// Updates an entity in the underlying storage.
+	/// </summary>
+	protected virtual ValueTask<TEntity> OnUpdate(TEntity entity, CancellationToken cancellationToken)
+		=> Storage.UpdateAsync(entity, cancellationToken);
+
+	/// <summary>
+	/// Removes an entity from the underlying storage.
+	/// </summary>
+	protected virtual ValueTask<bool> OnRemove(TEntity entity, CancellationToken cancellationToken)
+		=> Storage.RemoveAsync(entity, cancellationToken);
+
+	/// <summary>
+	/// Clears all entities from the underlying storage.
+	/// </summary>
+	protected virtual ValueTask OnClear(CancellationToken cancellationToken)
+		=> Storage.ClearAsync<TEntity>(cancellationToken);
+
+	#endregion
+
+	/// <summary>
+	/// Removes an entity by its identifier.
+	/// </summary>
+	public async ValueTask<bool> RemoveById(TId id, CancellationToken cancellationToken)
+		=> await RemoveAsync(await ReadById(id, cancellationToken).NoWait(), cancellationToken).NoWait();
+
+	private static TId GetCacheId(TEntity entity)
+	{
+		if (Meta.Identity is null)
+			return entity.To<TId>();
+
+		return entity.GetIdentity().To<TId>();
+	}
+
+	/// <summary>
+	/// Tries to add an entity, returning false if it already exists.
+	/// </summary>
+	public async ValueTask<bool> TryAddAsync(TEntity entity, CancellationToken cancellationToken)
+	{
+		if (await ContainsAsync(entity, cancellationToken).NoWait())
+			return false;
+
+		await AddAsync(entity, cancellationToken).NoWait();
+		return true;
+	}
+
+	// The load reads its rows through the very helpers that ask this question, so a load in flight must
+	// answer "nothing to fill" -- otherwise the read inside the load starts another load, endlessly.
+	private readonly AsyncLocal<bool> _bulkLoading = new();
+
+	// Groupings of the held rows, told apart by the expression that reads their key: naming them by hand
+	// would let a typo build a second copy of the same grouping, and let two callers disagree about the
+	// key's type behind one name.
+	// Dropped on every write through the list (outside the rows' lock: a grouping is built holding this
+	// dictionary's lock and then the rows' read lock), so a row added, changed or removed shows at once.
+	private readonly SynchronizedDictionary<(string selector, Type key), object> _indexes = [];
+
+	/// <summary>
+	/// The held rows grouped by something other than their identity, so a caller asking for "the rows of
+	/// this owner" is answered by a lookup rather than by walking the whole table.
+	/// </summary>
+	/// <typeparam name="TKey">What the rows are grouped by.</typeparam>
+	/// <param name="keySelector">Reads the key off a row; it also identifies the grouping, so the same one is built once and reused.</param>
+	/// <param name="key">The key to look up.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	/// <returns>The rows under that key, or an empty array.</returns>
+	/// <remarks>
+	/// Only for a <see cref="BulkLoad"/> list, which is the case this exists for: the table is already held,
+	/// and the cost that remains is finding rows in it. The grouping is built on first use and dropped with
+	/// the rows themselves, so it cannot outlive what it describes.
+	/// </remarks>
+	public async ValueTask<TEntity[]> GetByKeyAsync<TKey>(Expression<Func<TEntity, TKey>> keySelector, TKey key, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(keySelector);
+
+		if (!BulkLoad)
+			throw new InvalidOperationException($"{typeof(TEntity).Name}: the list does not hold its rows.");
+
+		if (!BulkInitialized())
+			await GetRangeAsync(cancellationToken).NoWait();
+
+		var index = (Dictionary<TKey, TEntity[]>)_indexes.SafeAdd((keySelector.ToString(), typeof(TKey)), _ =>
+		{
+			var selector = keySelector.Compile();
+			var (sync, dict) = CachedEntitiesPair;
+
+			using (sync.ReaderLock())
+				return dict.Values.GroupBy(selector).ToDictionary(g => g.Key, g => g.ToArray());
+		});
+
+		return index.TryGetValue(key, out var rows) ? rows : [];
+	}
+async ValueTask<IQueryable<TEntity>> IRelationManyList<TEntity>.TryInitBulkLoad(CancellationToken cancellationToken)
+	{
+		if (!BulkLoad || _bulkLoading.Value)
+			return default;
+
+		// A held table answers whether or not this caller is the one that filled it: a query built while the
+		// cache was still cold otherwise keeps going to storage for the life of that query.
+		if (BulkInitialized())
+		{
+			var (sync, dict) = CachedEntitiesPair;
+
+			using (await sync.ReaderLockAsync(cancellationToken).ConfigureAwait(false))
+			{
+				if (_bulkInitialized)
+					return dict.Values.ToArray().AsQueryable();
+			}
+		}
+
+		_bulkLoading.Value = true;
+
+		try
+		{
+			return (await GetRangeAsync(cancellationToken).NoWait()).AsQueryable();
+		}
+		finally
+		{
+			_bulkLoading.Value = false;
+		}
+	}
+}

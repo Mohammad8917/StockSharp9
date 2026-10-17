@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common_connectors.props" />
+
+  <ItemGroup>
+    <None Include="Gateway\qmt_gateway.py" Pack="true" PackagePath="gateway" />
+  </ItemGroup>
+</Project>

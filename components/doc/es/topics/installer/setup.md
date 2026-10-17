@@ -1,0 +1,33 @@
+# Primer inicio
+
+1. Para instalar [Installer](../installer.md), vaya a la página [Descarga](https://stocksharp.com/es/products/download/):
+
+    ![Instalación del instalador](../../images/installer_installation.png)
+
+2. Descargue la distribución de [Installer](../installer.md).
+3. Ejecute el archivo de instalación **stocksharp_setup.exe** y siga las instrucciones del instalador.
+4. A veces Windows no inicia la instalación inmediatamente y muestra una advertencia:
+
+   ![Propiedades del ZIP del instalador (1)](../../images/installer_warn_1.png)
+
+5. En este caso, haga clic en el enlace **Más información** en la ventana de advertencia, después de lo cual aparecerá la siguiente ventana:
+
+    ![Propiedades del ZIP del instalador (2)](../../images/installer_warn_2.png)
+
+    Al hacer clic en el botón **Ejecutar de todos modos**, se inicia la instalación de [Installer](../installer.md).
+
+6. Después [Installer](../installer.md) se desempaquetará. Espere a que finalice el proceso.
+7. Durante el primer inicio debe introducir su login y contraseña de **StockSharp**.
+
+    ![inicio de sesión del instalador](../../images/login_installer.png)
+
+    Puede iniciar sesión introduciendo sus credenciales directamente o mediante autorización de una red social. Si se registró en el sitio de StockSharp mediante una red social, no tendrá contraseña.
+
+8. Después de iniciar sesión, se abrirá la ventana del programa:
+![primera ventana del instalador](../../images/first_win_installer.png)
+
+**Ver el [tutorial en video](videos/setup.md)**
+
+## Véase también
+
+[Instalación y eliminación de programas](install_and_remove_apps.md)

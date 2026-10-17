@@ -1,0 +1,84 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common.props" />
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(MsTestSdkVer)" />
+    <PackageReference Include="MSTest.TestAdapter" Version="$(MsTestVer)" />
+    <PackageReference Include="MSTest.TestFramework" Version="$(MsTestVer)" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="$(MsSqlClientVer)" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="$(MsDataSqliteVer)" />
+    <PackageReference Include="Microsoft.AspNet.WebApi.Client" Version="$(MicrosoftAspNetWebApiClientVer)" />
+    <PackageReference Include="StbImageSharp" Version="$(StbImageSharpVer)" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(TargetFramework)' != 'net6.0' ">
+    <PackageReference Include="Npgsql" Version="$(NpgsqlVer)" />
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Compilation.FSharp\Compilation.FSharp.csproj" />
+    <ProjectReference Include="..\Compilation.Python\Compilation.Python.csproj" />
+    <ProjectReference Include="..\Compilation.Roslyn\Compilation.Roslyn.csproj" />
+    <ProjectReference Include="..\Drawing\Drawing.csproj" />
+    <ProjectReference Include="..\Markdown\Markdown.csproj" />
+    <ProjectReference Include="..\Backup\Backup.csproj" />
+    <ProjectReference Include="..\Backup.AWS\Backup.AWS.csproj" />
+    <ProjectReference Include="..\Backup.Azure\Backup.Azure.csproj" />
+    <ProjectReference Include="..\Backup.Mega\Backup.Mega.csproj" />
+    <ProjectReference Include="..\Backup.Yandex\Backup.Yandex.csproj" />
+    <ProjectReference Include="..\Configuration\Configuration.csproj" />
+    <ProjectReference Include="..\Data\Data.csproj" />
+    <ProjectReference Include="..\Server.Utils\Server.Utils.csproj" />
+    <ProjectReference Include="..\Excel.DX\Excel.DX.csproj" />
+    <ProjectReference Include="..\Excel.OpenXml\Excel.OpenXml.csproj" />
+    <ProjectReference Include="..\Interop\Interop.csproj" />
+    <ProjectReference Include="..\IO.Compression\IO.Compression.csproj" />
+    <ProjectReference Include="..\Logging\Logging.csproj" />
+    <ProjectReference Include="..\Net.Clients\Net.Clients.csproj" />
+    <ProjectReference Include="..\Net.SocketIO\Net.SocketIO.csproj" />
+    <ProjectReference Include="..\Serialization\Serialization.csproj" />
+    <ProjectReference Include="..\UnitTesting\UnitTesting.csproj" />
+    <ProjectReference Include="..\Linq\Linq.csproj" />
+    <ProjectReference Include="..\Licensing\Licensing.csproj" />
+    <ProjectReference Include="..\Net.Udp\Net.Udp.csproj" />
+    <ProjectReference Include="..\StringSearch\StringSearch.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(TargetFramework)' == 'net10.0' ">
+    <ProjectReference Include="..\Nuget\Nuget.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Data.Ado\Data.Ado.csproj" />
+    <ProjectReference Include="..\Data.SqlServer\Data.SqlServer.csproj" />
+    <ProjectReference Include="..\Data.SQLite\Data.SQLite.csproj" />
+    <ProjectReference Include="..\Data.PostgreSql\Data.PostgreSql.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(TargetFramework)' == 'net10.0' ">
+    <ProjectReference Include="..\Data.ORM\Data.ORM.csproj" />
+    <!-- Referenced as a plain assembly, NOT as an Analyzer: ECNGASYNC001 is an error by
+         default, and Ecng's own Obsolete wrappers still hold the last AsyncHelper.Run calls,
+         so self-applying it would fail this build. The tests drive the analyzer directly. -->
+    <ProjectReference Include="..\Analyzers\Analyzers.csproj" ReferenceOutputAssembly="true" />
+    <ProjectReference Include="..\Data.Entities.Generator\Data.Entities.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="true" />
+    <ProjectReference Include="..\ComponentModel.Generator\ComponentModel.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Net\Schemas\*.xsd" LogicalName="Schemas.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Drawing\Fixtures\*.jpg;Drawing\Fixtures\*.webp;Drawing\Fixtures\*.tiff;Drawing\Fixtures\*.avif;Drawing\Fixtures\*.png" LogicalName="Drawing.Fixtures.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup Condition=" '$(TargetFramework)' != 'net10.0' ">
+    <Compile Remove="Nuget\**" />
+    <EmbeddedResource Remove="Nuget\**" />
+    <None Remove="Nuget\**" />
+    <Compile Remove="Data\OrmIntegrationTests.cs" />
+    <Compile Remove="Data\OrmTestEntities.cs" />
+    <Compile Remove="Data\QueryProviderTests.cs" />
+    <Compile Remove="Data\EntityGeneratorTests.cs" />
+    <Compile Remove="Data\GeneratorTestEntities.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,7 @@
+# Configuración gráfica Binance History
+
+Para todos los productos [S#](../../../../api.md), la configuración gráfica de la conexión se realiza en la [Ventana de configuración de conexión](../../../graphical_user_interface/connection_settings_window.md):
+
+![Configuración de API GUI Binance History](../../../../../images/api_gui_settings_binancehistory.png)
+
+- **Comprobar fechas** - Validar las fechas solicitadas antes de enviar las solicitudes de descarga.

@@ -1,0 +1,1641 @@
+﻿namespace Ecng.Serialization;
+
+using System.Text;
+
+using Ecng.Common;
+using Ecng.Data;
+
+/// <summary>
+/// Describes a difference between entity schema and database schema.
+/// </summary>
+public enum SchemaDiffKind
+{
+	/// <summary>Table exists in entity schema but not in database.</summary>
+	MissingTable,
+
+	/// <summary>Column exists in entity but not in database.</summary>
+	MissingColumn,
+
+	/// <summary>Column exists in database but not in entity.</summary>
+	ExtraColumn,
+
+	/// <summary>Column SQL type differs between entity and database.</summary>
+	TypeMismatch,
+
+	/// <summary>Column nullability differs between entity and database.</summary>
+	NullabilityMismatch,
+
+	/// <summary>Column max length differs between entity and database.</summary>
+	MaxLengthMismatch,
+
+	/// <summary>Column precision or scale differs between entity and database.</summary>
+	PrecisionMismatch,
+
+	/// <summary>
+	/// Entity declares a <c>[RelationSingle]</c> column but the live database
+	/// has no matching foreign-key constraint. Backfilled via
+	/// <c>ALTER TABLE … ADD CONSTRAINT</c>.
+	/// </summary>
+	MissingForeignKey,
+
+	/// <summary>
+	/// Database has a foreign-key constraint that no entity column declares.
+	/// Informational only — never auto-dropped (mirrors <see cref="ExtraColumn"/>).
+	/// </summary>
+	ExtraForeignKey,
+
+	/// <summary>
+	/// Entity declares a <c>[Index]</c> (or <c>[Unique]</c>) column but the
+	/// live database has no matching single-column index. Backfilled via
+	/// <c>CREATE INDEX</c> by <see cref="SchemaMigrator.GenerateMigrationSql"/>.
+	/// </summary>
+	MissingIndex,
+
+	/// <summary>
+	/// Database has an index that no entity column declares. Informational
+	/// only — never auto-dropped (mirrors <see cref="ExtraColumn"/> and
+	/// <see cref="ExtraForeignKey"/>). Primary-key and unique-constraint
+	/// backing indexes are filtered out before reaching this diff so they
+	/// don't surface as false positives.
+	/// </summary>
+	ExtraIndex,
+
+	/// <summary>
+	/// The table is packed on disk differently from what the entity declares with
+	/// <c>[DataCompression]</c>. Repacking loses nothing, but it rewrites every index of the
+	/// table, so it is emitted as a statement to run rather than applied quietly.
+	/// </summary>
+	CompressionMismatch,
+
+	/// <summary>
+	/// Table exists in the database but no entity maps to it. Surfaced only when the
+	/// caller opts in (<c>detectExtraTables</c> on <see cref="SchemaMigrator.Compare"/>),
+	/// because a partial entity set would otherwise flag every unrelated table. Never
+	/// auto-dropped — emitted as a commented-out <c>DROP TABLE</c> (mirrors
+	/// <see cref="ExtraColumn"/>).
+	/// </summary>
+	ExtraTable,
+
+	/// <summary>
+	/// A primary-key constraint in the database is not named per
+	/// <see cref="SchemaNaming.PrimaryKey"/>. Surfaced only when the caller opts in
+	/// (<c>checkNaming</c> on <see cref="SchemaMigrator.Compare"/>). Informational
+	/// only — renaming a constraint is a destructive operation, so it is never applied
+	/// automatically (mirrors <see cref="ExtraColumn"/>).
+	/// </summary>
+	PrimaryKeyNameMismatch,
+
+	/// <summary>
+	/// A foreign-key constraint in the database is not named per
+	/// <see cref="SchemaNaming.ForeignKey"/>. Opt-in and informational only, like
+	/// <see cref="PrimaryKeyNameMismatch"/>.
+	/// </summary>
+	ForeignKeyNameMismatch,
+
+	/// <summary>
+	/// An index in the database is not named per <see cref="SchemaNaming.Index(string, string, bool)"/>.
+	/// Indexes the model names explicitly (a composite <see cref="IndexAttribute.Name"/>) are
+	/// exempt — the author chose that name deliberately. Opt-in and informational only, like
+	/// <see cref="PrimaryKeyNameMismatch"/>.
+	/// </summary>
+	IndexNameMismatch,
+
+	/// <summary>
+	/// A table exists under the expected name but in different letter case than the entity
+	/// declares. Tables are reconciled case-insensitively, so the drift is otherwise
+	/// invisible — yet it breaks case-sensitive collations and quoted SQL. Opt-in and
+	/// informational only, like <see cref="PrimaryKeyNameMismatch"/>.
+	/// </summary>
+	TableNameCaseMismatch,
+
+	/// <summary>
+	/// A column exists under the expected name but in different letter case than the entity
+	/// declares. Opt-in and informational only, like <see cref="TableNameCaseMismatch"/>.
+	/// </summary>
+	ColumnNameCaseMismatch,
+}
+
+/// <summary>
+/// Represents a single difference between entity schema and database schema.
+/// </summary>
+/// <param name="TableName">The table name.</param>
+/// <param name="ColumnName">The column name.</param>
+/// <param name="Kind">The kind of difference.</param>
+/// <param name="Expected">Expected value (from entity).</param>
+/// <param name="Actual">Actual value (from database).</param>
+public record SchemaDiff(string TableName, string ColumnName, SchemaDiffKind Kind, string Expected, string Actual)
+{
+	/// <summary>
+	/// The column as the database holds it, for a difference in an existing column; otherwise null.
+	/// </summary>
+	public DbColumnInfo Live { get; init; }
+
+	/// <summary>
+	/// Every index of the table that includes the column, one entry per indexed column, for a difference in an
+	/// existing column.
+	/// </summary>
+	public IReadOnlyList<DbIndexInfo> LiveIndexes { get; init; } = [];
+
+	/// <summary>
+	/// The foreign keys on the column or referencing it, for a difference in an existing column.
+	/// </summary>
+	public IReadOnlyList<DbForeignKeyInfo> LiveForeignKeys { get; init; } = [];
+}
+
+/// <summary>
+/// Compares entity schemas (from <see cref="SchemaRegistry"/>) with a live database
+/// and generates migration DDL.
+/// </summary>
+public static class SchemaMigrator
+{
+	/// <summary>
+	/// Compares entity schemas with database column metadata and returns differences.
+	/// </summary>
+	/// <param name="entities">Entity schemas to compare.</param>
+	/// <param name="dbColumns">Database columns read via <see cref="ISqlDialect.ReadDbSchemaAsync"/>.</param>
+	/// <param name="dialect">SQL dialect for type name resolution.</param>
+	/// <param name="skipComputed">Skip computed (calculated) database columns.</param>
+	/// <param name="dbForeignKeys">
+	/// Foreign keys read via <see cref="ISqlDialect.ReadDbForeignKeysAsync"/>. When
+	/// supplied, missing/extra FK constraints are surfaced as
+	/// <see cref="SchemaDiffKind.MissingForeignKey"/> /
+	/// <see cref="SchemaDiffKind.ExtraForeignKey"/> diffs. Pass <see langword="null"/>
+	/// (the default) to skip FK comparison and preserve the pre-FK behaviour.
+	/// </param>
+	/// <param name="dbIndexes">
+	/// Indexes read via <see cref="ISqlDialect.ReadDbIndexesAsync"/>. When
+	/// supplied, missing/extra single-column indexes are surfaced as
+	/// <see cref="SchemaDiffKind.MissingIndex"/> /
+	/// <see cref="SchemaDiffKind.ExtraIndex"/> diffs. Pass <see langword="null"/>
+	/// (the default) to skip index comparison and preserve the pre-index behaviour.
+	/// </param>
+	/// <param name="detectExtraTables">
+	/// When <see langword="true"/>, tables present in the database but not mapped by any
+	/// entity are surfaced as <see cref="SchemaDiffKind.ExtraTable"/> diffs. Off by default,
+	/// because a partial entity set would otherwise flag every unrelated table.
+	/// </param>
+	/// <param name="checkNaming">
+	/// When <see langword="true"/>, primary keys, foreign keys and indexes whose database
+	/// name does not follow <see cref="SchemaNaming"/> are surfaced as
+	/// <see cref="SchemaDiffKind.PrimaryKeyNameMismatch"/> /
+	/// <see cref="SchemaDiffKind.ForeignKeyNameMismatch"/> /
+	/// <see cref="SchemaDiffKind.IndexNameMismatch"/> diffs. Off by default: a database that
+	/// predates the convention violates it on nearly every object, which would drown the
+	/// diffs a migration actually acts on. Requires the corresponding metadata
+	/// (<paramref name="dbForeignKeys"/> / <paramref name="dbIndexes"/>) to be supplied.
+	/// </param>
+	/// <param name="dbCompressions">
+	/// The packing the database reports for its tables. When supplied, a table whose packing differs from
+	/// the one its entity declares is surfaced as <see cref="SchemaDiffKind.CompressionMismatch"/>; a table
+	/// the database does not report is passed over.
+	/// </param>
+	/// <returns>List of differences found.</returns>
+	public static IReadOnlyList<SchemaDiff> Compare(
+		IEnumerable<Schema> entities,
+		IReadOnlyList<DbColumnInfo> dbColumns,
+		ISqlDialect dialect,
+		bool skipComputed,
+		IReadOnlyList<DbForeignKeyInfo> dbForeignKeys = null,
+		IReadOnlyList<DbIndexInfo> dbIndexes = null,
+		bool detectExtraTables = false,
+		bool checkNaming = false,
+		IReadOnlyList<DbTableCompressionInfo> dbCompressions = null)
+	{
+		var diffs = new List<SchemaDiff>();
+
+		// group DB columns by table
+		// Materialized because the naming pass needs the database's own spelling of every
+		// column, and the dbTables lookup below is drained as columns are reconciled.
+		var filtered = (skipComputed ? dbColumns.Where(c => !c.IsComputed) : dbColumns).ToArray();
+		var dbTables = filtered
+			.GroupBy(c => c.TableName, StringComparer.OrdinalIgnoreCase)
+			.ToDictionary(g => g.Key, g => g.ToDictionary(c => c.ColumnName, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+
+		foreach (var schema in entities)
+		{
+			if (schema.IsView)
+				continue;
+
+			if (!dbTables.TryGetValue(schema.TableName, out var dbCols))
+			{
+				diffs.Add(new(schema.TableName, string.Empty, SchemaDiffKind.MissingTable, "expected", "missing"));
+				continue;
+			}
+
+			foreach (var col in schema.AllColumns)
+			{
+				if (!dbCols.TryGetValue(col.Name, out var dbCol))
+				{
+					diffs.Add(new(schema.TableName, col.Name, SchemaDiffKind.MissingColumn,
+						dialect.GetColumnDefinition(col.ClrType, col.IsNullable, col.MaxLength, col.Precision, col.Scale), string.Empty));
+					continue;
+				}
+
+				SchemaDiff ColumnDiff(SchemaDiffKind kind, string expected, string actual)
+					=> new(schema.TableName, col.Name, kind, expected, actual)
+					{
+						Live = dbCol,
+						LiveIndexes = IndexesOn(dbIndexes, schema.TableName, col.Name),
+						LiveForeignKeys = ForeignKeysOn(dbForeignKeys, schema.TableName, col.Name),
+					};
+
+				// compare nullability
+				if (col.IsNullable != dbCol.IsNullable)
+				{
+					diffs.Add(ColumnDiff(SchemaDiffKind.NullabilityMismatch,
+						col.IsNullable ? "NULL" : "NOT NULL",
+						dbCol.IsNullable ? "NULL" : "NOT NULL"));
+				}
+
+				// compare type
+				var expectedType = NormalizeSqlType(dialect.GetSqlTypeName(col.ClrType, col.MaxLength));
+				var actualType = dialect.NormalizeDbType(dbCol.DataType);
+
+				if (!expectedType.EqualsIgnoreCase(actualType))
+				{
+					diffs.Add(ColumnDiff(SchemaDiffKind.TypeMismatch, expectedType, actualType));
+				}
+
+				// compare max length as the database reports it for the declared one: -1 for a column the
+				// dialect stores unbounded, whether declared Max or longer than the dialect's longest bounded type.
+				if (col.MaxLength > 0 && dbCol.MaxLength is not null && dialect.GetStoredMaxLength(col.ClrType, col.MaxLength) != dbCol.MaxLength)
+				{
+					diffs.Add(ColumnDiff(SchemaDiffKind.MaxLengthMismatch,
+						col.MaxLength.ToString(), dbCol.MaxLength.Value.ToString()));
+				}
+
+				// compare precision/scale. A decimal that declares digits is held to what GetColumnTypeName creates
+				// for it; one that declares none is not compared.
+				if ((col.ClrType.GetUnderlyingType() ?? col.ClrType) == typeof(decimal))
+				{
+					if ((col.Precision > 0 || col.Scale > 0) && dialect.KeepsDecimalDigits)
+					{
+						var precision = col.Precision > 0 ? col.Precision : SqlDialectBase.DefaultDecimalPrecision;
+
+						if (dbCol.NumericPrecision != precision || (dbCol.NumericScale ?? 0) != col.Scale)
+						{
+							diffs.Add(ColumnDiff(SchemaDiffKind.PrecisionMismatch,
+								$"({precision},{col.Scale})",
+								dbCol.NumericPrecision is null ? "(unconstrained)" : $"({dbCol.NumericPrecision},{dbCol.NumericScale ?? 0})"));
+						}
+					}
+				}
+				else if (col.Precision > 0 && dbCol.NumericPrecision is not null && col.Precision != dbCol.NumericPrecision)
+				{
+					diffs.Add(ColumnDiff(SchemaDiffKind.PrecisionMismatch,
+						$"({col.Precision})", $"({dbCol.NumericPrecision})"));
+				}
+
+				dbCols.Remove(col.Name);
+			}
+
+			// remaining DB columns not in entity
+			foreach (var (colName, _) in dbCols)
+			{
+				// skip identity columns from DB that might use different names
+				if (colName.EqualsIgnoreCase("Id"))
+					continue;
+
+				diffs.Add(new(schema.TableName, colName, SchemaDiffKind.ExtraColumn,
+					string.Empty, "exists in DB"));
+			}
+		}
+
+		// Tables present in the DB that no entity maps to. Opt-in: a partial entity set
+		// (the common case for a focused migration) would otherwise flag every unrelated
+		// table. Never auto-dropped — surfaced as a commented-out DROP TABLE downstream.
+		if (detectExtraTables)
+		{
+			var modelTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+			foreach (var schema in entities)
+				if (!schema.IsView)
+					modelTables.Add(schema.TableName);
+
+			foreach (var dbTable in dbTables.Keys)
+				if (!modelTables.Contains(dbTable))
+					diffs.Add(new(dbTable, string.Empty, SchemaDiffKind.ExtraTable, string.Empty, "exists in DB"));
+		}
+
+		if (dbForeignKeys is not null)
+			AppendForeignKeyDiffs(entities, dbColumns, dbForeignKeys, dbTables, diffs);
+
+		if (dbIndexes is not null)
+			AppendIndexDiffs(entities, dbIndexes, dbTables, diffs);
+
+		if (dbCompressions is not null)
+			AppendCompressionDiffs(entities, dbCompressions, dbTables, diffs);
+
+		if (checkNaming)
+			AppendNamingDiffs(entities, dbForeignKeys, dbIndexes, filtered, diffs);
+
+		return diffs;
+	}
+
+	/// <summary>
+	/// Compares the packing each entity declares with the packing its table actually uses. A table the
+	/// database does not report is one this dialect cannot pack, and is passed over.
+	/// </summary>
+	private static void AppendCompressionDiffs(
+		IEnumerable<Schema> entities,
+		IReadOnlyList<DbTableCompressionInfo> dbCompressions,
+		IDictionary<string, Dictionary<string, DbColumnInfo>> dbTables,
+		List<SchemaDiff> diffs)
+	{
+		var actual = new Dictionary<string, DataCompressions>(StringComparer.InvariantCultureIgnoreCase);
+
+		foreach (var info in dbCompressions)
+			actual[info.TableName] = info.Compression;
+
+		foreach (var schema in entities)
+		{
+			var table = schema.Name;
+
+			// A table the migration is about to create is packed by its own CREATE, and one this
+			// database has no opinion about cannot be repacked.
+			if (!dbTables.ContainsKey(table) || !actual.TryGetValue(table, out var current))
+				continue;
+
+			var declared = schema.EntityType.GetAttribute<DataCompressionAttribute>()?.Compression ?? DataCompressions.None;
+
+			if (declared != current)
+				diffs.Add(new(table, string.Empty, SchemaDiffKind.CompressionMismatch, declared.To<string>(), current.To<string>()));
+		}
+	}
+
+	/// <summary>
+	/// Reads columns, foreign keys and indexes via <paramref name="dialect"/>
+	/// in one shot and forwards to <see cref="Compare(IEnumerable{Schema},IReadOnlyList{DbColumnInfo},ISqlDialect,bool,IReadOnlyList{DbForeignKeyInfo},IReadOnlyList{DbIndexInfo},bool,bool,IReadOnlyList{DbTableCompressionInfo})"/>.
+	/// Convenience for callers that want the full FK + index-aware comparison
+	/// without orchestrating three metadata reads themselves.
+	/// </summary>
+	public static async Task<IReadOnlyList<SchemaDiff>> CompareAsync(
+		IEnumerable<Schema> entities,
+		DbConnection connection,
+		ISqlDialect dialect,
+		bool skipComputed,
+		string tableSchema = null,
+		bool detectExtraTables = false,
+		bool checkNaming = false,
+		CancellationToken cancellationToken = default)
+	{
+		if (entities is null)	throw new ArgumentNullException(nameof(entities));
+		if (connection is null)	throw new ArgumentNullException(nameof(connection));
+		if (dialect is null)	throw new ArgumentNullException(nameof(dialect));
+
+		var snapshot = entities as IReadOnlyList<Schema> ?? [.. entities];
+
+		var dbColumns = await dialect.ReadDbSchemaAsync(connection, tableSchema, cancellationToken);
+		var dbForeignKeys = await dialect.ReadDbForeignKeysAsync(connection, tableSchema, cancellationToken);
+		var dbIndexes = await dialect.ReadDbIndexesAsync(connection, tableSchema, cancellationToken);
+		var dbCompressions = await dialect.ReadDbCompressionsAsync(connection, tableSchema, cancellationToken);
+
+		return Compare(snapshot, dbColumns, dialect, skipComputed, dbForeignKeys, dbIndexes, detectExtraTables, checkNaming, dbCompressions);
+	}
+
+	private static void AppendForeignKeyDiffs(
+		IEnumerable<Schema> entities,
+		IReadOnlyList<DbColumnInfo> dbColumns,
+		IReadOnlyList<DbForeignKeyInfo> dbForeignKeys,
+		IReadOnlyDictionary<string, Dictionary<string, DbColumnInfo>> dbTables,
+		List<SchemaDiff> diffs)
+	{
+		var dbFkByPair = new Dictionary<(string Table, string Column), DbForeignKeyInfo>(
+			new TableColumnComparer());
+
+		foreach (var fk in dbForeignKeys)
+			dbFkByPair[(fk.TableName, fk.ColumnName)] = fk;
+
+		// Columns that physically exist in the database. A FK column that is NOT
+		// here is brand-new: the MissingColumn branch of GenerateMigrationSql
+		// creates it together with its FOREIGN KEY constraint. Emitting a
+		// MissingForeignKey diff for it as well would duplicate the
+		// ALTER TABLE … ADD CONSTRAINT, so such columns are left to that branch
+		// and this backfill only repairs FKs on columns that already exist.
+		var dbColumnPairs = new HashSet<(string Table, string Column)>(new TableColumnComparer());
+
+		foreach (var c in dbColumns)
+			dbColumnPairs.Add((c.TableName, c.ColumnName));
+
+		var entityFkPairs = new HashSet<(string Table, string Column)>(new TableColumnComparer());
+
+		foreach (var schema in entities)
+		{
+			if (schema.IsView)
+				continue;
+
+			// MissingTable already creates the table with inline FKs — skip
+			// it here so we don't double-emit.
+			if (!dbTables.ContainsKey(schema.TableName))
+				continue;
+
+			foreach (var col in schema.AllColumns)
+			{
+				if (col.ReferencedEntityType is null)
+					continue;
+
+				// A column carries at most one FK constraint, yet the same
+				// (table, column) pair can be reached more than once (e.g. a
+				// column duplicated through an inner-schema flatten). Collapse
+				// duplicates so the constraint is emitted only once.
+				if (!entityFkPairs.Add((schema.TableName, col.Name)))
+					continue;
+
+				// New column — its FK is created by the MissingColumn branch.
+				if (!dbColumnPairs.Contains((schema.TableName, col.Name)))
+					continue;
+
+				var refSchema = ResolveForeignKeyTarget(col.ReferencedEntityType);
+				var refCol = refSchema.Identity?.Name ?? "Id";
+
+				if (!dbFkByPair.TryGetValue((schema.TableName, col.Name), out var existing) ||
+					!existing.RefTableName.EqualsIgnoreCase(refSchema.TableName) ||
+					!existing.RefColumnName.EqualsIgnoreCase(refCol))
+				{
+					diffs.Add(new(schema.TableName, col.Name, SchemaDiffKind.MissingForeignKey,
+						$"{refSchema.TableName}.{refCol}",
+						existing is null ? "missing" : $"{existing.RefTableName}.{existing.RefColumnName}"));
+				}
+			}
+		}
+
+		foreach (var fk in dbForeignKeys)
+		{
+			if (entityFkPairs.Contains((fk.TableName, fk.ColumnName)))
+				continue;
+
+			diffs.Add(new(fk.TableName, fk.ColumnName, SchemaDiffKind.ExtraForeignKey,
+				fk.ConstraintName,
+				$"{fk.RefTableName}.{fk.RefColumnName}"));
+		}
+	}
+
+	/// <summary>
+	/// Resolves the schema a foreign key should reference. A relation may target a view entity, but a
+	/// database foreign key cannot reference a view — so a view is resolved to its backing table via
+	/// its <see cref="IViewProcessor.TableType"/>.
+	/// </summary>
+	private static Schema ResolveForeignKeyTarget(Type referencedEntityType)
+	{
+		var refSchema = SchemaRegistry.Get(referencedEntityType);
+
+		if (refSchema.IsView)
+			refSchema = SchemaRegistry.Get(ViewProcessorRegistry.GetProcessor(referencedEntityType).TableType);
+
+		return refSchema;
+	}
+
+	/// <summary>
+	/// Assigns each new (<see cref="SchemaDiffKind.MissingTable"/>) table a creation
+	/// rank such that a table is created after every other new table it references via
+	/// a foreign key. Dependencies on already-existing tables are ignored (those are
+	/// satisfied). Independent tables keep their original diff order; an FK cycle among
+	/// new tables (only constructible on ALTER-capable dialects, where FKs are deferred
+	/// anyway) is broken by falling back to the original order so the method always
+	/// terminates.
+	/// </summary>
+	private static Dictionary<string, int> OrderNewTablesForCreate(
+		IReadOnlyList<SchemaDiff> diffs,
+		Dictionary<string, Schema> schemaMap)
+	{
+		var newTables = new List<string>();
+		var newTableSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		foreach (var d in diffs)
+		{
+			if (d.Kind == SchemaDiffKind.MissingTable && newTableSet.Add(d.TableName))
+				newTables.Add(d.TableName);
+		}
+
+		// Referenced new tables that must be created before the key table.
+		var deps = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+		foreach (var table in newTables)
+		{
+			var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+			if (schemaMap.TryGetValue(table, out var schema))
+			{
+				foreach (var col in schema.Columns)
+				{
+					if (col.ReferencedEntityType is null)
+						continue;
+
+					var refTable = ResolveForeignKeyTarget(col.ReferencedEntityType).TableName;
+
+					// Only other new tables constrain the order; a self-reference is fine
+					// inline and an existing table already exists.
+					if (newTableSet.Contains(refTable) && !refTable.EqualsIgnoreCase(table))
+						set.Add(refTable);
+				}
+			}
+
+			deps[table] = set;
+		}
+
+		var order = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+		var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		var remaining = new List<string>(newTables);
+		var rank = 0;
+
+		while (remaining.Count > 0)
+		{
+			// First table (in original order) whose new-table deps are all emitted.
+			var idx = remaining.FindIndex(t => deps[t].All(emitted.Contains));
+
+			// None ready => a cycle; break it by taking the next in original order.
+			if (idx < 0)
+				idx = 0;
+
+			var table = remaining[idx];
+			remaining.RemoveAt(idx);
+			emitted.Add(table);
+			order[table] = rank++;
+		}
+
+		return order;
+	}
+
+	/// <summary>
+	/// Emits CREATE INDEX statements declared on <paramref name="schema"/>.
+	/// One column may carry several <c>[Index]</c> attributes (its own
+	/// single-column index plus participation in any number of named
+	/// composites), so each <see cref="SchemaColumnIndex"/> entry across
+	/// every column drives a separate index. Entries sharing
+	/// <see cref="SchemaColumnIndex.Name"/> are grouped into one composite
+	/// ordered by <see cref="SchemaColumnIndex.Order"/>; entries with
+	/// <see langword="null"/> <see cref="SchemaColumnIndex.Name"/> each get
+	/// their own single-column index named <c>IX_{Table}_{Column}</c>.
+	/// </summary>
+	private static void EmitCreateIndexesForTable(ISqlDialect dialect, StringBuilder sb, Schema schema, string tableName)
+	{
+		// Flatten (column, index-participation) pairs so we can group across
+		// columns by composite name regardless of which column declared
+		// which slot. Each [Index] attribute on a property becomes one
+		// participation; columns with no [Index] but a non-Identity
+		// [Unique] (legacy single-column unique) still emit via the
+		// IsUnique fallback below.
+		var participations = schema.Columns
+			.SelectMany(c => c.Indexes.Select(ix => (Column: c, Index: ix)))
+			.ToArray();
+
+		// Single-column path — one CREATE INDEX per (column, null-named)
+		// participation, named per SchemaNaming.
+		foreach (var (col, ix) in participations)
+		{
+			if (ix.Name is not null)
+				continue;
+
+			dialect.AppendCreateIndex(sb,
+				indexName: SchemaNaming.Index(tableName, col.Name, ix.IsUnique),
+				tableName: tableName,
+				columnName: col.Name,
+				unique: ix.IsUnique);
+
+			if (!ix.Condition.IsEmpty())
+			{
+				sb.Append(" WHERE ");
+				sb.Append(RenderIndexCondition(ix.Condition, dialect));
+			}
+
+			sb.AppendLine(";");
+		}
+
+		// Legacy fallback for hand-crafted schemas that flag IsIndex /
+		// IsUnique without populating the Indexes participation list
+		// (most reflection-built schemas go through CollectIndexes and
+		// fill Indexes, but tests and a few production callers construct
+		// SchemaColumn manually). Emit a single-column index for them.
+		foreach (var col in schema.Columns)
+		{
+			if (col.Indexes.Count > 0)
+				continue;
+
+			if (!col.IsIndex && !col.IsUnique)
+				continue;
+
+			dialect.AppendCreateIndex(sb,
+				indexName: SchemaNaming.Index(tableName, col.Name, col.IsUnique),
+				tableName: tableName,
+				columnName: col.Name,
+				unique: col.IsUnique);
+			sb.AppendLine(";");
+		}
+
+		// Composite path — one CREATE INDEX per distinct Name, columns
+		// ordered by SchemaColumnIndex.Order across every column that
+		// declares membership in that name. Uniqueness is taken from any
+		// participating column flagged IsUnique (callers can mark the
+		// composite UNIQUE by giving one of its members [Unique(Name = ...)]).
+		var composites = participations
+			.Where(p => p.Index.Name is not null)
+			.GroupBy(p => p.Index.Name, StringComparer.Ordinal);
+
+		foreach (var group in composites)
+		{
+			var ordered = group
+				.OrderBy(p => p.Index.Order)
+				.ThenBy(p => p.Column.Name, StringComparer.Ordinal)
+				.ToArray();
+			var unique = ordered.Any(p => p.Index.IsUnique);
+
+			var cols = ordered.Select(p => dialect.QuoteIdentifier(p.Column.Name)).JoinCommaSpace();
+
+			sb.Append(unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+			sb.Append(dialect.QuoteIdentifier(group.Key));
+			sb.Append(" ON ");
+			sb.Append(dialect.QuoteIdentifier(tableName));
+			sb.Append(" (");
+			sb.Append(cols);
+			sb.Append(")");
+
+			// Any one member may carry the partial-index predicate; render it as a trailing WHERE.
+			var condition = ordered.Select(p => p.Index.Condition).FirstOrDefault(c => !c.IsEmpty());
+			if (!condition.IsEmpty())
+			{
+				sb.Append(" WHERE ");
+				sb.Append(RenderIndexCondition(condition, dialect));
+			}
+
+			sb.AppendLine(";");
+		}
+	}
+
+	// Render a partial-index predicate: brace-wrapped column tokens ({Col}) become the dialect-quoted
+	// identifier, so a single Condition string is portable across SQL Server / PostgreSQL / SQLite.
+	private static string RenderIndexCondition(string condition, ISqlDialect dialect)
+		=> System.Text.RegularExpressions.Regex.Replace(condition, @"\{(\w+)\}",
+			m => dialect.QuoteIdentifier(m.Groups[1].Value));
+
+	private static void AppendIndexDiffs(
+		IEnumerable<Schema> entities,
+		IReadOnlyList<DbIndexInfo> dbIndexes,
+		IReadOnlyDictionary<string, Dictionary<string, DbColumnInfo>> dbTables,
+		List<SchemaDiff> diffs)
+	{
+		// Group DB rows by (Table, IndexName) so a composite shows up as one
+		// entry whose columns are ordered by ColumnOrdinal. PK backing
+		// indexes are filtered out — they live with the identity column.
+		var dbByName = dbIndexes
+			.Where(ix => !ix.IsPrimaryKey)
+			.GroupBy(ix => (ix.TableName, ix.IndexName), TableIndexNameComparer.Instance)
+			.ToDictionary(
+				g => g.Key,
+				g => new DbIndexShape(
+					Columns: g.OrderBy(x => x.ColumnOrdinal).Select(x => x.ColumnName).ToArray(),
+					IsUnique: g.First().IsUnique),
+				TableIndexNameComparer.Instance);
+
+		// Collect every entity-declared index keyed by (Table, ResolvedName)
+		// where ResolvedName is the explicit composite name when set,
+		// otherwise the IX_{Table}_{Column} fallback for single-column.
+		var declaredByName = new Dictionary<(string Table, string Name), ExpectedIndexShape>(TableIndexNameComparer.Instance);
+
+		void AddDeclared(string tableName, string indexName, string columnName, int order, bool unique)
+		{
+			var key = (tableName, indexName);
+			if (declaredByName.TryGetValue(key, out var existing))
+			{
+				existing.Columns.Add((order, columnName));
+				if (unique)
+					existing.IsUnique = true;
+			}
+			else
+			{
+				declaredByName[key] = new ExpectedIndexShape
+				{
+					Columns = [(order, columnName)],
+					IsUnique = unique,
+				};
+			}
+		}
+
+		foreach (var schema in entities)
+		{
+			if (schema.IsView)
+				continue;
+
+			// MissingTable already emits CREATE INDEX inline with CREATE TABLE,
+			// so a table that's missing entirely is handled in the MissingTable
+			// branch — skip it here.
+			if (!dbTables.ContainsKey(schema.TableName))
+				continue;
+
+			foreach (var col in schema.Columns)
+			{
+				// Identity column is backed by the PK index automatically.
+				if (col == schema.Identity)
+					continue;
+
+				if (col.Indexes.Count == 0 && col.IsUnique)
+				{
+					// Legacy [Unique] without explicit [Index] — emit a
+					// standalone unique index named per SchemaNaming.
+					AddDeclared(schema.TableName, SchemaNaming.Index(schema.TableName, col.Name, unique: true), col.Name, 0, unique: true);
+					continue;
+				}
+
+				foreach (var ix in col.Indexes)
+				{
+					var name = ix.Name ?? SchemaNaming.Index(schema.TableName, col.Name, ix.IsUnique);
+					AddDeclared(schema.TableName, name, col.Name, ix.Order, ix.IsUnique);
+				}
+			}
+		}
+
+		// Compare declared vs DB by index SHAPE — the ordered column set plus
+		// uniqueness — rather than by index name. Index names are author-chosen
+		// (UX_*, hand-named composites) and almost never equal the IX_{Table}_{Column}
+		// the model generates, so name-based matching reported the very same index as
+		// both MissingIndex (model name absent in DB) and ExtraIndex (DB name absent in
+		// model). Shape matching reconciles an index regardless of its name; the name is
+		// kept only for rendering (model name on CREATE, DB name on the commented DROP).
+		static string ShapeKey(string table, IEnumerable<string> columns, bool unique)
+			=> string.Concat(
+				table.ToLowerInvariant(), "",
+				string.Join("", columns.Select(c => c.ToLowerInvariant())), "",
+				unique ? "U" : "N");
+
+		// Pool DB indexes by shape. A list per shape tolerates the (rare) case of two
+		// DB indexes sharing the same columns + uniqueness under different names.
+		var dbByShape = new Dictionary<string, List<((string Table, string Name) Key, DbIndexShape Shape)>>();
+		foreach (var kv in dbByName)
+		{
+			var (dbTable, _) = kv.Key;
+			var shapeKey = ShapeKey(dbTable, kv.Value.Columns, kv.Value.IsUnique);
+			if (!dbByShape.TryGetValue(shapeKey, out var list))
+				dbByShape[shapeKey] = list = [];
+			list.Add((kv.Key, kv.Value));
+		}
+
+		// Each declared index consumes a DB index of the same shape if one exists,
+		// otherwise it is genuinely missing. Stable order for deterministic output.
+		foreach (var kv in declaredByName
+			.OrderBy(k => k.Key.Table, StringComparer.OrdinalIgnoreCase)
+			.ThenBy(k => k.Key.Name, StringComparer.OrdinalIgnoreCase))
+		{
+			var (table, name) = kv.Key;
+			var expected = kv.Value;
+
+			var expectedCols = expected.Columns
+				.OrderBy(c => c.Order)
+				.Select(c => c.ColumnName)
+				.ToArray();
+
+			var shapeKey = ShapeKey(table, expectedCols, expected.IsUnique);
+
+			if (dbByShape.TryGetValue(shapeKey, out var pool) && pool.Count > 0)
+			{
+				// Same column set + uniqueness already exists in the DB under some
+				// name — reconciled; consume it so it is not later reported as extra.
+				pool.RemoveAt(pool.Count - 1);
+			}
+			else
+			{
+				diffs.Add(new(table, name, SchemaDiffKind.MissingIndex,
+					$"({string.Join(", ", expectedCols)}){(expected.IsUnique ? " UNIQUE" : "")}",
+					"missing"));
+			}
+		}
+
+		// Anything left unconsumed is an index present in the DB whose shape no entity
+		// declares — informational only, never auto-dropped. Only surface ExtraIndex on
+		// tables the caller actually asked about (present in the `entities` argument);
+		// indexes on unrelated tables (other fixtures' leftovers, unrelated app schemas
+		// sharing the DB) would otherwise bubble through callers passing a narrow list.
+		var entityTableNames = new HashSet<string>(
+			entities.Where(s => !s.IsView).Select(s => s.TableName),
+			StringComparer.OrdinalIgnoreCase);
+
+		foreach (var (key, shape) in dbByShape.Values
+			.SelectMany(l => l)
+			.OrderBy(x => x.Key.Table, StringComparer.OrdinalIgnoreCase)
+			.ThenBy(x => x.Key.Name, StringComparer.OrdinalIgnoreCase))
+		{
+			var (table, name) = key;
+			if (!entityTableNames.Contains(table))
+				continue;
+
+			diffs.Add(new(table, name, SchemaDiffKind.ExtraIndex,
+				string.Empty,
+				$"({string.Join(", ", shape.Columns)}){(shape.IsUnique ? " UNIQUE" : "")}"));
+		}
+	}
+
+	/// <summary>
+	/// Emits one CREATE INDEX for the index identified by
+	/// <paramref name="indexName"/> on <paramref name="schema"/>. Used by
+	/// the MissingIndex diff branch: the diff carries only the index name
+	/// (composite name or the <see cref="SchemaNaming"/> fallback), and the schema
+	/// supplies the participating columns / uniqueness via
+	/// <see cref="SchemaColumn.Indexes"/> participations or the legacy
+	/// IsUnique fallback.
+	/// </summary>
+	private static void EmitIndexByName(ISqlDialect dialect, StringBuilder sb, Schema schema, string tableName, string indexName)
+	{
+		// Composite participation match — columns where any
+		// SchemaColumnIndex.Name (resolved) equals indexName.
+		var participating = schema.Columns
+			.SelectMany(c => c.Indexes
+				.Where(ix => string.Equals(ix.Name ?? SchemaNaming.Index(tableName, c.Name, ix.IsUnique), indexName, StringComparison.OrdinalIgnoreCase))
+				.Select(ix => (Column: c, Order: ix.Order, ix.IsUnique, ix.Condition)))
+			.OrderBy(p => p.Order)
+			.ThenBy(p => p.Column.Name, StringComparer.Ordinal)
+			.ToArray();
+
+		if (participating.Length == 0)
+		{
+			// No [Index] participation matched — must be a legacy [Unique]
+			// without explicit [Index]. Find the column whose generated
+			// fallback name matches the requested one.
+			var legacy = schema.Columns.FirstOrDefault(c =>
+				c.IsUnique
+				&& c.Indexes.Count == 0
+				&& string.Equals(SchemaNaming.Index(tableName, c.Name, unique: true), indexName, StringComparison.OrdinalIgnoreCase));
+
+			if (legacy is null)
+				return;
+
+			dialect.AppendCreateIndex(sb,
+				indexName: indexName,
+				tableName: tableName,
+				columnName: legacy.Name,
+				unique: true);
+			sb.AppendLine(";");
+			return;
+		}
+
+		var unique = participating.Any(p => p.IsUnique);
+
+		// Any one member may carry the partial-index predicate, as in EmitCreateIndexesForTable.
+		var condition = participating.Select(p => p.Condition).FirstOrDefault(c => !c.IsEmpty());
+
+		if (participating.Length == 1)
+		{
+			dialect.AppendCreateIndex(sb,
+				indexName: indexName,
+				tableName: tableName,
+				columnName: participating[0].Column.Name,
+				unique: unique);
+
+			if (!condition.IsEmpty())
+				sb.Append(" WHERE ").Append(RenderIndexCondition(condition, dialect));
+
+			sb.AppendLine(";");
+			return;
+		}
+
+		// Composite — emit inline rather than via dialect.AppendCreateIndex
+		// (which is single-column). The CREATE INDEX syntax is identical
+		// across SqlServer / Postgres / SQLite up to the quoting style,
+		// which dialect.QuoteIdentifier handles.
+		var cols = participating.Select(p => dialect.QuoteIdentifier(p.Column.Name)).JoinCommaSpace();
+
+		sb.Append(unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+		sb.Append(dialect.QuoteIdentifier(indexName));
+		sb.Append(" ON ");
+		sb.Append(dialect.QuoteIdentifier(tableName));
+		sb.Append(" (");
+		sb.Append(cols);
+		sb.Append(")");
+
+		if (!condition.IsEmpty())
+			sb.Append(" WHERE ").Append(RenderIndexCondition(condition, dialect));
+
+		sb.AppendLine(";");
+	}
+
+	/// <summary>
+	/// Audits the names of live-database primary keys, foreign keys and indexes against
+	/// <see cref="SchemaNaming"/>. Report-only — renaming a constraint is destructive, so
+	/// none of the diffs produced here is ever turned into DDL by
+	/// <see cref="GenerateMigrationSql"/>.
+	/// </summary>
+	private static void AppendNamingDiffs(
+		IEnumerable<Schema> entities,
+		IReadOnlyList<DbForeignKeyInfo> dbForeignKeys,
+		IReadOnlyList<DbIndexInfo> dbIndexes,
+		IReadOnlyList<DbColumnInfo> dbColumns,
+		List<SchemaDiff> diffs)
+	{
+		// Audit only the tables the caller actually mapped. A partial entity set — the
+		// common case — shares the database with schemas whose naming is none of our
+		// business, and those must not bubble up through a narrow entity list.
+		var entityTables = new HashSet<string>(
+			entities.Where(s => !s.IsView).Select(s => s.TableName),
+			StringComparer.OrdinalIgnoreCase);
+
+		// Tables and columns are reconciled ignoring case, so a database spelling them
+		// differently than the model does still matches and the drift never surfaces —
+		// even though it breaks case-sensitive collations and any quoted SQL. Compare the
+		// database's own spelling against what the entity declares.
+		var dbTableNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+		var dbColumnNames = new Dictionary<(string Table, string Column), string>(new TableColumnComparer());
+
+		foreach (var c in dbColumns)
+		{
+			dbTableNames[c.TableName] = c.TableName;
+			dbColumnNames[(c.TableName, c.ColumnName)] = c.ColumnName;
+		}
+
+		foreach (var schema in entities)
+		{
+			if (schema.IsView)
+				continue;
+
+			if (dbTableNames.TryGetValue(schema.TableName, out var dbTableName)
+				&& !StringComparer.Ordinal.Equals(schema.TableName, dbTableName))
+			{
+				diffs.Add(new(schema.TableName, string.Empty, SchemaDiffKind.TableNameCaseMismatch,
+					schema.TableName, dbTableName));
+			}
+
+			foreach (var col in schema.AllColumns)
+			{
+				if (dbColumnNames.TryGetValue((schema.TableName, col.Name), out var dbColumnName)
+					&& !StringComparer.Ordinal.Equals(col.Name, dbColumnName))
+				{
+					diffs.Add(new(schema.TableName, col.Name, SchemaDiffKind.ColumnNameCaseMismatch,
+						col.Name, dbColumnName));
+				}
+			}
+		}
+
+		// Index names the model states explicitly (a composite [Index(Name = …)]) are
+		// exempt: the author picked that name on purpose, and the generated convention
+		// has nothing to say about it.
+		var explicitIndexNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		foreach (var schema in entities)
+		{
+			if (schema.IsView)
+				continue;
+
+			foreach (var col in schema.Columns)
+			{
+				foreach (var ix in col.Indexes)
+				{
+					if (!ix.Name.IsEmpty())
+						explicitIndexNames.Add(ix.Name);
+				}
+			}
+		}
+
+		if (dbForeignKeys is not null)
+		{
+			foreach (var fk in dbForeignKeys
+				.OrderBy(f => f.TableName, StringComparer.OrdinalIgnoreCase)
+				.ThenBy(f => f.ColumnName, StringComparer.OrdinalIgnoreCase))
+			{
+				if (!entityTables.Contains(fk.TableName) || SchemaNaming.IsDatabaseGenerated(fk.ConstraintName))
+					continue;
+
+				var expected = SchemaNaming.ForeignKey(fk.TableName, fk.ColumnName);
+
+				if (!expected.EqualsIgnoreCase(fk.ConstraintName))
+				{
+					diffs.Add(new(fk.TableName, fk.ColumnName, SchemaDiffKind.ForeignKeyNameMismatch,
+						expected, fk.ConstraintName));
+				}
+			}
+		}
+
+		if (dbIndexes is null)
+			return;
+
+		// Metadata carries one row per indexed column, so collapse to one entry per
+		// (table, index) before judging the name.
+		foreach (var g in dbIndexes
+			.GroupBy(ix => (ix.TableName, ix.IndexName), TableIndexNameComparer.Instance)
+			.OrderBy(g => g.Key.Item1, StringComparer.OrdinalIgnoreCase)
+			.ThenBy(g => g.Key.Item2, StringComparer.OrdinalIgnoreCase))
+		{
+			var (table, name) = g.Key;
+
+			if (!entityTables.Contains(table) || SchemaNaming.IsDatabaseGenerated(name))
+				continue;
+
+			var first = g.First();
+
+			if (first.IsPrimaryKey)
+			{
+				// The PK spans the identity column, so the name keys off the table alone;
+				// no single column owns the diff.
+				var expectedPk = SchemaNaming.PrimaryKey(table);
+
+				if (!expectedPk.EqualsIgnoreCase(name))
+					diffs.Add(new(table, string.Empty, SchemaDiffKind.PrimaryKeyNameMismatch, expectedPk, name));
+
+				continue;
+			}
+
+			if (explicitIndexNames.Contains(name))
+				continue;
+
+			var columns = g.OrderBy(x => x.ColumnOrdinal).Select(x => x.ColumnName).ToArray();
+			var expectedIx = SchemaNaming.Index(table, columns, first.IsUnique);
+
+			if (!expectedIx.EqualsIgnoreCase(name))
+				diffs.Add(new(table, columns[0], SchemaDiffKind.IndexNameMismatch, expectedIx, name));
+		}
+	}
+
+	private sealed class ExpectedIndexShape
+	{
+		public List<(int Order, string ColumnName)> Columns { get; init; } = [];
+		public bool IsUnique { get; set; }
+	}
+
+	private sealed record DbIndexShape(IReadOnlyList<string> Columns, bool IsUnique);
+
+	private sealed class TableIndexNameComparer : IEqualityComparer<(string Table, string Name)>
+	{
+		public static readonly TableIndexNameComparer Instance = new();
+
+		public bool Equals((string Table, string Name) x, (string Table, string Name) y)
+			=> string.Equals(x.Table, y.Table, StringComparison.OrdinalIgnoreCase)
+				&& string.Equals(x.Name, y.Name, StringComparison.OrdinalIgnoreCase);
+
+		public int GetHashCode((string Table, string Name) obj)
+			=> HashCode.Combine(obj.Table?.ToLowerInvariant(), obj.Name?.ToLowerInvariant());
+	}
+
+	private sealed class TableColumnComparer : IEqualityComparer<(string Table, string Column)>
+	{
+		public bool Equals((string Table, string Column) x, (string Table, string Column) y)
+			=> string.Equals(x.Table, y.Table, StringComparison.OrdinalIgnoreCase)
+				&& string.Equals(x.Column, y.Column, StringComparison.OrdinalIgnoreCase);
+
+		public int GetHashCode((string Table, string Column) obj)
+			=> HashCode.Combine(
+				obj.Table?.ToLowerInvariant(),
+				obj.Column?.ToLowerInvariant());
+	}
+
+	/// <summary>
+	/// Generates migration SQL for the given differences.
+	/// </summary>
+	/// <param name="dialect">SQL dialect.</param>
+	/// <param name="diffs">Differences to generate SQL for.</param>
+	/// <param name="schemas">Entity schemas (for column type lookup).</param>
+	/// <returns>Migration SQL script.</returns>
+	public static string GenerateMigrationSql(
+		ISqlDialect dialect,
+		IReadOnlyList<SchemaDiff> diffs,
+		IEnumerable<Schema> schemas)
+	{
+		var schemaMap = schemas.ToDictionary(s => s.TableName, StringComparer.OrdinalIgnoreCase);
+
+		foreach (var schema in schemaMap.Values)
+		{
+			foreach (var col in schema.Columns)
+			{
+				if (col.ClrType == typeof(string) && (col.IsUnique || col.IsIndex) && col.MaxLength <= 0)
+					throw new InvalidOperationException($"Indexed string column '{schema.TableName}.{col.Name}' requires [MaxLength].");
+			}
+		}
+
+		var sb = new StringBuilder();
+
+		// New tables are created topologically (a referenced new table before the new
+		// table that references it). This keeps an inline foreign key valid on dialects
+		// that cannot ALTER TABLE ADD CONSTRAINT (SQLite), and it also guarantees that
+		// any later ALTER TABLE ADD CONSTRAINT / new FK column targets a table that
+		// already exists.
+		var newTableOrder = OrderNewTablesForCreate(diffs, schemaMap);
+
+		// Foreign keys for new tables on dialects that support ALTER TABLE ADD
+		// CONSTRAINT are deferred here and flushed after every CREATE TABLE, so the
+		// create order of the tables themselves is irrelevant. SQLite keeps them inline
+		// (see the MissingTable branch) and this stays empty.
+		var deferredForeignKeys = new StringBuilder();
+
+		// Commented-out drop statements are collected separately so the deferred new-table
+		// FKs (additive) can be flushed before them, keeping the runnable part of the
+		// script contiguous and the review-only drops at the very end.
+		var drops = new StringBuilder();
+
+		var alteredColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		// Emit phases so the script can be uncommented and run as-is in a dependency-safe
+		// order: new tables first (topologically), then the remaining additive/corrective
+		// statements, then deferred new-table FKs (appended after the loop), then the
+		// commented-out drops. OrderBy is a stable sort, so statements keep their original
+		// relative order within each phase.
+		static int EmitPhase(SchemaDiffKind kind) => kind switch
+		{
+			SchemaDiffKind.MissingTable => 0,
+			// Before any index or foreign key is added on the column it changes.
+			_ when IsColumnChange(kind) => 3,
+			SchemaDiffKind.ExtraForeignKey => 10,
+			SchemaDiffKind.ExtraIndex => 11,
+			SchemaDiffKind.ExtraColumn => 12,
+			SchemaDiffKind.ExtraTable => 13,
+			_ => 5,
+		};
+
+		int CreateRank(SchemaDiff d)
+			=> d.Kind == SchemaDiffKind.MissingTable && newTableOrder.TryGetValue(d.TableName, out var r) ? r : 0;
+
+		foreach (var diff in diffs
+			.OrderBy(d => EmitPhase(d.Kind))
+			.ThenBy(CreateRank))
+		{
+			switch (diff.Kind)
+			{
+				case SchemaDiffKind.MissingTable:
+				{
+					if (!schemaMap.TryGetValue(diff.TableName, out var schema))
+						break;
+
+					var colDefs = new List<string>();
+
+					// The PRIMARY KEY constraint is named so the database does not invent
+					// one of its own, which the naming audit could never reconcile.
+					var pkName = SchemaNaming.PrimaryKey(diff.TableName);
+
+					if (schema.Identity is not null)
+					colDefs.Add(schema.Identity.ClrType.IsNumeric()
+						? $"{dialect.QuoteIdentifier(schema.Identity.Name)} {dialect.GetSqlTypeName(schema.Identity.ClrType)} {dialect.GetIdentityColumnSuffix(pkName)}"
+						: $"{dialect.QuoteIdentifier(schema.Identity.Name)} {dialect.GetSqlTypeName(schema.Identity.ClrType)} CONSTRAINT {dialect.QuoteIdentifier(pkName)} PRIMARY KEY");
+
+					foreach (var col in schema.Columns)
+					{
+						var cd = dialect.GetColumnDefinition(col.ClrType, col.IsNullable, col.MaxLength, col.Precision, col.Scale);
+						colDefs.Add($"{dialect.QuoteIdentifier(col.Name)} {cd}");
+					}
+
+					// Foreign keys for the new table. Dialects that support ALTER TABLE ADD
+					// CONSTRAINT get them deferred (flushed after every CREATE TABLE) so the
+					// table-creation order is irrelevant; SQLite, which cannot ALTER in a FK,
+					// keeps them inline in CREATE TABLE (the topological order created the
+					// referenced table first).
+					foreach (var col in schema.Columns)
+					{
+						if (col.ReferencedEntityType is null)
+							continue;
+
+						var refSchema = ResolveForeignKeyTarget(col.ReferencedEntityType);
+						var refCol = refSchema.Identity?.Name ?? "Id";
+
+						if (dialect.SupportsAddForeignKeyViaAlter)
+						{
+							dialect.AppendAddForeignKey(deferredForeignKeys, diff.TableName, col.Name, refSchema.TableName, refCol);
+							deferredForeignKeys.AppendLine(";");
+						}
+						else
+						{
+							colDefs.Add(dialect.GetForeignKeyConstraint(diff.TableName, col.Name, refSchema.TableName, refCol));
+						}
+					}
+
+					dialect.AppendCreateTable(sb, diff.TableName, colDefs.JoinCommaSpace());
+					sb.AppendLine(";");
+
+					EmitCreateIndexesForTable(dialect, sb, schema, diff.TableName);
+
+					break;
+				}
+
+				case SchemaDiffKind.MissingColumn:
+				{
+					if (!schemaMap.TryGetValue(diff.TableName, out var schema))
+						break;
+
+					var col = schema.TryGetColumn(diff.ColumnName);
+					if (col is null)
+						break;
+
+					// A dialect that adds no foreign key to an existing table takes it as a clause of the new column.
+					var inlineReference = string.Empty;
+
+					if (col.ReferencedEntityType is not null && !dialect.SupportsAddForeignKeyViaAlter)
+					{
+						var refSchema = ResolveForeignKeyTarget(col.ReferencedEntityType);
+						inlineReference = $" CONSTRAINT {dialect.QuoteIdentifier(SchemaNaming.ForeignKey(diff.TableName, col.Name))} REFERENCES {dialect.QuoteIdentifier(refSchema.TableName)} ({dialect.QuoteIdentifier(refSchema.Identity?.Name ?? "Id")})";
+					}
+
+					if (!col.IsNullable && col.ReferencedEntityType is not null)
+					{
+						// Nothing fills a required reference: a default points at no row, and the foreign key would
+						// refuse it. The column goes in nullable, and requiring it waits until it is filled.
+						var nullableDef = dialect.GetColumnDefinition(col.ClrType, isNullable: true, col.MaxLength, col.Precision, col.Scale);
+						dialect.AppendAddColumn(sb, diff.TableName, diff.ColumnName, nullableDef + inlineReference);
+						sb.AppendLine(";");
+
+						if (dialect.CanAlterColumn)
+						{
+							var tighten = new StringBuilder();
+							dialect.AppendAlterColumn(tighten, diff.TableName, diff.ColumnName, col.ClrType, col.IsNullable, col.MaxLength, col.Precision, col.Scale, live: null);
+							drops.AppendLine($"-- {diff.TableName}.{diff.ColumnName} is a new required reference: fill it, then run {tighten};");
+						}
+						else
+							drops.AppendLine($"-- {diff.TableName}.{diff.ColumnName} is a new required reference: fill it, then rebuild the table to make it NOT NULL");
+					}
+					else if (!col.IsNullable && !dialect.CanAlterColumn)
+					{
+						// Without ALTER COLUMN a required column arrives required at once, which takes a default.
+						var colDef = $"{dialect.GetColumnTypeName(col.ClrType, col.MaxLength, col.Precision, col.Scale)} NOT NULL DEFAULT {dialect.GetDefaultLiteral(col.ClrType)}";
+						dialect.AppendAddColumn(sb, diff.TableName, diff.ColumnName, colDef);
+						sb.AppendLine(";");
+					}
+					else if (!col.IsNullable)
+					{
+						var batch = dialect.BatchSeparator;
+
+						// 3-step: add as NULL → fill default → alter to NOT NULL
+						var nullableDef = dialect.GetColumnDefinition(col.ClrType, isNullable: true, col.MaxLength, col.Precision, col.Scale);
+						dialect.AppendAddColumn(sb, diff.TableName, diff.ColumnName, nullableDef);
+						sb.AppendLine(";");
+
+						if (!batch.IsEmpty())
+							sb.AppendLine(batch);
+
+						var defaultVal = dialect.GetDefaultLiteral(col.ClrType);
+						dialect.AppendUpdateWhereNull(sb, diff.TableName, diff.ColumnName, defaultVal);
+						sb.AppendLine();
+
+						if (!batch.IsEmpty())
+							sb.AppendLine(batch);
+
+						dialect.AppendAlterColumn(sb, diff.TableName, diff.ColumnName, col.ClrType, col.IsNullable, col.MaxLength, col.Precision, col.Scale, live: null);
+						sb.AppendLine(";");
+					}
+					else
+					{
+						var colDef = dialect.GetColumnDefinition(col.ClrType, col.IsNullable, col.MaxLength, col.Precision, col.Scale);
+						dialect.AppendAddColumn(sb, diff.TableName, diff.ColumnName, colDef + inlineReference);
+						sb.AppendLine(";");
+					}
+
+					// SQL Server binds index filters against the schema at the start of a batch.
+					if (!dialect.BatchSeparator.IsEmpty())
+						sb.AppendLine(dialect.BatchSeparator);
+
+					// if the new column is a foreign key, append ALTER TABLE ADD CONSTRAINT
+					if (col.ReferencedEntityType is not null && dialect.SupportsAddForeignKeyViaAlter)
+					{
+						var refSchema = ResolveForeignKeyTarget(col.ReferencedEntityType);
+						var refCol = refSchema.Identity?.Name ?? "Id";
+						dialect.AppendAddForeignKey(sb, diff.TableName, col.Name, refSchema.TableName, refCol);
+						sb.AppendLine(";");
+					}
+
+					break;
+				}
+
+				case SchemaDiffKind.TypeMismatch:
+				case SchemaDiffKind.NullabilityMismatch:
+				case SchemaDiffKind.MaxLengthMismatch:
+				case SchemaDiffKind.PrecisionMismatch:
+				{
+					if (!schemaMap.TryGetValue(diff.TableName, out var schema))
+						break;
+
+					var col = schema.TryGetColumn(diff.ColumnName);
+					if (col is null)
+						break;
+
+					// One statement per column, whatever the number of ways it differs.
+					if (!alteredColumns.Add($"{diff.TableName}.{diff.ColumnName}"))
+						break;
+
+					var columnDiffs = diffs
+						.Where(d => IsColumnChange(d.Kind) && d.TableName.EqualsIgnoreCase(diff.TableName) && d.ColumnName.EqualsIgnoreCase(diff.ColumnName))
+						.ToArray();
+
+					if (!dialect.CanAlterColumn)
+					{
+						var found = columnDiffs.Select(d => $"{d.Kind} ({d.Expected} vs {d.Actual})").JoinCommaSpace();
+						drops.AppendLine($"-- {diff.TableName}.{diff.ColumnName}: {found}; this dialect cannot alter a column in place, so the table has to be rebuilt");
+						break;
+					}
+
+					var live = columnDiffs.Select(d => d.Live).FirstOrDefault(l => l is not null);
+
+					var rebuilt = DropDependentIndexes(dialect, sb, schema, diff.TableName, diff.ColumnName,
+						[.. columnDiffs.SelectMany(d => d.LiveIndexes).Distinct()],
+						[.. columnDiffs.SelectMany(d => d.LiveForeignKeys).Distinct()]);
+
+					if (live is not null && columnDiffs.All(d => d.Kind == SchemaDiffKind.NullabilityMismatch))
+						dialect.AppendAlterNullability(sb, diff.TableName, diff.ColumnName, col.IsNullable, live);
+					else
+					{
+						AppendNarrowingNote(dialect, sb, diff.TableName, col, live);
+						dialect.AppendAlterColumn(sb, diff.TableName, diff.ColumnName, col.ClrType, col.IsNullable, col.MaxLength, col.Precision, col.Scale, live);
+					}
+
+					sb.AppendLine(";");
+
+					foreach (var (name, index) in rebuilt)
+						AppendCreateIndex(dialect, sb, name, diff.TableName, index);
+
+					break;
+				}
+
+				case SchemaDiffKind.MissingForeignKey:
+				{
+					if (!schemaMap.TryGetValue(diff.TableName, out var schema))
+						break;
+
+					var col = schema.TryGetColumn(diff.ColumnName);
+					if (col?.ReferencedEntityType is null)
+						break;
+
+					var refSchema = ResolveForeignKeyTarget(col.ReferencedEntityType);
+					var refCol = refSchema.Identity?.Name ?? "Id";
+					dialect.AppendAddForeignKey(sb, diff.TableName, col.Name, refSchema.TableName, refCol);
+					sb.AppendLine(";");
+					break;
+				}
+
+				case SchemaDiffKind.ExtraForeignKey:
+					// Extra FKs are never auto-dropped — emit the DROP CONSTRAINT commented
+					// out, ready for a human to review and uncomment. diff.Expected carries
+					// the constraint name; diff.Actual the referenced table.column for context.
+					drops.AppendLine($"-- ALTER TABLE {dialect.QuoteIdentifier(diff.TableName)} DROP CONSTRAINT {dialect.QuoteIdentifier(diff.Expected)};   -- {dialect.QuoteIdentifier(diff.ColumnName)} -> {diff.Actual}");
+					break;
+
+				case SchemaDiffKind.MissingIndex:
+				{
+					if (!schemaMap.TryGetValue(diff.TableName, out var schema))
+						break;
+
+					// diff.ColumnName carries the index name as resolved by
+					// AppendIndexDiffs — either an explicit composite name
+					// or the IX_{Table}_{Column} fallback. Walk the schema
+					// to recover the participating columns and uniqueness.
+					EmitIndexByName(dialect, sb, schema, diff.TableName, diff.ColumnName);
+					break;
+				}
+
+				case SchemaDiffKind.CompressionMismatch:
+					// Rewrites every index of the table, so it goes in as its own statement and the
+					// person running the script decides when.
+					dialect.AppendSetCompression(sb, diff.TableName, diff.Expected.To<DataCompressions>());
+					sb.AppendLine(";");
+					break;
+
+				case SchemaDiffKind.ExtraIndex:
+				{
+					// Extra indexes are never auto-dropped — emit the DROP INDEX commented
+					// out, ready for a human to review and uncomment. diff.ColumnName carries
+					// the index name; diff.Actual the column list for context.
+					var drop = new StringBuilder();
+					dialect.AppendDropIndex(drop, diff.TableName, diff.ColumnName);
+					drops.Append("-- ").Append(drop).AppendLine($";   -- {diff.Actual}");
+					break;
+				}
+
+				case SchemaDiffKind.ExtraColumn:
+				{
+					// Extra columns are never auto-dropped — emit the DROP COLUMN commented
+					// out, ready for a human to review and uncomment. Dialects that refuse
+					// DROP COLUMN (SQLite) keep a plain note instead of an executable statement.
+					try
+					{
+						var drop = new StringBuilder();
+						dialect.AppendDropColumn(drop, diff.TableName, diff.ColumnName);
+						drops.Append("-- ").Append(drop).AppendLine(";");
+					}
+					catch (NotSupportedException)
+					{
+						drops.AppendLine($"-- Extra column: {dialect.QuoteIdentifier(diff.TableName)}.{dialect.QuoteIdentifier(diff.ColumnName)} (DROP COLUMN not supported by this dialect)");
+					}
+
+					break;
+				}
+
+				case SchemaDiffKind.ExtraTable:
+					// Extra tables are never auto-dropped — emit a commented-out DROP TABLE.
+					drops.AppendLine($"-- DROP TABLE {dialect.QuoteIdentifier(diff.TableName)};");
+					break;
+			}
+		}
+
+		// Additive new-table FKs (ALTER-capable dialects) after all CREATE TABLEs, then the
+		// review-only commented drops.
+		sb.Append(deferredForeignKeys);
+		sb.Append(drops);
+
+		return sb.ToString();
+	}
+
+	/// <summary>
+	/// Applies migration SQL directly to the database.
+	/// </summary>
+	/// <param name="connection">Open database connection.</param>
+	/// <param name="migrationSql">SQL to execute.</param>
+	/// <param name="dialect">Dialect whose <see cref="ISqlDialect.BatchSeparator"/> is used to split the SQL into batches before execution. If the separator is empty, the SQL is sent as a single command.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	public static async Task ApplyAsync(DbConnection connection, string migrationSql, ISqlDialect dialect, CancellationToken cancellationToken = default)
+	{
+		if (connection is null)
+			throw new ArgumentNullException(nameof(connection));
+
+		if (dialect is null)
+			throw new ArgumentNullException(nameof(dialect));
+
+		if (migrationSql.IsEmpty())
+			return;
+
+		var separator = dialect.BatchSeparator;
+
+		if (separator.IsEmpty())
+		{
+			using var cmd = connection.CreateCommand();
+			cmd.CommandText = migrationSql;
+			await cmd.ExecuteNonQueryAsync(cancellationToken).NoWait();
+			return;
+		}
+
+		foreach (var batch in SplitByBatchSeparator(migrationSql, separator))
+		{
+			using var cmd = connection.CreateCommand();
+			cmd.CommandText = batch;
+			await cmd.ExecuteNonQueryAsync(cancellationToken).NoWait();
+		}
+	}
+
+	private static IEnumerable<string> SplitByBatchSeparator(string sql, string separator)
+	{
+		var current = new StringBuilder();
+
+		foreach (var line in sql.Split('\n'))
+		{
+			if (line.Trim().EqualsIgnoreCase(separator))
+			{
+				var batch = current.ToString().Trim();
+				if (!batch.IsEmpty())
+					yield return batch;
+				current.Clear();
+			}
+			else
+			{
+				current.AppendLine(line.TrimEnd('\r'));
+			}
+		}
+
+		var tail = current.ToString().Trim();
+		if (!tail.IsEmpty())
+			yield return tail;
+	}
+
+	private sealed record DeclaredIndex(string[] Columns, bool IsUnique, string Condition);
+
+	// The indexes a schema declares, grouped the way AppendIndexDiffs matches them against the database.
+	private static IReadOnlyList<DeclaredIndex> GetDeclaredIndexes(Schema schema)
+	{
+		var participations = new List<(string Name, string Column, int Order, bool IsUnique, string Condition)>();
+
+		foreach (var col in schema.Columns)
+		{
+			if (col == schema.Identity)
+				continue;
+
+			if (col.Indexes.Count == 0 && col.IsUnique)
+			{
+				participations.Add((SchemaNaming.Index(schema.TableName, col.Name, unique: true), col.Name, 0, true, null));
+				continue;
+			}
+
+			foreach (var ix in col.Indexes)
+				participations.Add((ix.Name ?? SchemaNaming.Index(schema.TableName, col.Name, ix.IsUnique), col.Name, ix.Order, ix.IsUnique, ix.Condition));
+		}
+
+		return [.. participations
+			.GroupBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+			.Select(g =>
+			{
+				var ordered = g.OrderBy(p => p.Order).ThenBy(p => p.Column, StringComparer.Ordinal).ToArray();
+				return new DeclaredIndex([.. ordered.Select(p => p.Column)], ordered.Any(p => p.IsUnique), ordered.Select(p => p.Condition).FirstOrDefault(c => !c.IsEmpty()));
+			})];
+	}
+
+	private static IReadOnlyList<DbIndexInfo> IndexesOn(IReadOnlyList<DbIndexInfo> dbIndexes, string tableName, string columnName)
+		=> dbIndexes is null
+			? []
+			: [.. dbIndexes
+				.Where(i => i.TableName.EqualsIgnoreCase(tableName))
+				.GroupBy(i => i.IndexName, StringComparer.OrdinalIgnoreCase)
+				.Where(g => g.Any(i => i.ColumnName.EqualsIgnoreCase(columnName)))
+				.SelectMany(g => g)];
+
+	private static IReadOnlyList<DbForeignKeyInfo> ForeignKeysOn(IReadOnlyList<DbForeignKeyInfo> dbForeignKeys, string tableName, string columnName)
+		=> dbForeignKeys is null
+			? []
+			: [.. dbForeignKeys.Where(f =>
+				(f.TableName.EqualsIgnoreCase(tableName) && f.ColumnName.EqualsIgnoreCase(columnName)) ||
+				(f.RefTableName.EqualsIgnoreCase(tableName) && f.RefColumnName.EqualsIgnoreCase(columnName)))];
+
+	// A dialect that alters no column something depends on gets the declared indexes dropped before the ALTER and
+	// recreated after, under the name the database knows them by. A primary key, a foreign key or an index the
+	// schema does not declare is left to a person, with a note saying what stands in the way.
+	private static IReadOnlyList<(string Name, DeclaredIndex Index)> DropDependentIndexes(ISqlDialect dialect, StringBuilder sb, Schema schema, string tableName, string columnName,
+		IReadOnlyList<DbIndexInfo> liveIndexes, IReadOnlyList<DbForeignKeyInfo> liveForeignKeys)
+	{
+		if (dialect.CanAlterColumnWithDependents)
+			return [];
+
+		var declared = GetDeclaredIndexes(schema);
+		var blockers = new List<string>();
+		var rebuild = new List<(string Name, DeclaredIndex Index)>();
+
+		foreach (var index in liveIndexes.GroupBy(i => i.IndexName, StringComparer.OrdinalIgnoreCase))
+		{
+			var rows = index.OrderBy(i => i.ColumnOrdinal).ToArray();
+
+			if (rows[0].IsPrimaryKey)
+			{
+				blockers.Add($"primary key {index.Key}");
+				continue;
+			}
+
+			var columns = rows.Select(r => r.ColumnName).ToArray();
+			var match = declared.FirstOrDefault(d => d.IsUnique == rows[0].IsUnique && d.Columns.SequenceEqual(columns, StringComparer.OrdinalIgnoreCase));
+
+			if (match is null)
+				blockers.Add($"index {index.Key}");
+			else
+				rebuild.Add((index.Key, match));
+		}
+
+		blockers.AddRange(liveForeignKeys.Select(f => $"foreign key {f.ConstraintName}"));
+
+		if (blockers.Count > 0)
+		{
+			sb.AppendLine($"-- {tableName}.{columnName}: {blockers.JoinCommaSpace()} depend on this column, which keeps the statement below from running; drop them before it and recreate them after");
+			return [];
+		}
+
+		foreach (var (name, _) in rebuild)
+		{
+			dialect.AppendDropIndex(sb, tableName, name);
+			sb.AppendLine(";");
+		}
+
+		return rebuild;
+	}
+
+	private static void AppendCreateIndex(ISqlDialect dialect, StringBuilder sb, string indexName, string tableName, DeclaredIndex index)
+	{
+		sb.Append(index.IsUnique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+		sb.Append(dialect.QuoteIdentifier(indexName));
+		sb.Append(" ON ");
+		sb.Append(dialect.QuoteIdentifier(tableName));
+		sb.Append(" (");
+		sb.Append(index.Columns.Select(dialect.QuoteIdentifier).JoinCommaSpace());
+		sb.Append(')');
+
+		if (!index.Condition.IsEmpty())
+			sb.Append(" WHERE ").Append(RenderIndexCondition(index.Condition, dialect));
+
+		sb.AppendLine(";");
+	}
+
+	private static bool IsColumnChange(SchemaDiffKind kind)
+		=> kind is SchemaDiffKind.TypeMismatch
+			or SchemaDiffKind.NullabilityMismatch
+			or SchemaDiffKind.MaxLengthMismatch
+			or SchemaDiffKind.PrecisionMismatch;
+
+	// The engine rounds a decimal to fewer places, and refuses one with too many digits before the point,
+	// without the script saying so; the note does.
+	private static void AppendNarrowingNote(ISqlDialect dialect, StringBuilder sb, string tableName, SchemaColumn col, DbColumnInfo live)
+	{
+		if (live is null || !dialect.KeepsDecimalDigits || (col.ClrType.GetUnderlyingType() ?? col.ClrType) != typeof(decimal))
+			return;
+
+		if (!dialect.NormalizeDbType(live.DataType).EqualsIgnoreCase(NormalizeSqlType(dialect.GetSqlTypeName(typeof(decimal)))))
+			return;
+
+		var declared = col.Precision > 0 || col.Scale > 0;
+		var precision = col.Precision > 0 ? col.Precision : SqlDialectBase.DefaultDecimalPrecision;
+		var scale = declared ? col.Scale : SqlDialectBase.DefaultDecimalScale;
+		var name = $"{tableName}.{col.Name}";
+
+		if (live.NumericPrecision is null)
+		{
+			sb.AppendLine($"-- {name}: an unconstrained number becomes ({precision},{scale}): stored values are rounded to {scale} decimal places, and one with more than {precision - scale} digits before the point stops this statement");
+			return;
+		}
+
+		var liveScale = live.NumericScale ?? 0;
+		var liveIntegers = live.NumericPrecision.Value - liveScale;
+		var change = $"({live.NumericPrecision},{liveScale}) -> ({precision},{scale})";
+
+		if (scale < liveScale)
+			sb.AppendLine($"-- {name}: {change} rounds the stored values to {scale} decimal places");
+
+		if (precision - scale < liveIntegers)
+			sb.AppendLine($"-- {name}: {change} leaves {precision - scale} digits before the point, down from {liveIntegers}; a larger stored value stops this statement");
+	}
+
+	private static string NormalizeSqlType(string sqlType)
+	{
+		// strip parentheses for comparison: "NVARCHAR(MAX)" -> "NVARCHAR"
+		var paren = sqlType.IndexOf('(');
+		return paren > 0 ? sqlType[..paren].Trim() : sqlType.Trim();
+	}
+
+}

@@ -1,0 +1,11 @@
+# DMI
+
+El indicador **índice de movimiento direccional (DMI)** es una herramienta técnica para determinar el inicio y la dirección de una tendencia. Es la primera versión del famoso ADX.
+
+Para utilizar el indicador, debe utilizar la clase [DirectionalIndex](xref:StockSharp.Algo.Indicators.DirectionalIndex).
+
+![Gráfico del indicador DMI](../../../../images/indicatordirectionalindex.png)
+
+## Contenido recomendado
+
+[DEMA](dema.md)

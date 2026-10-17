@@ -1,0 +1,7 @@
+# Configuração gráfica OKEx History
+
+Para todos os produtos [S#](../../../../api.md), a configuração gráfica da ligação é efetuada na [Janela de definições de ligação](../../../graphical_user_interface/connection_settings_window.md):
+
+![Configurações da API GUI OKEx History](../../../../../images/api_gui_settings_okex_history.png)
+
+- **Verificar datas** - validar as datas solicitadas antes de enviar pedidos de transferência.

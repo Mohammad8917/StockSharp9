@@ -1,0 +1,36 @@
+# Protección de posición
+
+![Designer protección de posiciones 00](../../../../../../images/designer_protect_positions_00.png)
+
+![Designer protección de posiciones 01](../../../../../../images/designer_protect_positions_01.png)
+
+Este bloque se usa para proteger automáticamente operaciones abiertas con stop-loss y take-profit.
+
+### Conectores de entrada
+
+Conectores de entrada
+
+- **Operación propia** – operación propia que debe protegerse con stop-loss y take-profit.
+- **Precio** – precio actual (puede tomarse de una vela, del último tick, etc.). Es necesario para seguir el precio actual del instrumento y activar órdenes protectoras.
+
+### Conectores de salida
+
+Conectores de salida
+
+- **Toma de beneficios** – orden para fijar beneficios.
+- **Limitación de pérdidas** – orden para limitar pérdidas.
+- **Transacción propia** – transacción creada por una de las órdenes anteriores.
+
+### Parámetros
+
+Parámetros Take y Stop
+
+- **Valor** - valor de take o stop.
+- **Seguimiento** – si se usa protección trailing.
+- **Tiempo de espera** - valor del tiempo de espera tras el cual la protección se activa forzosamente al precio de mercado.
+- **Órdenes de mercado** – usar órdenes de mercado (sin precio) para cerrar rápidamente la posición.
+
+![Designer protección de posiciones 02](../../../../../../images/designer_protect_positions_02.png)
+
+> [!WARNING]
+> Las transacciones entrantes NO PUEDEN ser transacciones de toda la estrategia (bloque [Operaciones por estrategia](../common/trades_by_strategy.md)), ya que esto provocará un cálculo incorrecto de la posición actual: las transacciones de protección también se convertirán en transacciones de la estrategia. El bloque **Protección de posición** debe recibir transacciones desde el conector de salida **Transacción** de los cubos [Registro de orden](../orders/register.md) y [Modificar posición](modify.md), o de componentes similares que cambien directamente la posición.

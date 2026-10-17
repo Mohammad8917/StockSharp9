@@ -1,0 +1,1412 @@
+﻿namespace Ecng.Data;
+
+using System.Collections;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.Text.RegularExpressions;
+using System.Net;
+using System.Transactions;
+
+using Ecng.Common;
+using Ecng.Data.Sql;
+
+using Nito.AsyncEx;
+
+/// <summary>
+/// Provides database access and entity persistence via an ORM layer.
+/// </summary>
+public partial class Database : Disposable, IStorage
+{
+	#region Private Fields
+
+	private readonly SynchronizedDictionary<string, DatabaseCommand> _commandsByText = [];
+	// EntityCacheStore owns the entity dictionary, its async lock, the
+	// per-entry timestamps, and the TTL policy. Database accesses the
+	// dictionary directly through Entries / Lock for the hot CRUD paths,
+	// and goes through the helpers (Touch / Remove / TrimExpiredAsync)
+	// for higher-level operations.
+	private readonly EntityCacheStore _cacheStore = new();
+	private AsyncLock _cacheLock => _cacheStore.Lock;
+	private Dictionary<(Type, string, object), (object entity, bool complete)> _cache => _cacheStore.Entries;
+	private readonly SynchronizedDictionary<Type, BulkLoadInfo> _bulkLoad = [];
+
+	/// <summary>
+	/// Maximum age of an entity in the cache. Defaults to
+	/// <see cref="TimeSpan.MaxValue"/> meaning entries are never evicted
+	/// based on age (the cache only grows / clears explicitly via
+	/// <see cref="IStorage.ClearCacheAsync"/>). Lower the value for
+	/// long-running processes that risk OOM under unbounded growth, then
+	/// call <see cref="TrimExpiredCache"/> on a timer.
+	/// </summary>
+	public TimeSpan CacheTimeout
+	{
+		get => _cacheStore.Timeout;
+		set => _cacheStore.Timeout = value;
+	}
+
+	/// <summary>
+	/// Maximum entry count of the cache before LRU eviction kicks in.
+	/// <see cref="int.MaxValue"/> disables size-bounded eviction; lower
+	/// the value for long-running processes that should bound their
+	/// resident set.
+	/// </summary>
+	public int MaxCacheEntries
+	{
+		get => _cacheStore.MaxEntries;
+		set => _cacheStore.MaxEntries = value;
+	}
+
+	/// <summary>
+	/// Removes entries from the cache whose age exceeds
+	/// <see cref="CacheTimeout"/>. Safe to call concurrently with normal
+	/// CRUD — it acquires the same lock used by <c>ClearCacheAsync</c>.
+	/// </summary>
+	public ValueTask TrimExpiredCache(CancellationToken cancellationToken)
+		=> _cacheStore.TrimExpiredAsync(cancellationToken);
+
+	private readonly Stat<string> _stat = new();
+	Stat<string> IStorage.Stat => _stat;
+
+	#endregion
+
+	#region Database.ctor()
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="Database"/> class.
+	/// </summary>
+	public Database(string name, string connectionString, DbProviderFactory factory, ISqlDialect dialect)
+	{
+		Debug.WriteLine($"{nameof(Database)}.ctor()");
+
+		Name = name;
+		ConnectionString = connectionString;
+		Factory = factory ?? throw new ArgumentNullException(nameof(factory));
+		Dialect = dialect ?? throw new ArgumentNullException(nameof(dialect));
+
+		_commandFactory = new CommandFactory(Factory, Dialect, QueryProvider, CreateConnectionAsync);
+	}
+
+	private readonly CommandFactory _commandFactory;
+
+	/// <summary>
+	/// Gets the query provider used to generate SQL commands.
+	/// </summary>
+	public QueryProvider QueryProvider { get; } = new();
+
+	#endregion
+
+	private string _name;
+
+	/// <summary>
+	/// Gets or sets the database name.
+	/// </summary>
+	public string Name
+	{
+		get => _name;
+		set => _name = value.IsEmpty() ? throw new ArgumentNullException(nameof(value)) : value;
+	}
+
+	private string _connectionString;
+
+	/// <summary>
+	/// Gets or sets the database connection string.
+	/// </summary>
+	public string ConnectionString
+	{
+		get => _connectionString;
+		set => _connectionString = value.IsEmpty() ? throw new ArgumentNullException(nameof(value)) : value;
+	}
+
+	private DbProviderFactory _factory;
+
+	/// <summary>
+	/// Gets or sets the <see cref="DbProviderFactory"/> used to create database objects.
+	/// </summary>
+	public DbProviderFactory Factory
+	{
+		get => _factory;
+		set => _factory = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private ISqlDialect _dialect;
+
+	/// <summary>
+	/// Gets or sets the SQL dialect used for query generation.
+	/// </summary>
+	public ISqlDialect Dialect
+	{
+		get => _dialect;
+		set => _dialect = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	/// <summary>
+	/// Gets or sets the default command type for database commands.
+	/// </summary>
+	public CommandType CommandType { get; set; } = CommandType.Text;
+
+	/// <summary>
+	/// Gets or sets the culture used for data conversions.
+	/// </summary>
+	public CultureInfo CultureInfo { get; set; } = CultureInfo.InvariantCulture;
+
+	private ValueTask<T> Do<T>(Func<ValueTask<T>> func) => CultureInfo.DoInCulture(func);
+
+	/// <summary>
+	/// Gets or sets whether delete-all operations are permitted.
+	/// </summary>
+	public bool AllowDeleteAll { get; set; }
+
+	/// <summary>
+	/// Gets or sets the maximum number of rows to preload in bulk-load mode.
+	/// </summary>
+	public int MaxBulkLoadRows { get; set; } = 100000;
+
+	void IStorage.AddBulkLoad<TEntity>() => _bulkLoad.Add(typeof(TEntity), new(this, SchemaRegistry.Get(typeof(TEntity))));
+
+	/// <summary>
+	/// Removes all bulk-load registrations and their cached data.
+	/// </summary>
+	public void ClearBulkLoad() => _bulkLoad.Clear();
+
+	/// <summary>
+	/// Creates and opens a new database connection asynchronously.
+	/// </summary>
+	public async ValueTask<DbConnection> CreateConnectionAsync(CancellationToken cancellationToken)
+	{
+		var connection = Factory.CreateConnection();
+
+		if (connection == null)
+			throw new InvalidOperationException();
+
+		connection.ConnectionString = ConnectionString;
+
+		try
+		{
+			await connection.OpenAsync(cancellationToken).NoWait();
+		}
+		catch
+		{
+			// Do not leak the connection if opening fails (server down, bad credentials, timeout).
+			await connection.DisposeAsync().NoWait();
+			throw;
+		}
+
+		return connection;
+	}
+
+	private class StorageTransaction : IStorageTransaction
+	{
+		private readonly TransactionScope _underlying = new(TransactionScopeAsyncFlowOption.Enabled);
+
+		void IStorageTransaction.Commit() => _underlying.Complete();
+		void IDisposable.Dispose() => _underlying.Dispose();
+	}
+
+	IStorageTransaction IStorage.CreateTransaction() => new StorageTransaction();
+
+	#region GetCommand
+
+	/// <summary>
+	/// Gets or creates a cached <see cref="DatabaseCommand"/> for the specified schema and command type.
+	/// </summary>
+	public virtual ValueTask<DatabaseCommand> GetCommand(Schema meta, SqlCommandTypes type, IReadOnlyList<SchemaColumn> keyColumns, IReadOnlyList<SchemaColumn> valueColumns, CancellationToken cancellationToken)
+		=> _commandFactory.GetCommandAsync(meta, type, keyColumns, valueColumns, cancellationToken);
+
+	private DbCommand CreateDbCommand(string text, CommandType type)
+	{
+		var command = Factory.CreateCommand();
+
+		if (command == null)
+			throw new InvalidOperationException();
+
+		command.CommandText = text;
+		command.CommandType = type;
+
+		return command;
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Tests the internal cache for incomplete entries and throws if any are found.
+	/// </summary>
+	public async ValueTask Test(CancellationToken cancellationToken)
+	{
+		using var _ = await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false);
+		var res = _cache.Where(t => !t.Value.complete).ToArray();
+		if (res.Length > 0)
+		{
+			throw new Exception();
+		}
+	}
+
+	#region GetCountAsync
+
+	/// <summary>
+	/// Gets the total number of entities of type <typeparamref name="TEntity"/> in the database.
+	/// </summary>
+	public virtual async ValueTask<long> GetCountAsync<TEntity>(CancellationToken cancellationToken)
+		where TEntity : IDbPersistable
+	{
+		var meta = SchemaRegistry.Get(typeof(TEntity));
+
+		var command = await GetCommand(meta, SqlCommandTypes.Count, [], [], cancellationToken).NoWait();
+		var source = new SerializationItemCollection();
+
+		return await Do(() => ExecuteScalar<long>(command, source, cancellationToken)).NoWait();	}
+
+	#endregion
+
+	#region CreateAsync
+
+	/// <summary>
+	/// Creates (inserts) a new entity in the database asynchronously.
+	/// </summary>
+	public virtual ValueTask<object> CreateAsync(Schema meta, IDbPersistable entity, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(entity);
+
+		if (meta.ReadOnly)
+			throw new InvalidOperationException();
+
+		return Do(async () =>
+		{
+			var readOnlyColumns = meta.ReadOnlyColumns;
+			var nonReadOnlyColumns = meta.NonReadOnlyColumns;
+
+			var keyColumns = meta.Identity is not null ? new[] { meta.Identity } : Array.Empty<SchemaColumn>();
+			var command = await GetCommand(meta, SqlCommandTypes.Create, keyColumns, meta.AllColumns, cancellationToken).NoWait();
+			var storage = new SettingsStorage();
+			entity.Save(storage);
+			var input = storage.ToItems(nonReadOnlyColumns);
+
+			var output = await Execute(command, input, readOnlyColumns.Count > 0, cancellationToken).NoWait();
+			if (readOnlyColumns.Count > 0 && meta.Identity is not null)
+			{
+				if (output.TryGetItem(meta.Identity.Name, out var identityItem))
+					entity.SetIdentity(identityItem.Value);
+			}
+
+			entity.InitLists(this);
+
+			if (meta.NoCache || meta.Identity is null)
+				return (object)entity;
+
+			var id = entity.GetIdentity();
+			var key = (meta.EntityType, meta.Identity.Name, id);
+
+			using (await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false))
+				Update(key, entity);
+
+			if (_bulkLoad.TryGetValue(meta.EntityType, out var info))
+			{
+				var dict = await info.EnsureInit(cancellationToken).NoWait();
+				// Indexer, not Add: a prior ReadAsync miss for this id cached a null here, and the
+				// INSERT already succeeded — overwrite the stale miss instead of throwing.
+				dict[id] = entity;
+			}
+
+			return (object)entity;
+		});
+	}
+
+	#endregion
+
+	#region ReadAsync
+
+	/// <summary>
+	/// Reads a single entity by identity from the database asynchronously.
+	/// </summary>
+	public virtual async ValueTask<object> ReadAsync(Schema meta, object id, Func<Schema, ValueTask<DatabaseCommand>> getCommand, Func<Schema, ValueTask<SerializationItem>> getIdItem, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(meta);
+
+		ArgumentNullException.ThrowIfNull(getCommand);
+
+		ArgumentNullException.ThrowIfNull(getIdItem);
+
+		var by = meta.Identity ?? throw new ArgumentException(meta.EntityType.AssemblyQualifiedName);
+		var key = (meta.EntityType, by.Name, id);
+
+		BulkLoadInfo bulkInfo = null;
+
+		if (!meta.NoCache)
+		{
+			if (_bulkLoad.TryGetValue(meta.EntityType, out var info))
+			{
+				if (!Scope<BulkLoadInfo>.All.Any(i => i.Value.Meta == meta))
+				{
+					bulkInfo = info;
+					var dict = await info.EnsureInit(cancellationToken).NoWait();
+					if (dict.TryGetValue(id, out var cached))
+						return cached;
+
+					// cache miss — fall through to DB query below
+				}
+			}
+
+			var scope = BulkScope.Instance;
+
+			using (await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false))
+			{
+				if (_cache.TryGetValue(key, out var t))
+				{
+					if (t.complete)
+						return t.entity;
+					else if (scope is not null)
+					{
+						scope.SetDep(key, null);
+						return t.entity;
+					}
+				}
+				else if (scope is not null)
+				{
+					var entity = CreateEntity(meta, id);
+
+					_cache.Add(key, (entity, false));
+					_cacheStore.Touch(key);
+					scope.SetDep(key, null);
+
+					return entity;
+				}
+			}
+		}
+
+		return await Do(async () =>
+		{
+			var command = await getCommand(meta).NoWait();
+			var idItem = await getIdItem(meta).NoWait();
+			var input = UngroupSource(meta, new[] { idItem });
+
+			var entity = await Read(command, meta, input, cancellationToken).NoWait();
+			// cache result (or null) back into bulk dict so subsequent lookups are fast
+			if (bulkInfo is not null)
+			{
+				var dict = await bulkInfo.EnsureInit(cancellationToken).NoWait();
+				dict[id] = entity;
+			}
+
+			if (!meta.NoCache && entity is null)
+			{
+				using var _ = await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false);
+				if (_cache.TryGetValue(key, out var t))
+				{
+					if (t.complete)
+						entity = t.entity;
+				}
+				else
+				{
+					_cache.Add(key, (default, true));
+					_cacheStore.Touch(key);
+				}
+			}
+			return entity;
+		}).NoWait();
+	}
+
+	/// <summary>
+	/// Reads a single entity using the specified command and input parameters.
+	/// </summary>
+	public virtual ValueTask<object> Read(DatabaseCommand command, Schema meta, SerializationItemCollection input, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(command);
+
+		return Do(async () =>
+		{
+			var output = await ExecuteRow(command, input, cancellationToken).NoWait();
+			if (output is null)
+				return default;
+
+			output = GroupSource(meta, output);
+
+			ValueTask<object> ReadInternal(BulkScope scope)
+				=> GetOrAddCache(
+				scope,
+				meta,
+				output,
+				cancellationToken);
+
+			var scope = BulkScope.Instance;
+			if (scope is not null)
+				return await ReadInternal(scope).NoWait();
+			await using var _ = new BulkScope(this, cancellationToken);
+			return await ReadInternal(_).NoWait();		});
+	}
+
+	#endregion
+
+	#region ReadAllAsync
+
+	/// <summary>
+	/// Reads a paged set of entities from the database asynchronously.
+	/// </summary>
+	public virtual async ValueTask<object[]> ReadAllAsync(Schema meta, long startIndex, long count, bool deleted, string orderByColumn, ListSortDirection direction, CancellationToken cancellationToken)
+	{
+		ArgumentOutOfRangeException.ThrowIfNegative(startIndex);
+
+		ArgumentOutOfRangeException.ThrowIfNegative(count);
+
+		if (count == 0)
+			return [];
+
+		var orderByClause = orderByColumn is not null
+			? "{0} {1}".Put(Dialect.QuoteIdentifier(orderByColumn), (direction == ListSortDirection.Ascending) ? "asc" : "desc")
+			: null;
+
+		var take = count < long.MaxValue ? count : (long?)null;
+		var skip = startIndex > 0 || take.HasValue ? startIndex : (long?)null;
+		var sql = Query.CreateSelect(meta.Name, null, orderByClause, skip, take).Render(Dialect);
+
+		var command = _commandsByText.SafeAdd(sql, key =>
+		{
+			var command = new DatabaseCommand(Factory, Dialect, CreateConnectionAsync, CreateDbCommand(key, CommandType.Text));
+
+			if (skip.HasValue)
+				command.Parameters.Add(Factory.CreateDbParameter(Dialect.ParameterPrefix + Query.SkipParameterName, ParameterDirection.Input, DbType.Int64, skip.Value));
+
+			if (take.HasValue)
+				command.Parameters.Add(Factory.CreateDbParameter(Dialect.ParameterPrefix + Query.TakeParameterName, ParameterDirection.Input, DbType.Int64, take.Value));
+
+			return command;
+		});
+
+		var input = new SerializationItemCollection();
+
+		if (skip.HasValue)
+			input.Add(new(Query.SkipParameterName, typeof(long), skip.Value));
+
+		if (take.HasValue)
+			input.Add(new(Query.TakeParameterName, typeof(long), take.Value));
+
+		return await ReadAllAsync(command, meta, input, cancellationToken).NoWait();	}
+
+	/// <summary>
+	/// Reads all entities matching the specified command and input parameters.
+	/// </summary>
+	public virtual ValueTask<object[]> ReadAllAsync(DatabaseCommand command, Schema meta, SerializationItemCollection input, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(command);
+
+		return Do(async () =>
+		{
+			input = UngroupSource(meta, input);
+			return await GetOrAddCacheTable<object>(meta, await ExecuteTable(command, input, cancellationToken), cancellationToken).NoWait();		});
+	}
+
+	#endregion
+
+	#region UpdateAsync
+
+	/// <summary>
+	/// Updates an existing entity in the database asynchronously.
+	/// </summary>
+	public virtual ValueTask<TEntity> UpdateAsync<TEntity>(TEntity entity, CancellationToken cancellationToken)
+		where TEntity : IDbPersistable
+	{
+		ArgumentNullException.ThrowIfNull(entity);
+
+		var meta = entity.Schema;
+
+		if (meta.ReadOnly)
+			throw new InvalidOperationException();
+
+		IReadOnlyList<SchemaColumn> keyColumns;
+		List<SchemaColumn> valueColumns;
+
+		if (meta.Identity is not null)
+		{
+			keyColumns = [meta.Identity];
+			valueColumns = meta.Columns.Where(c => !c.IsReadOnly).ToList();
+		}
+		else
+		{
+			keyColumns = meta.UniqueColumns;
+			valueColumns = meta.Columns.Where(c => !c.IsReadOnly && !c.IsUnique).ToList();
+		}
+
+		return Do(async () =>
+		{
+			var command = await GetCommand(meta, SqlCommandTypes.UpdateBy, keyColumns, valueColumns, cancellationToken).NoWait();
+			var storage = new SettingsStorage();
+			entity.Save(storage);
+
+			var input = new SerializationItemCollection();
+			foreach (var col in keyColumns)
+			{
+				if (storage.TryGetValue(col.Name, out var v))
+					input.Add(new(col.Name, col.ClrType, v));
+				else if (meta.Identity is not null && col.Name == meta.Identity.Name)
+					input.Add(new(col.Name, col.ClrType, entity.GetIdentity()));
+			}
+			foreach (var col in valueColumns)
+			{
+				if (storage.TryGetValue(col.Name, out var v))
+					input.Add(new(col.Name, col.ClrType, v));
+			}
+
+			await Execute(command, input, false, cancellationToken).NoWait();
+			await UpdateCache(meta, entity, cancellationToken).NoWait();
+			return entity;
+		});
+	}
+
+	#endregion
+
+	#region DeleteAsync
+
+	/// <summary>
+	/// Deletes an entity from the database asynchronously and returns the number of affected rows.
+	/// </summary>
+	public virtual ValueTask<int> DeleteAsync<TEntity>(TEntity entity, CancellationToken cancellationToken)
+		where TEntity : IDbPersistable
+	{
+		var meta = entity.Schema;
+
+		var by = new SerializationItemCollection();
+		IReadOnlyList<SchemaColumn> keyColumns;
+
+		if (meta.Identity is null)
+		{
+			var storage = new SettingsStorage();
+			entity.Save(storage);
+
+			var keys = new List<SchemaColumn>();
+			foreach (var col in meta.UniqueColumns)
+			{
+				storage.TryGetValue(col.Name, out var v);
+				by.Add(new(col.Name, col.ClrType, v));
+				keys.Add(col);
+			}
+			keyColumns = keys;
+		}
+		else
+		{
+			by.Add(new(meta.Identity.Name, meta.Identity.ClrType, entity.GetIdentity()));
+			keyColumns = [meta.Identity];
+		}
+
+		return Do(async () =>
+		{
+			var cmd = await GetCommand(meta, SqlCommandTypes.DeleteBy, keyColumns, [], cancellationToken).NoWait();
+			var retVal = await ExecuteNonQuery(cmd, by, cancellationToken).NoWait();
+			await DeleteCache(meta, by, cancellationToken).NoWait();
+			return retVal;
+		});
+	}
+
+	#endregion
+
+	#region DeleteAllAsync
+
+	/// <summary>
+	/// Deletes all entities of type <typeparamref name="TEntity"/> from the database.
+	/// </summary>
+	public virtual async ValueTask DeleteAllAsync<TEntity>(CancellationToken cancellationToken)
+		where TEntity : IDbPersistable
+	{
+		if (!AllowDeleteAll)
+			throw new NotSupportedException();
+
+		var meta = SchemaRegistry.Get(typeof(TEntity));
+		var command = await GetCommand(meta, SqlCommandTypes.DeleteAll, [], [], cancellationToken).NoWait();
+		await Do(() => ExecuteNonQuery(command, [], cancellationToken)).NoWait();	}
+
+	#endregion
+
+	#region Cache
+
+	async ValueTask IStorage.AddCacheAsync<TId, TEntity>(TId id, TEntity entity, CancellationToken cancellationToken)
+	{
+		var meta = entity.Schema;
+
+		if (meta.Identity is null || meta.NoCache)
+			return;
+
+		var key = (meta.EntityType, meta.Identity.Name, (object)id);
+
+		using var _ = await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false);
+		Update(key, entity);
+	}
+
+	async ValueTask IStorage.ClearCacheAsync(CancellationToken cancellationToken)
+	{
+		using var _ = await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false);
+		_cacheStore.Clear();
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Executes a database command, optionally returning output values.
+	/// </summary>
+	public virtual async ValueTask<SerializationItemCollection> Execute(DatabaseCommand command, SerializationItemCollection source, bool needRetVal, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(command);
+
+		if (needRetVal)
+			return await ExecuteRow(command, source, cancellationToken).NoWait();
+		else
+		{
+			await ExecuteNonQuery(command, source, cancellationToken).NoWait();
+			return [];
+		}
+	}
+
+	private async ValueTask<TEntity[]> GetOrAddCacheTable<TEntity>(Schema meta, SerializationItemCollection table, CancellationToken cancellationToken)
+	{
+		static SerializationItemCollection GetRow(IEnumerable<SerializationItem> table, int rowIndex)
+		{
+			var row = new SerializationItemCollection();
+
+			foreach (var item in table)
+				row.Add(new(item.Name, item.Type, ((IList)item.Value)[rowIndex]));
+
+			return row;
+		}
+
+		ArgumentNullException.ThrowIfNull(meta);
+
+		ArgumentNullException.ThrowIfNull(table);
+
+		if (table.IsEmpty())
+			return [];
+
+		async ValueTask<TEntity[]> GetOrAddCacheTableInternal(BulkScope scope)
+		{
+			ArgumentNullException.ThrowIfNull(scope);
+
+			var entityCount = ((ICollection)table[0].Value).Count;
+			table = GroupSource(meta, table);
+
+			var entities = new TEntity[entityCount];
+
+			for (var i = 0; i < entities.Length; i++)
+			{
+				try
+				{
+					entities[i] = (TEntity)await GetOrAddCache(scope, meta, GetRow(table, i), cancellationToken).NoWait();				}
+				catch (Exception ex)
+				{
+					if (ContinueOnExceptionContext.TryProcess(ex))
+					{
+						entityCount--;
+						continue;
+					}
+
+					throw;
+				}
+			}
+
+			if (entities.Length > entityCount)
+				entities = [.. entities.Where(e => e is not null)];
+
+			return [.. entities];
+		}
+
+		var scope = BulkScope.Instance;
+
+		if (scope is not null)
+			return await GetOrAddCacheTableInternal(scope).NoWait();
+		await using var _ = new BulkScope(this, cancellationToken);
+		return await GetOrAddCacheTableInternal(_).NoWait();	}
+
+	private static IDbPersistable CreateEntity(Schema meta, object id)
+	{
+		var entity = (IDbPersistable)meta.CreateEntity();
+
+		if (id is not null)
+			entity.SetIdentity(id);
+
+		return entity;
+	}
+
+	private async ValueTask<object> GetOrAddCache(BulkScope scope, Schema meta, SerializationItemCollection input, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(scope);
+
+		ArgumentNullException.ThrowIfNull(meta);
+
+		ArgumentNullException.ThrowIfNull(input);
+
+		if (meta.NoCache || meta.Identity is null)
+		{
+			var noCache = CreateEntity(meta, null);
+
+			if (meta.Identity is not null)
+				noCache.SetIdentity(input[meta.Identity.Name].Value);
+
+			var noCacheStorage = input.ToStorage();
+			await noCache.LoadAsync(noCacheStorage, this, cancellationToken).NoWait();
+			noCache.InitLists(this);
+
+			return noCache;
+		}
+
+		var id = input[meta.Identity.Name].Value;
+		var key = (meta.EntityType, meta.Identity.Name, id);
+
+		IDbPersistable entity = default;
+
+		using (await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false))
+		{
+			if (_cache.TryGetValue(key, out var t))
+			{
+				if (t.complete)
+					return t.entity;
+				else
+				{
+					if (scope.TryGetDep(key, out var e))
+					{
+						if (e is not null)
+							return t.entity;
+						else
+						{
+							entity = (IDbPersistable)t.entity;
+
+							if (entity is null)
+								throw new InvalidOperationException(key.To<string>());
+
+							scope.SetDep(key, entity);
+						}
+					}
+					else
+					{
+						entity = (IDbPersistable)t.entity;
+						scope.SetDep(key, entity);
+					}
+				}
+			}
+			else
+			{
+				entity = CreateEntity(meta, id);
+
+				_cache.Add(key, (entity, false));
+				_cacheStore.Touch(key);
+				scope.SetDep(key, entity);
+			}
+		}
+
+		{
+			var storage = input.ToStorage();
+
+			try
+			{
+				await entity.LoadAsync(storage, this, cancellationToken).NoWait();
+				entity.InitLists(this);
+			}
+			catch
+			{
+				// Hydration failed: drop the still-incomplete cache entry so the bulk-scope flush
+				// can't later promote this never-loaded entity to "complete" and cache it
+				// permanently empty. A retry recreates and reloads it. Use no token so a
+				// cancellation that caused the failure doesn't also abort the cleanup.
+				using (await _cacheLock.LockAsync(CancellationToken.None).ConfigureAwait(false))
+				{
+					if (_cache.TryGetValue(key, out var cur) && !cur.complete)
+						_cache.Remove(key);
+				}
+
+				throw;
+			}
+		}
+
+		return entity;
+	}
+
+	private void Update((Type, string, object) key, object entity)
+	{
+		if (_cache.TryGetValue(key, out var t))
+		{
+			if (t.complete)
+			{
+				if (t.entity is null && entity is not null)
+				{
+					_cache[key] = (entity, true);
+					_cacheStore.Touch(key);
+				}
+			}
+			else
+			{
+				_cache[key] = (entity, true);
+				_cacheStore.Touch(key);
+			}
+		}
+		else
+		{
+			_cache.Add(key, (entity, true));
+			_cacheStore.Touch(key);
+		}
+	}
+
+	private async ValueTask UpdateCache(Schema meta, IDbPersistable entity, CancellationToken cancellationToken)
+	{
+		var uniqueColumns = meta.UniqueColumns;
+
+		if (uniqueColumns.Count == 0)
+			return;
+
+		SettingsStorage storage = null;
+
+		var keys = uniqueColumns.Select(c =>
+		{
+			object v;
+			if (c == meta.Identity)
+				v = entity.GetIdentity();
+			else
+			{
+				storage ??= new SettingsStorage();
+				if (storage.Count == 0)
+					entity.Save(storage);
+
+				storage.TryGetValue(c.Name, out v);
+			}
+
+			if (v is null)
+				return default;
+
+			return (meta.EntityType, c.Name, v);
+		}).Where(k => k != default).ToArray();
+
+		if (keys.Length == 0)
+			return;
+
+		using var _ = await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false);
+		foreach (var key in keys)
+			Update(key, entity);
+	}
+
+	private async ValueTask DeleteCache(Schema meta, IEnumerable<SerializationItem> by, CancellationToken cancellationToken)
+	{
+		var uniqueNames = new HashSet<string>(meta.UniqueColumns.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+		var keys = by.Where(i => uniqueNames.Contains(i.Name)).Select(i => (meta.EntityType, i.Name, i.Value)).ToArray();
+
+		if (keys.Length == 0)
+			return;
+
+		using var _ = await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false);
+		foreach (var key in keys)
+			_cacheStore.Remove(key);
+	}
+
+	private static SerializationItemCollection GroupSource(Schema meta, SerializationItemCollection input)
+	{
+		ArgumentNullException.ThrowIfNull(meta);
+		ArgumentNullException.ThrowIfNull(input);
+
+		var output = new SerializationItemCollection();
+
+		foreach (var col in meta.AllColumns)
+		{
+			if (input.TryGetItem(col.Name, out var item))
+				output.Add(new(col.Name, col.ClrType, item.Value));
+		}
+
+		return output;
+	}
+
+	private static SerializationItemCollection UngroupSource(Schema meta, IEnumerable<SerializationItem> input)
+	{
+		ArgumentNullException.ThrowIfNull(meta);
+		ArgumentNullException.ThrowIfNull(input);
+
+		var output = new SerializationItemCollection();
+
+		foreach (var item in input)
+		{
+			if (meta.TryGetColumn(item.Name) is not null)
+				output.Add(item);
+			else
+				output.Add(item);
+		}
+
+		return output;
+	}
+
+#region Disposable Members
+
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		//foreach (var command in _commands.Values)
+		//	command.Dispose();
+
+		base.DisposeManaged();
+	}
+
+	#endregion
+
+	async ValueTask<TEntity> IStorage.AddAsync<TEntity>(TEntity entity, CancellationToken cancellationToken)
+		=> (TEntity)await CreateAsync(entity.Schema, entity, cancellationToken).NoWait();
+	async ValueTask<TEntity> IStorage.GetByAsync<TEntity>(IQueryable<TEntity> source, CancellationToken cancellationToken)
+	{
+		var meta = SchemaRegistry.Get(typeof(TEntity));
+
+		var id = source.Expression.GetId();
+
+		return (TEntity)await ReadAsync(meta, id,
+			meta =>
+			{
+				var sourceMeta = meta;
+				if (meta.IsView)
+				{
+					var processor = ViewProcessorRegistry.GetProcessor(meta.EntityType);
+					sourceMeta = SchemaRegistry.Get(processor.TableType);
+				}
+
+				var (translator, query, _) = GetQuery(sourceMeta, source.Expression);
+				var (command, input) = CreateCommand(query, translator);
+
+				return new(command);
+			},
+			meta => new(new SerializationItem("id0", meta.Identity.ClrType, id)),
+			cancellationToken).NoWait();
+	}
+
+	async ValueTask<TEntity> IStorage.GetByIdAsync<TId, TEntity>(TId id, CancellationToken cancellationToken)
+	{
+		var meta = SchemaRegistry.Get(typeof(TEntity));
+
+		if (meta.IsView)
+		{
+			var processor = ViewProcessorRegistry.GetProcessor<TEntity, TId>();
+			return await processor.ReadById(id, cancellationToken).NoWait();
+		}
+
+		return (TEntity)await ReadAsync(meta, id,
+			meta => GetCommand(meta, SqlCommandTypes.ReadBy, [meta.Identity], [], cancellationToken),
+			meta => new(new SerializationItem(meta.Identity.Name, meta.Identity.ClrType, id)),
+			cancellationToken).NoWait();
+	}
+
+	async ValueTask<TEntity[]> IStorage.GetByIdsAsync<TId, TEntity>(IEnumerable<TId> ids, CancellationToken cancellationToken)
+	{
+		ArgumentNullException.ThrowIfNull(ids);
+
+		var meta = SchemaRegistry.Get(typeof(TEntity));
+		var identity = meta.Identity ?? throw new ArgumentException($"Entity {meta.EntityType.Name} has no identity column.");
+
+		var allIds = ids.ToList();
+		if (allIds.Count == 0)
+			return [];
+
+		// deduplicate for DB queries, but preserve original order with duplicates for output
+		var uniqueIds = allIds.Distinct().ToList();
+		var resolved = new Dictionary<object, TEntity>();
+
+		CachedSynchronizedDictionary<object, object> bulkDict = null;
+
+		if (!meta.NoCache && _bulkLoad.TryGetValue(meta.EntityType, out var info))
+			bulkDict = await info.EnsureInit(cancellationToken).NoWait();
+		var uncachedIds = new List<TId>();
+
+		foreach (var id in uniqueIds)
+		{
+			var found = false;
+
+			if (bulkDict is not null && bulkDict.TryGetValue(id, out var cached))
+			{
+				if (cached is TEntity entity)
+					resolved[(object)id] = entity;
+
+				// null cached = known DB miss
+				found = true;
+			}
+
+			if (!found && !meta.NoCache)
+			{
+				var key = (meta.EntityType, identity.Name, (object)id);
+
+				using (await _cacheLock.LockAsync(cancellationToken).ConfigureAwait(false))
+				{
+					if (_cache.TryGetValue(key, out var t) && t.complete)
+					{
+						if (t.entity is TEntity entity)
+							resolved[(object)id] = entity;
+
+						found = true;
+					}
+				}
+			}
+
+			if (!found)
+				uncachedIds.Add(id);
+		}
+
+		if (uncachedIds.Count > 0)
+		{
+			// query DB in batches using IN clause
+			var chunkSize = 500.Min(Dialect.MaxParameters);
+
+			foreach (var batch in uncachedIds.Chunk(chunkSize))
+			{
+				IEnumerable<TEntity> entities;
+
+				if (meta.IsView)
+				{
+					var processor = ViewProcessorRegistry.GetProcessor<TEntity, TId>();
+					entities = await processor.ReadRange([.. batch], cancellationToken).NoWait();				}
+				else
+				{
+					var valueColumns = new List<SchemaColumn>();
+					var input = new SerializationItemCollection();
+
+					var idx = 0;
+					foreach (var id in batch)
+					{
+						var colName = $"Id{idx++}";
+						valueColumns.Add(new() { Name = colName, ClrType = identity.ClrType });
+						input.Add(new(colName, identity.ClrType, id));
+					}
+
+					var cmd = await GetCommand(meta, SqlCommandTypes.ReadRange, [identity], valueColumns, cancellationToken).NoWait();
+					entities = (await ReadAllAsync(cmd, meta, input, cancellationToken).NoWait()).Cast<TEntity>();
+				}
+
+				var foundIds = new HashSet<object>();
+
+				foreach (var typedEntity in entities)
+				{
+					var entityId = ((IDbPersistable)typedEntity).GetIdentity();
+					resolved[entityId] = typedEntity;
+					foundIds.Add(entityId);
+
+					bulkDict?[entityId] = typedEntity;
+				}
+
+				// cache misses in bulk dict so subsequent lookups return null fast
+				if (bulkDict is not null)
+				{
+					foreach (var id in batch)
+					{
+						if (!foundIds.Contains(id))
+							bulkDict[(object)id] = null;
+					}
+				}
+			}
+		}
+
+		// return in input order, preserving duplicates, skipping not-found
+		var result = new List<TEntity>(allIds.Count);
+
+		foreach (var id in allIds)
+		{
+			if (resolved.TryGetValue((object)id, out var entity))
+				result.Add(entity);
+		}
+
+		return [.. result];
+	}
+
+	async ValueTask<TEntity[]> IStorage.GetGroupAsync<TEntity>(long startIndex, long count, bool deleted, string orderBy, ListSortDirection direction, CancellationToken cancellationToken)
+		=> [.. (await ReadAllAsync(SchemaRegistry.Get(typeof(TEntity)), startIndex, count, deleted, orderBy, direction, cancellationToken).NoWait()).Cast<TEntity>()];
+	async ValueTask<bool> IStorage.RemoveAsync<TEntity>(TEntity entity, CancellationToken cancellationToken)
+		=> await DeleteAsync(entity, cancellationToken).NoWait() > 0;
+	ValueTask IStorage.ClearAsync<TEntity>(CancellationToken cancellationToken)
+		=> DeleteAllAsync<TEntity>(cancellationToken);
+
+	private class SelectAsyncEnumerable<TSource, TResult>(Database database, Expression expression) : IAsyncEnumerable<TResult>
+	{
+		private class SelectAsyncEnumerator(Database.SelectAsyncEnumerable<TSource, TResult> parent, CancellationToken cancellationToken) : IAsyncEnumerator<TResult>
+		{
+			private readonly SelectAsyncEnumerable<TSource, TResult> _parent = parent ?? throw new ArgumentNullException(nameof(parent));
+			private readonly CancellationToken _cancellationToken = cancellationToken;
+
+			private readonly Schema _meta = typeof(TResult).IsSerializablePrimitive() || UsesCtorProjection(typeof(TResult))
+				? null
+				: SchemaRegistry.Get(typeof(TResult));
+			private IAsyncEnumerator<TResult> _underlying;
+
+			TResult IAsyncEnumerator<TResult>.Current => _underlying.Current;
+
+			async ValueTask IAsyncDisposable.DisposeAsync()
+			{
+				if (_underlying is null)
+					return;
+
+				await _underlying.DisposeAsync().NoWait();
+				_underlying = null;
+			}
+
+			async ValueTask<bool> IAsyncEnumerator<TResult>.MoveNextAsync()
+			{
+				if (_underlying is null)
+				{
+					var db = _parent._database;
+					var exp = _parent._expression;
+
+					var (translator, query, _) = GetQuery<TSource>(exp);
+					var (command, input) = db.CreateCommand(query, translator);
+
+					var table = await db.ExecuteTable(command, input, _cancellationToken).NoWait();
+					TResult[] buffer;
+					if (_meta is null)
+					{
+						if (typeof(TResult).IsSerializablePrimitive())
+						{
+							buffer = table.Count == 0
+								? []
+								: [.. ((IEnumerable<object>)table[0].Value).Select(e => e.To<TResult>())];
+						}
+						else if (typeof(TResult).IsNullable() && typeof(TResult).GetUnderlyingType().IsSerializablePrimitive())
+						{
+							// Single-column Nullable<primitive> projection (e.g. `(long?)t.Nav.Id`
+							// where the FK column is itself nullable). Route NULL rows to
+							// default(T?) and non-null rows through the same scalar conversion
+							// the primitive branch above uses. Without this dispatch the
+							// materializer falls through to MaterializeByCtor, which can't
+							// match Nullable<T>'s `(T value)` ctor against an arbitrary
+							// single-column name and throws NotSupportedException.
+							buffer = table.Count == 0
+								? []
+								: [.. ((IEnumerable<object>)table[0].Value).Select(e => e is null ? default : e.To<TResult>())];
+						}
+						else
+						{
+							buffer = MaterializeByCtor<TResult>(table);
+						}
+					}
+					else
+					{
+						buffer = await db.GetOrAddCacheTable<TResult>(_meta, table, _cancellationToken).NoWait();
+					}
+
+					_underlying = buffer.ToAsyncEnumerable().GetAsyncEnumerator(_cancellationToken);
+				}
+
+				return await _underlying.MoveNextAsync().NoWait();			}
+		}
+
+		private readonly Database _database = database ?? throw new ArgumentNullException(nameof(database));
+		private readonly Expression _expression = expression ?? throw new ArgumentNullException(nameof(expression));
+
+		IAsyncEnumerator<TResult> IAsyncEnumerable<TResult>.GetAsyncEnumerator(CancellationToken cancellationToken)
+			=> new SelectAsyncEnumerator(this, cancellationToken);
+	}
+
+	private (DatabaseCommand command, SerializationItemCollection input) CreateCommand(Query query, ExpressionQueryTranslator translator)
+	{
+		var input = new SerializationItemCollection();
+
+		foreach (var arg in translator.Parameters)
+			input.Add(new(arg.Key, arg.Value.Item1, arg.Value.Item2));
+
+		var sql = query.Render(Dialect);
+
+		var command = _commandsByText.SafeAdd(sql, key =>
+		{
+			var command = new DatabaseCommand(Factory, Dialect, CreateConnectionAsync, CreateDbCommand(key, CommandType.Text));
+
+			foreach (var item in input)
+			{
+				command.Parameters.Add(
+					Factory.CreateDbParameter(
+						Dialect.ParameterPrefix + item.Name,
+						ParameterDirection.Input,
+						item.Type.ToDbType(),
+						item.Value));
+			}
+
+			return command;
+		});
+
+		return (command, input);
+	}
+
+	private static (ExpressionQueryTranslator translator, Query query, CancellationToken token) GetQuery<TEntity>(Expression expression)
+		=> GetQuery(SchemaRegistry.Get(typeof(TEntity)), expression);
+
+	private static (ExpressionQueryTranslator translator, Query query, CancellationToken token) GetQuery(Schema meta, Expression expression)
+	{
+		var translator = new ExpressionQueryTranslator(meta);
+		var query = translator.GenerateSql(expression);
+
+		CancellationToken token = default;
+
+		if (translator.Parameters.TryGetAndRemove(ExpressionQueryTranslator.CancellationTokenKey, out var t))
+			token = (CancellationToken)t.Item2;
+
+		return (translator, query, token);
+	}
+
+	IAsyncEnumerable<TResult> IQueryContext.ExecuteEnumAsync<TSource, TResult>(Expression expression)
+		=> new SelectAsyncEnumerable<TSource, TResult>(this, expression);
+
+	/// <summary>
+	/// Executes a LINQ expression and returns a single result asynchronously.
+	/// </summary>
+	/// <summary>
+	/// True when <paramref name="t"/> is a projection target that must be materialized by
+	/// constructor/property binding (anonymous types, records, plain named classes) rather
+	/// than loaded as an entity — i.e. it is neither a serializable primitive nor an
+	/// <see cref="IDbPersistable"/> entity.
+	/// </summary>
+	private static bool UsesCtorProjection(Type t)
+		=> !t.IsSerializablePrimitive() && !typeof(IDbPersistable).IsAssignableFrom(t);
+
+	/// <summary>
+	/// Materializes the projected <paramref name="table"/> rows into <typeparamref name="TResult"/>
+	/// by matching the longest constructor whose parameters all map to projected columns, then
+	/// assigning any remaining columns to writable properties by name. This covers anonymous
+	/// types and positional records (full ctor) as well as the <c>new Named { A = ..., B = ... }</c>
+	/// object-initializer shape (parameterless ctor + property setters).
+	/// </summary>
+	private static TResult[] MaterializeByCtor<TResult>(SerializationItemCollection table)
+	{
+		if (table.IsEmpty())
+			return [];
+
+		var rowCount = ((ICollection)table[0].Value).Count;
+
+		if (rowCount == 0)
+			return [];
+
+		var ctors = typeof(TResult).GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+
+		if (ctors.Length == 0)
+			throw new NotSupportedException($"Type {typeof(TResult)} has no public constructor for ctor-based materialization.");
+
+		var ctor = ctors
+			.OrderByDescending(c => c.GetParameters().Length)
+			.FirstOrDefault(c => c.GetParameters().All(p => table.Any(col => col.Name.EqualsIgnoreCase(p.Name))))
+			?? throw new NotSupportedException($"No constructor of {typeof(TResult)} matches the projected columns.");
+
+		var parameters = ctor.GetParameters();
+		var colIndices = new int[parameters.Length];
+		var consumed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		for (var j = 0; j < parameters.Length; j++)
+		{
+			var paramName = parameters[j].Name;
+			var idx = -1;
+
+			for (var k = 0; k < table.Count; k++)
+			{
+				if (table[k].Name.EqualsIgnoreCase(paramName))
+				{
+					idx = k;
+					break;
+				}
+			}
+
+			colIndices[j] = idx;
+			consumed.Add(paramName);
+		}
+
+		// Columns not consumed by the ctor are routed to writable properties of TResult by
+		// case-insensitive name match — covers the `new NamedClass { Prop = ... }` shape.
+		var leftover = new List<(int colIndex, PropertyInfo prop)>();
+
+		for (var k = 0; k < table.Count; k++)
+		{
+			if (consumed.Contains(table[k].Name))
+				continue;
+
+			var prop = typeof(TResult).GetProperty(table[k].Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+
+			if (prop?.CanWrite == true)
+				leftover.Add((k, prop));
+		}
+
+		// A NULL cell (e.g. a correlated aggregate — MAX/MIN/SUM/AVG — over an empty
+		// related set comes back as SQL NULL) must materialize as default(T), not throw.
+		// This mirrors the entity path (SettingsStorage.GetValue coerces NULL to default);
+		// a bare To() would raise ArgumentNullException for a non-nullable value type.
+		static object Convert(object raw, Type type)
+			=> raw is null or DBNull ? type.GetDefaultValue() : raw.To(type);
+
+		var result = new TResult[rowCount];
+
+		for (var r = 0; r < rowCount; r++)
+		{
+			var args = new object[parameters.Length];
+
+			for (var j = 0; j < parameters.Length; j++)
+			{
+				var raw = ((IList)table[colIndices[j]].Value)[r];
+				args[j] = Convert(raw, parameters[j].ParameterType);
+			}
+
+			var instance = (TResult)ctor.Invoke(args);
+
+			foreach (var (colIndex, prop) in leftover)
+			{
+				var raw = ((IList)table[colIndex].Value)[r];
+				prop.SetValue(instance, Convert(raw, prop.PropertyType));
+			}
+
+			result[r] = instance;
+		}
+
+		return result;
+	}
+
+	/// <summary>
+	/// Executes the specified query expression and returns a single result.
+	/// </summary>
+	/// <typeparam name="TSource">The source entity type.</typeparam>
+	/// <typeparam name="TResult">The result type.</typeparam>
+	/// <param name="expression">The query expression to execute.</param>
+	/// <returns>The query result.</returns>
+	public async ValueTask<TResult> ExecuteResultAsync<TSource, TResult>(Expression expression)
+	{
+		var (translator, query, token) = GetQuery<TSource>(expression);
+		var (command, input) = CreateCommand(query, translator);
+
+		if (typeof(TResult).IsSerializablePrimitive())
+			return await ExecuteScalar<TResult>(command, input, token).NoWait();
+		else if (typeof(TResult).IsNullable() && typeof(TResult).GetUnderlyingType().IsSerializablePrimitive())
+			// Single-column Nullable<primitive> result (e.g. `.Select(x => (long?)x.Nav.Id).FirstOrDefaultAsyncEx()`).
+			// Mirrors the SelectAsyncEnumerable branch: the row carries one nullable
+			// scalar, not a registered entity schema, so route through ExecuteScalar
+			// instead of falling into Read + SchemaRegistry.Get(Nullable<T>) which
+			// returns no metadata and trips GetOrAddCache with NullReferenceException.
+			return await ExecuteScalar<TResult>(command, input, token).NoWait();
+		else if (UsesCtorProjection(typeof(TResult)))
+		{
+			// Named/anonymous/ctor projection class (not an IDbPersistable entity):
+			// materialize the first row by constructor + property binding, mirroring the
+			// SelectAsyncEnumerable path. Routing it through Read would call SchemaRegistry.Get
+			// + CreateEntity, which casts the projected row to IDbPersistable and throws.
+			var table = await ExecuteTable(command, input, token).NoWait();
+			var rows = MaterializeByCtor<TResult>(table);
+			return rows.Length > 0 ? rows[0] : default;
+		}
+		else
+			return (TResult)await Read(command, SchemaRegistry.Get(typeof(TResult)), input, token).NoWait();	}
+
+	ValueTask IQueryContext.ExecuteAsync<TSource>(Expression expression)
+	{
+		var (translator, query, token) = GetQuery<TSource>(expression);
+		var (command, input) = CreateCommand(query, translator);
+
+		return ExecuteNonQuery(command, input, token).AsValueTask();
+	}
+
+	#region Stat
+
+	private IDisposable BeginTrack(DatabaseCommand command)
+		=> _stat.Begin(command.CommandText, IPAddress.Loopback);
+
+	private async ValueTask<int> ExecuteNonQuery(DatabaseCommand command, IEnumerable<SerializationItem> input, CancellationToken cancellationToken)
+	{
+		using var _ = BeginTrack(command);
+		return await command.ExecuteNonQuery(input, cancellationToken).NoWait();	}
+
+	private async ValueTask<TScalar> ExecuteScalar<TScalar>(DatabaseCommand command, IEnumerable<SerializationItem> input, CancellationToken cancellationToken)
+	{
+		using var _ = BeginTrack(command);
+		return await command.ExecuteScalar<TScalar>(input, cancellationToken).NoWait();	}
+
+	private async ValueTask<SerializationItemCollection> ExecuteRow(DatabaseCommand command, IEnumerable<SerializationItem> input, CancellationToken cancellationToken)
+	{
+		using var _ = BeginTrack(command);
+		return await command.ExecuteRow(input, cancellationToken).NoWait();	}
+
+	private async ValueTask<SerializationItemCollection> ExecuteTable(DatabaseCommand command, SerializationItemCollection input, CancellationToken cancellationToken)
+	{
+		using var _ = BeginTrack(command);
+		return await command.ExecuteTable(input, cancellationToken).NoWait();	}
+
+	#endregion
+}

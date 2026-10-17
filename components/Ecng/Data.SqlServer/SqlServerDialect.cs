@@ -1,0 +1,622 @@
+﻿namespace Ecng.Data;
+
+using System;
+using System.Collections.Generic;
+using System.Data.Common;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Ecng.Common;
+using Ecng.Data.Sql;
+
+/// <summary>
+/// SQL Server dialect implementation.
+/// </summary>
+public class SqlServerDialect : SqlDialectBase
+{
+	/// <summary>
+	/// Singleton instance.
+	/// </summary>
+	public static readonly SqlServerDialect Instance = new();
+
+	private SqlServerDialect() { }
+
+	/// <summary>
+	/// Registers the SQL Server dialect and provider factory with <see cref="DatabaseProviderRegistry"/>.
+	/// </summary>
+	/// <param name="factory">The <see cref="DbProviderFactory"/> for SQL Server.</param>
+	public static void Register(DbProviderFactory factory)
+	{
+		DatabaseProviderRegistry.Register(DatabaseProviderRegistry.SqlServer, factory);
+		DatabaseProviderRegistry.RegisterDialect(DatabaseProviderRegistry.SqlServer, Instance);
+	}
+
+	/// <inheritdoc />
+	public override string BatchSeparator => "GO";
+
+	/// <inheritdoc />
+	public override int MaxParameters => 2000; // SQL Server limit is 2100, use 2000 for safety
+
+	/// <inheritdoc />
+	public override string ParameterPrefix => "@";
+
+	/// <inheritdoc />
+	public override string QuoteIdentifier(string identifier)
+		=> $"[{identifier.Replace("]", "]]")}]";
+
+	/// <inheritdoc />
+	public override string GetSqlTypeName(Type clrType)
+	{
+		var underlying = clrType.GetUnderlyingType() ?? clrType;
+
+		return underlying switch
+		{
+			_ when underlying == typeof(int) => "INT",
+			_ when underlying == typeof(long) => "BIGINT",
+			_ when underlying == typeof(short) => "SMALLINT",
+			_ when underlying == typeof(byte) => "TINYINT",
+			_ when underlying == typeof(bool) => "BIT",
+			_ when underlying == typeof(decimal) => $"DECIMAL({DefaultDecimalPrecision},{DefaultDecimalScale})",
+			_ when underlying == typeof(double) => "FLOAT",
+			_ when underlying == typeof(float) => "REAL",
+			_ when underlying == typeof(string) => "NVARCHAR(MAX)",
+			_ when underlying == typeof(DateTime) => "DATETIME2",
+			_ when underlying == typeof(DateTimeOffset) => "DATETIMEOFFSET",
+			_ when underlying == typeof(TimeSpan) => "BIGINT", // stored as ticks
+			_ when underlying == typeof(Guid) => "UNIQUEIDENTIFIER",
+			_ when underlying == typeof(byte[]) => "VARBINARY(MAX)",
+			_ when underlying == typeof(DateOnly) => "DATE",
+			_ when underlying == typeof(TimeOnly) => "TIME",
+			_ => throw new NotSupportedException($"Type {clrType.Name} is not supported"),
+		};
+	}
+
+	/// <inheritdoc />
+	public override string GetColumnTypeName(Type clrType, int maxLength, int precision, int scale)
+	{
+		var underlying = clrType.GetUnderlyingType() ?? clrType;
+
+		// MaxLength == int.MaxValue (ColumnAttribute.Max) is the explicit "MAX"
+		// sentinel — same encoding as MaxLength == 0, but lets entity authors
+		// document intent ("yes, this column is intentionally unbounded").
+		var isMax = maxLength <= 0 || maxLength == int.MaxValue;
+		if (underlying == typeof(string))
+			return isMax || maxLength > 4000 ? "NVARCHAR(MAX)" : $"NVARCHAR({maxLength})";
+		if (underlying == typeof(byte[]))
+			return isMax || maxLength > 8000 ? "VARBINARY(MAX)" : $"VARBINARY({maxLength})";
+		if (underlying == typeof(decimal) && (precision > 0 || scale > 0))
+			return FormatDecimal("DECIMAL", precision, scale);
+		if ((underlying == typeof(DateTime) || underlying == typeof(DateTimeOffset) || underlying == typeof(TimeOnly)) && precision > 0)
+			return $"{GetSqlTypeName(clrType)}({precision})";
+
+		return GetSqlTypeName(clrType);
+	}
+
+	/// <inheritdoc />
+	public override string EmptyBinaryLiteral => "0x";
+
+	/// <inheritdoc />
+	public override string GetIdentitySelect(string idCol) => "scope_identity() as " + QuoteIdentifier(idCol);
+
+	/// <inheritdoc />
+	public override string FormatSkip(string skip) => $"offset {skip} rows";
+
+	/// <inheritdoc />
+	public override string FormatTake(string take) => $"fetch next {take} rows only";
+
+	/// <inheritdoc />
+	public override void AppendFallbackOrderBy(StringBuilder sb)
+	{
+		sb.AppendLine("ORDER BY (SELECT NULL)");
+	}
+
+	/// <inheritdoc />
+	public override void AppendPaginationParams(StringBuilder sb, string skipParamExpr, string takeParamExpr)
+	{
+		if (skipParamExpr is null && takeParamExpr is null)
+			return;
+
+		// SQL Server requires OFFSET before FETCH NEXT
+		sb.AppendLine(skipParamExpr is not null ? FormatSkip(skipParamExpr) : "offset 0 rows");
+
+		if (takeParamExpr is not null)
+			sb.AppendLine(FormatTake(takeParamExpr));
+	}
+
+	/// <inheritdoc />
+	public override string Now() => "getDate()";
+
+	/// <inheritdoc />
+	public override string UtcNow() => "getUtcDate()";
+
+	/// <inheritdoc />
+	public override string SysNow() => "sysDateTimeOffset()";
+
+	/// <inheritdoc />
+	public override string SysUtcNow() => "sysUtcDateTime()";
+
+	/// <inheritdoc />
+	public override string NewId() => "newId()";
+
+	/// <inheritdoc />
+	public override string GetIdentityColumnSuffix() => "IDENTITY(1,1) PRIMARY KEY";
+
+	/// <inheritdoc />
+	public override void AppendCreateTable(StringBuilder sb, string tableName, string columnDefs)
+	{
+		var literal = tableName.Replace("'", "''");
+		sb.Append($"IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{literal}' AND schema_id = SCHEMA_ID('dbo')) CREATE TABLE {QuoteIdentifier(tableName)} ({columnDefs})");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDropTable(StringBuilder sb, string tableName)
+	{
+		var objectName = $"{QuoteIdentifier("dbo")}.{QuoteIdentifier(tableName)}".Replace("'", "''");
+		sb.Append($"IF OBJECT_ID(N'{objectName}', N'U') IS NOT NULL DROP TABLE {QuoteIdentifier(tableName)}");
+	}
+
+	/// <inheritdoc />
+	public override void AppendPagination(StringBuilder sb, long? skip, long? take, bool hasOrderBy)
+	{
+		if (!skip.HasValue && !take.HasValue)
+			return;
+
+		if (!hasOrderBy)
+			sb.Append(" ORDER BY (SELECT NULL)");
+
+		sb.Append($" OFFSET {skip ?? 0} ROWS");
+
+		if (take.HasValue)
+			sb.Append($" FETCH NEXT {take.Value} ROWS ONLY");
+	}
+
+	/// <inheritdoc />
+	public override bool CanAlterColumnWithDependents => false;
+
+	/// <inheritdoc />
+	public override int GetStoredMaxLength(Type clrType, int maxLength)
+	{
+		var underlying = clrType.GetUnderlyingType() ?? clrType;
+
+		if (underlying == typeof(string) && maxLength > 4000)
+			return -1;
+
+		if (underlying == typeof(byte[]) && maxLength > 8000)
+			return -1;
+
+		return base.GetStoredMaxLength(clrType, maxLength);
+	}
+
+	/// <inheritdoc />
+	public override void AppendDropIndex(StringBuilder sb, string tableName, string indexName)
+		=> sb.Append($"DROP INDEX {QuoteIdentifier(indexName)} ON {QuoteIdentifier(tableName)}");
+
+	/// <inheritdoc />
+	public override void AppendAlterColumn(StringBuilder sb, string tableName, string columnName, Type clrType, bool isNullable, int maxLength, int precision, int scale, DbColumnInfo live)
+	{
+		var typeName = GetColumnTypeName(clrType, maxLength, precision, scale);
+
+		// The comparison folds VARCHAR into NVARCHAR and DATETIME into DATETIME2, so a column it did not report as
+		// a different type keeps its own: only its length, digits and nullability change.
+		if (live is not null)
+			typeName = KeepLiveBaseType(live.DataType, typeName);
+
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} ALTER COLUMN {QuoteIdentifier(columnName)} {typeName} {(isNullable ? "NULL" : "NOT NULL")}");
+	}
+
+	/// <inheritdoc />
+	public override void AppendAlterNullability(StringBuilder sb, string tableName, string columnName, bool isNullable, DbColumnInfo live)
+	{
+		if (live is null)
+			throw new ArgumentNullException(nameof(live));
+
+		sb.Append($"ALTER TABLE {QuoteIdentifier(tableName)} ALTER COLUMN {QuoteIdentifier(columnName)} {FormatLiveType(live)} {(isNullable ? "NULL" : "NOT NULL")}");
+	}
+
+	private string KeepLiveBaseType(string liveType, string typeName)
+	{
+		var live = liveType.Trim().ToUpperInvariant();
+		var paren = typeName.IndexOf('(');
+		var baseName = paren > 0 ? typeName[..paren] : typeName;
+		var suffix = paren > 0 ? typeName[paren..] : string.Empty;
+
+		if (live == baseName || NormalizeDbType(live) != NormalizeDbType(baseName))
+			return typeName;
+
+		return live switch
+		{
+			"VARCHAR" or "VARBINARY" or "NUMERIC" => live + suffix,
+			// Fixed-length types have no MAX.
+			"CHAR" or "NCHAR" or "BINARY" when suffix != "(MAX)" => live + suffix,
+			// DATETIME takes no precision; a declared one asks for DATETIME2.
+			"DATETIME" when suffix.Length == 0 => live,
+			_ => typeName,
+		};
+	}
+
+	private static string FormatLiveType(DbColumnInfo live)
+	{
+		var type = live.DataType.Trim().ToUpperInvariant();
+
+		return type switch
+		{
+			"VARCHAR" or "NVARCHAR" or "CHAR" or "NCHAR" or "VARBINARY" or "BINARY"
+				=> $"{type}({(live.MaxLength is null or -1 ? "MAX" : live.MaxLength.Value.ToString())})",
+			"DECIMAL" or "NUMERIC" => $"{type}({live.NumericPrecision},{live.NumericScale ?? 0})",
+			"DATETIME2" or "DATETIMEOFFSET" or "TIME" when live.NumericPrecision is not null => $"{type}({live.NumericPrecision})",
+			_ => type,
+		};
+	}
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbColumnInfo>> ReadDbSchemaAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		tableSchema ??= "dbo";
+
+		// SELECT shape:
+		//   c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
+		//   c.CHARACTER_MAXIMUM_LENGTH, COALESCE(c.NUMERIC_PRECISION, c.DATETIME_PRECISION), c.NUMERIC_SCALE,
+		//   COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsComputed')
+		// FROM INFORMATION_SCHEMA.COLUMNS c
+		// WHERE c.TABLE_SCHEMA = @schema
+		// ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+		var sql = new Query()
+			.Select()
+				.Column("c", "TABLE_NAME").Comma()
+				.Column("c", "COLUMN_NAME").Comma()
+				.Column("c", "DATA_TYPE").Comma()
+				.Column("c", "IS_NULLABLE").Comma()
+				.Column("c", "CHARACTER_MAXIMUM_LENGTH").Comma()
+				// A date/time column reports its fractional-second digits in DATETIME_PRECISION, not NUMERIC_PRECISION.
+				.Raw("COALESCE(c.NUMERIC_PRECISION, c.DATETIME_PRECISION)").Comma()
+				.Column("c", "NUMERIC_SCALE").Comma()
+				.Raw("COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsComputed')").NewLine()
+			.From().Raw("INFORMATION_SCHEMA.COLUMNS c").NewLine()
+			.Where().NewLine()
+				.Column("c", "TABLE_SCHEMA").Equal().Param("schema").NewLine()
+				.And().Raw("EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES t WHERE t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME AND t.TABLE_TYPE = 'BASE TABLE')").NewLine()
+			.OrderBy().Column("c", "TABLE_NAME").Comma().Column("c", "ORDINAL_POSITION")
+			.Render(this);
+
+		using var cmd = connection.CreateCommand();
+		cmd.CommandText = sql;
+
+		var param = cmd.CreateParameter();
+		param.ParameterName = "@schema";
+		param.Value = tableSchema;
+		cmd.Parameters.Add(param);
+
+		var result = new List<DbColumnInfo>();
+
+		using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+		while (await reader.ReadAsync(cancellationToken))
+		{
+			result.Add(new DbColumnInfo(
+				TableName: reader.GetString(0),
+				ColumnName: reader.GetString(1),
+				DataType: reader.GetString(2),
+				IsNullable: reader.GetString(3).EqualsIgnoreCase("YES"),
+				MaxLength: reader.IsDBNull(4) ? null : reader.GetInt32(4),
+				NumericPrecision: reader.IsDBNull(5) ? null : reader.GetValue(5).To<int?>(),
+				NumericScale: reader.IsDBNull(6) ? null : reader.GetValue(6).To<int?>(),
+				IsComputed: !reader.IsDBNull(7) && reader.GetValue(7).To<int>() == 1
+			));
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbForeignKeyInfo>> ReadDbForeignKeysAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		tableSchema ??= "dbo";
+
+		// SELECT shape:
+		//   fk.name, OBJECT_NAME(fkc.parent_object_id), c1.name,
+		//   OBJECT_NAME(fkc.referenced_object_id), c2.name
+		// FROM sys.foreign_keys fk
+		// JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+		// JOIN sys.columns c1 ON c1.object_id = fkc.parent_object_id AND c1.column_id = fkc.parent_column_id
+		// JOIN sys.columns c2 ON c2.object_id = fkc.referenced_object_id AND c2.column_id = fkc.referenced_column_id
+		// WHERE SCHEMA_NAME(fk.schema_id) = @schema
+		// ORDER BY fk.name, fkc.constraint_column_id
+		var sql = new Query()
+			.Select()
+				.Column("fk", "name").Comma()
+				.Raw("OBJECT_NAME(fkc.parent_object_id)").Comma()
+				.Column("c1", "name").Comma()
+				.Raw("OBJECT_NAME(fkc.referenced_object_id)").Comma()
+				.Column("c2", "name").NewLine()
+			.From().Raw("sys.foreign_keys fk").NewLine()
+			.InnerJoin().Raw("sys.foreign_key_columns fkc").On()
+				.Column("fkc", "constraint_object_id").Equal().Column("fk", "object_id").NewLine()
+			.InnerJoin().Raw("sys.columns c1").On()
+				.Column("c1", "object_id").Equal().Column("fkc", "parent_object_id")
+				.And().Column("c1", "column_id").Equal().Column("fkc", "parent_column_id").NewLine()
+			.InnerJoin().Raw("sys.columns c2").On()
+				.Column("c2", "object_id").Equal().Column("fkc", "referenced_object_id")
+				.And().Column("c2", "column_id").Equal().Column("fkc", "referenced_column_id").NewLine()
+			.Where().NewLine()
+				.Raw("SCHEMA_NAME(fk.schema_id) ").Equal().Param("schema").NewLine()
+			.OrderBy().Column("fk", "name").Comma().Column("fkc", "constraint_column_id")
+			.Render(this);
+
+		using var cmd = connection.CreateCommand();
+		cmd.CommandText = sql;
+
+		var param = cmd.CreateParameter();
+		param.ParameterName = "@schema";
+		param.Value = tableSchema;
+		cmd.Parameters.Add(param);
+
+		var result = new List<DbForeignKeyInfo>();
+
+		using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+		while (await reader.ReadAsync(cancellationToken))
+		{
+			result.Add(new DbForeignKeyInfo(
+				ConstraintName: reader.GetString(0),
+				TableName: reader.GetString(1),
+				ColumnName: reader.GetString(2),
+				RefTableName: reader.GetString(3),
+				RefColumnName: reader.GetString(4)));
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbIndexInfo>> ReadDbIndexesAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		tableSchema ??= "dbo";
+
+		// SELECT shape:
+		//   i.name, OBJECT_NAME(i.object_id), c.name, ic.key_ordinal,
+		//   i.is_unique, i.is_primary_key
+		// FROM sys.indexes i
+		// JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+		// JOIN sys.columns c       ON c.object_id  = ic.object_id AND c.column_id = ic.column_id
+		// JOIN sys.tables t        ON t.object_id  = i.object_id
+		// WHERE SCHEMA_NAME(t.schema_id) = @schema
+		//   AND i.type > 0                  -- skip heaps
+		//   AND ic.is_included_column = 0   -- skip INCLUDE columns
+		// ORDER BY i.name, ic.key_ordinal
+		var sql = new Query()
+			.Select()
+				.Column("i", "name").Comma()
+				.Raw("OBJECT_NAME(i.object_id)").Comma()
+				.Column("c", "name").Comma()
+				.Column("ic", "key_ordinal").Comma()
+				.Column("i", "is_unique").Comma()
+				.Column("i", "is_primary_key").NewLine()
+			.From().Raw("sys.indexes i").NewLine()
+			.InnerJoin().Raw("sys.index_columns ic").On()
+				.Column("ic", "object_id").Equal().Column("i", "object_id")
+				.And().Column("ic", "index_id").Equal().Column("i", "index_id").NewLine()
+			.InnerJoin().Raw("sys.columns c").On()
+				.Column("c", "object_id").Equal().Column("ic", "object_id")
+				.And().Column("c", "column_id").Equal().Column("ic", "column_id").NewLine()
+			.InnerJoin().Raw("sys.tables t").On()
+				.Column("t", "object_id").Equal().Column("i", "object_id").NewLine()
+			.Where().NewLine()
+				.Raw("SCHEMA_NAME(t.schema_id) ").Equal().Param("schema")
+				.And().Column("i", "type").More().Raw("0")
+				.And().Column("ic", "is_included_column").Equal().Raw("0").NewLine()
+			.OrderBy().Column("i", "name").Comma().Column("ic", "key_ordinal")
+			.Render(this);
+
+		using var cmd = connection.CreateCommand();
+		cmd.CommandText = sql;
+
+		var param = cmd.CreateParameter();
+		param.ParameterName = "@schema";
+		param.Value = tableSchema;
+		cmd.Parameters.Add(param);
+
+		var result = new List<DbIndexInfo>();
+
+		using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+		while (await reader.ReadAsync(cancellationToken))
+		{
+			result.Add(new DbIndexInfo(
+				IndexName: reader.GetString(0),
+				TableName: reader.GetString(1),
+				ColumnName: reader.GetString(2),
+				ColumnOrdinal: reader.GetByte(3),
+				IsUnique: reader.GetBoolean(4),
+				IsPrimaryKey: reader.GetBoolean(5)));
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbTableCompressionInfo>> ReadDbCompressionsAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		tableSchema ??= "dbo";
+
+		// Compression is a property of each partition of each index, not of the table. A table repacked
+		// as a whole reports the same setting everywhere, so the clustered index (or the heap) speaks for
+		// it, and index_id <= 1 is exactly that one.
+		//
+		// SELECT OBJECT_NAME(p.object_id), p.data_compression_desc
+		// FROM sys.partitions p
+		// JOIN sys.tables t ON t.object_id = p.object_id
+		// WHERE SCHEMA_NAME(t.schema_id) = @schema AND p.index_id <= 1
+		var sql = new Query()
+			.Select()
+				.Raw("OBJECT_NAME(p.object_id)").Comma()
+				.Column("p", "data_compression_desc").NewLine()
+			.From().Raw("sys.partitions p").NewLine()
+			.InnerJoin().Raw("sys.tables t").On()
+				.Column("t", "object_id").Equal().Column("p", "object_id").NewLine()
+			.Where().NewLine()
+				.Raw("SCHEMA_NAME(t.schema_id) ").Equal().Param("schema")
+				.And().Column("p", "index_id").LessOrEqual().Raw("1")
+			.Render(this);
+
+		using var cmd = connection.CreateCommand();
+		cmd.CommandText = sql;
+
+		var param = cmd.CreateParameter();
+		param.ParameterName = "@schema";
+		param.Value = tableSchema;
+		cmd.Parameters.Add(param);
+
+		var result = new List<DbTableCompressionInfo>();
+
+		using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+		while (await reader.ReadAsync(cancellationToken))
+		{
+			result.Add(new DbTableCompressionInfo(
+				TableName: reader.GetString(0),
+				Compression: reader.GetString(1).ToUpperInvariant() switch
+				{
+					"ROW" => DataCompressions.Row,
+					"PAGE" => DataCompressions.Page,
+					_ => DataCompressions.None,
+				}));
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	/// <remarks>
+	/// Repacking rewrites every index of the table, so it is written as one statement over all of them
+	/// rather than a statement per index that would leave the table half packed if one failed.
+	/// </remarks>
+	public override void AppendSetCompression(StringBuilder builder, string tableName, DataCompressions compression)
+	{
+		if (builder is null)
+			throw new ArgumentNullException(nameof(builder));
+
+		var setting = compression switch
+		{
+			DataCompressions.None => "NONE",
+			DataCompressions.Row => "ROW",
+			DataCompressions.Page => "PAGE",
+			_ => throw new ArgumentOutOfRangeException(nameof(compression), compression, null),
+		};
+
+		builder.Append($"ALTER INDEX ALL ON {QuoteIdentifier(tableName)} REBUILD WITH (DATA_COMPRESSION = {setting})");
+	}
+
+	/// <inheritdoc />
+	public override string NormalizeDbType(string dbTypeName)
+	{
+		return dbTypeName.Trim().ToUpperInvariant() switch
+		{
+			"NVARCHAR" or "VARCHAR" or "NCHAR" or "CHAR" or "NTEXT" or "TEXT" => "NVARCHAR",
+			"INT" or "INTEGER" => "INT",
+			"BIGINT" => "BIGINT",
+			"SMALLINT" => "SMALLINT",
+			"TINYINT" => "TINYINT",
+			"BIT" or "BOOLEAN" => "BIT",
+			"DECIMAL" or "NUMERIC" => "DECIMAL",
+			"FLOAT" or "DOUBLE PRECISION" => "FLOAT",
+			"REAL" => "REAL",
+			"DATE" => "DATE",
+			"TIME" => "TIME",
+			"DATETIME" or "DATETIME2" => "DATETIME2",
+			"DATETIMEOFFSET" => "DATETIMEOFFSET",
+			"UNIQUEIDENTIFIER" or "UUID" => "UNIQUEIDENTIFIER",
+			"VARBINARY" or "BINARY" or "IMAGE" or "BYTEA" => "VARBINARY",
+			var other => other,
+		};
+	}
+
+	/// <inheritdoc />
+	public override void AppendUpdateBy(StringBuilder sb, string tableName, string[] setColumns, string[] whereColumns)
+	{
+		if (whereColumns.Length == 0)
+			throw new InvalidOperationException($"Cannot generate UPDATE for '{tableName}': no key columns specified for WHERE clause.");
+
+		var quotedAlias = QuoteIdentifier("e");
+
+		sb.AppendLine($"update {quotedAlias}");
+		sb.AppendLine("set");
+
+		for (var i = 0; i < setColumns.Length; i++)
+		{
+			var comma = i < setColumns.Length - 1 ? "," : "";
+			sb.AppendLine($"\t{quotedAlias}.{QuoteIdentifier(setColumns[i])} = {ParameterPrefix}{setColumns[i]}{comma}");
+		}
+
+		sb.AppendLine($"from {QuoteIdentifier(tableName)} {quotedAlias}");
+		sb.AppendLine("where");
+
+		for (var i = 0; i < whereColumns.Length; i++)
+		{
+			if (i > 0)
+				sb.Append(" and ");
+			sb.Append($"{quotedAlias}.{QuoteIdentifier(whereColumns[i])} = {ParameterPrefix}{whereColumns[i]}");
+		}
+	}
+
+	/// <inheritdoc />
+	public override void AppendDeleteBy(StringBuilder sb, string tableName, string[] whereColumns)
+	{
+		if (whereColumns.Length == 0)
+			throw new InvalidOperationException($"Cannot generate DELETE for '{tableName}': no key columns specified for WHERE clause.");
+
+		var quotedAlias = QuoteIdentifier("e");
+
+		sb.Append($"delete {quotedAlias}");
+		sb.AppendLine();
+		sb.Append($"from {QuoteIdentifier(tableName)} {quotedAlias}");
+		sb.AppendLine();
+		sb.AppendLine("where");
+
+		for (var i = 0; i < whereColumns.Length; i++)
+		{
+			if (i > 0)
+				sb.Append(" and ");
+			sb.Append($"{quotedAlias}.{QuoteIdentifier(whereColumns[i])} = {ParameterPrefix}{whereColumns[i]}");
+		}
+	}
+
+	/// <inheritdoc />
+	public override void AppendUpsert(StringBuilder sb, string tableName, string[] allColumns, string[] keyColumns)
+	{
+		var nonKeys = allColumns.Except(keyColumns).ToArray();
+		var quotedTable = QuoteIdentifier(tableName);
+
+		var matchCondition = keyColumns.Select(k => $"target.{QuoteIdentifier(k)} = source.{QuoteIdentifier(k)}").Join(" AND ");
+		var sourceValues = allColumns.Select(c => $"{ParameterPrefix}{c} AS {QuoteIdentifier(c)}").JoinCommaSpace();
+		var insertCols = allColumns.Select(QuoteIdentifier).JoinCommaSpace();
+		var insertVals = allColumns.Select(c => $"source.{QuoteIdentifier(c)}").JoinCommaSpace();
+
+		sb.Append($"MERGE {quotedTable} WITH (HOLDLOCK) AS target USING (SELECT {sourceValues}) AS source ON ({matchCondition}) ");
+
+		if (nonKeys.Length > 0)
+			sb.Append($"WHEN MATCHED THEN UPDATE SET {nonKeys.Select(c => $"{QuoteIdentifier(c)} = source.{QuoteIdentifier(c)}").JoinCommaSpace()} ");
+
+		sb.Append($"WHEN NOT MATCHED THEN INSERT ({insertCols}) VALUES ({insertVals}) ");
+
+		// OUTPUT lets the caller see whether the row was INSERTed or UPDATEd
+		// and pick up the post-merge key values (incl. server-generated
+		// identities). Without it MERGE was a black box for callers that
+		// expected the same identity round-trip the other dialects provide.
+		var keyOutputs = keyColumns.Select(k => $"INSERTED.{QuoteIdentifier(k)}").JoinCommaSpace();
+		sb.Append($"OUTPUT $action AS {QuoteIdentifier("MergeAction")}, {keyOutputs};");
+	}
+}

@@ -1,0 +1,38 @@
+# Инициализация адаптера Rithmic
+
+Код ниже демонстрирует, как инициализировать [RithmicMessageAdapter](xref:StockSharp.Rithmic.RithmicMessageAdapter) и передать его в [Connector](xref:StockSharp.Algo.Connector).
+
+```cs
+Connector Connector = new Connector();				
+...				
+var messageAdapter = new RithmicMessageAdapter(Connector.TransactionIdGenerator)
+{
+	UserName = "<Ваш логин>",
+	Password = "<Ваш пароль>".To<SecureString>(),
+	CertFile = "<Path to certificate file>",
+	Server = RithmicServers.Real,
+	//Server = RithmicServers.Test,
+	//Server = RithmicServers.Simulator,  
+};
+Connector.Adapter.InnerAdapters.Add(messageAdapter);
+...	
+							
+```
+
+Альтернативный, более удобный способ -- использование метода расширения `AddAdapter<T>()`:
+
+```cs
+Connector Connector = new Connector();
+...
+Connector.AddAdapter<RithmicMessageAdapter>(a =>
+{
+	a.UserName = "<Ваш логин>";
+	a.Password = "<Ваш пароль>".To<SecureString>();
+	a.CertFile = "<Path to certificate file>";
+	a.Server = RithmicServers.Real;
+});
+```
+
+## См. также
+
+[Окно настройки подключений](../../../graphical_user_interface/connection_settings_window.md)

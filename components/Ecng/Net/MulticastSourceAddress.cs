@@ -1,0 +1,199 @@
+namespace Ecng.Net;
+
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+
+using Ecng.ComponentModel;
+using Ecng.Serialization;
+
+/// <summary>
+/// Represents the configuration for a UDP multicast source address.
+/// </summary>
+[TypeConverter(typeof(ExpandableObjectConverter))]
+public class MulticastSourceAddress : NotifiableObject, IAsyncPersistable
+{
+	private IPAddress _groupAddress;
+
+	/// <summary>
+	/// Gets or sets the UDP multicast group address.
+	/// </summary>
+	[Display(Name = "Group Address", Description = "UDP multicast group address.", Order = 0)]
+	//[IpAddress(AsString = true)]
+	public IPAddress GroupAddress
+	{
+		get => _groupAddress;
+		set
+		{
+			NotifyChanging();
+			_groupAddress = value;
+			NotifyChanged();
+		}
+	}
+
+	private IPAddress _sourceAddress;
+
+	/// <summary>
+	/// Gets or sets the UDP multicast source address.
+	/// </summary>
+	[Display(Name = "Source Address", Description = "UDP multicast source address.", Order = 1)]
+	//[IpAddress(AsString = true)]
+	public IPAddress SourceAddress
+	{
+		get => _sourceAddress;
+		set
+		{
+			NotifyChanging();
+			_sourceAddress = value;
+			NotifyChanged();
+		}
+	}
+
+	private IPAddress _interfaceAddress;
+
+	/// <summary>
+	/// Gets or sets the local network interface address on which to join the multicast group.
+	/// When unset, the OS default interface is used — on a multi-homed host that can make the
+	/// group be received on several interfaces (duplicate delivery). Set this to bind the
+	/// membership to a single NIC.
+	/// </summary>
+	[Display(Name = "Interface Address", Description = "Local interface address for multicast membership.", Order = 2)]
+	public IPAddress InterfaceAddress
+	{
+		get => _interfaceAddress;
+		set
+		{
+			NotifyChanging();
+			_interfaceAddress = value;
+			NotifyChanged();
+		}
+	}
+
+	private int _port;
+
+	/// <summary>
+	/// Gets or sets the local port.
+	/// </summary>
+	[Display(Name = "Port", Description = "Local port.", Order = 3)]
+	public int Port
+	{
+		get => _port;
+		set
+		{
+			if (_port == value)
+				return;
+
+			NotifyChanging();
+			_port = value;
+			NotifyChanged();
+		}
+	}
+
+	private bool _isEnabled;
+
+	/// <summary>
+	/// Gets or sets a value indicating whether the configuration is enabled.
+	/// </summary>
+	[Display(Name = "Enabled", Description = "Is configuration enabled.", Order = 3)]
+	public bool IsEnabled
+	{
+		get => _isEnabled;
+		set
+		{
+			if (_isEnabled == value)
+				return;
+
+			NotifyChanging();
+			_isEnabled = value;
+			NotifyChanged();
+		}
+	}
+
+	/// <summary>
+	/// Loads settings from the specified SettingsStorage.
+	/// </summary>
+	/// <param name="storage">The settings storage to load from.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		SourceAddress = storage.GetValue<IPAddress>(nameof(SourceAddress));
+		Port = storage.GetValue<int>(nameof(Port));
+		GroupAddress = storage.GetValue<IPAddress>(nameof(GroupAddress));
+		IsEnabled = storage.GetValue(nameof(IsEnabled), IsEnabled);
+		InterfaceAddress = storage.GetValue(nameof(InterfaceAddress), default(IPAddress));
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Saves settings to the specified SettingsStorage.
+	/// </summary>
+	/// <param name="storage">The settings storage to save to.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage
+			.Set(nameof(SourceAddress), SourceAddress.To<string>())
+			.Set(nameof(Port), Port)
+			.Set(nameof(GroupAddress), GroupAddress.To<string>())
+			.Set(nameof(IsEnabled), IsEnabled)
+			.Set(nameof(InterfaceAddress), InterfaceAddress.To<string>());
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Returns a string that represents the current multicast source address.
+	/// </summary>
+	/// <returns>A string containing the group address, source address, and port.</returns>
+	public override string ToString()
+	{
+		return GroupAddress + " " + SourceAddress + " " + Port;
+	}
+
+	/// <summary>
+	/// Returns a hash code for the current multicast source address.
+	/// </summary>
+	/// <returns>A hash code for the current object.</returns>
+	public override int GetHashCode()
+	{
+		return (GroupAddress?.GetHashCode() ?? 0) ^ Port.GetHashCode() ^ (SourceAddress?.GetHashCode() ?? 0);
+	}
+
+	/// <summary>
+	/// Determines whether the specified object is equal to the current multicast source address.
+	/// </summary>
+	/// <param name="obj">The object to compare with the current instance.</param>
+	/// <returns>true if the specified object is equal to the current instance; otherwise, false.</returns>
+	public override bool Equals(object obj)
+	{
+		if (obj is not MulticastSourceAddress addr)
+			return false;
+
+		if (GroupAddress is null)
+		{
+			if (addr.GroupAddress != null)
+				return false;
+		}
+		else if (addr.GroupAddress is null)
+			return false;
+		else if (!GroupAddress.Equals(addr.GroupAddress))
+			return false;
+
+		if (Port != addr.Port)
+			return false;
+
+		if (SourceAddress is null)
+		{
+			if (addr.SourceAddress != null)
+				return false;
+		}
+		else if (addr.SourceAddress is null)
+			return false;
+		else if (!SourceAddress.Equals(addr.SourceAddress))
+			return false;
+
+		return true;
+	}
+}

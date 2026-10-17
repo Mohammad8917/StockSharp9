@@ -1,0 +1,133 @@
+{
+  "name": "@stocksharp/chart",
+  "version": "2.4.1",
+  "description": "StockSharp JS Trading Charts — a dependency-free browser trading-chart engine: native panes, custom series, primitives, incremental indicators, exact order flow (footprint / volume profile / TPO) and a broker-agnostic trading layer, with a TypeScript API and the SSChart global.",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": {
+    "name": "StockSharp Platform LLC",
+    "url": "https://stocksharp.com/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/StockSharp/JS-Charts.git"
+  },
+  "homepage": "https://stocksharp.com",
+  "bugs": {
+    "url": "https://github.com/StockSharp/JS-Charts/issues"
+  },
+  "keywords": [
+    "stocksharp",
+    "chart",
+    "charts",
+    "trading",
+    "candlestick",
+    "footprint",
+    "volume-profile",
+    "market-profile",
+    "tpo",
+    "order-flow",
+    "indicators",
+    "technical-analysis",
+    "financial-charts",
+    "canvas",
+    "typescript",
+    "algorithmic-trading"
+  ],
+  "type": "module",
+  "main": "./dist/esm/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "unpkg": "./dist/sschart.js",
+  "jsdelivr": "./dist/sschart.js",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js"
+    },
+    "./ui": {
+      "types": "./dist/types/chart/ui.d.ts",
+      "import": "./dist/esm/chart/ui.js"
+    },
+    "./ui.css": "./styles/chart-ui.css",
+    "./indicators": {
+      "types": "./dist/types/chart/indicators/index.d.ts",
+      "import": "./dist/esm/chart/indicators/index.js"
+    },
+    "./orderflow": {
+      "types": "./dist/types/orderflow/index.d.ts",
+      "import": "./dist/esm/orderflow/index.js"
+    },
+    "./trading": {
+      "types": "./dist/types/trading/index.d.ts",
+      "import": "./dist/esm/trading/index.js"
+    },
+    "./data": {
+      "types": "./dist/types/data/index.d.ts",
+      "import": "./dist/esm/data/index.js"
+    },
+    "./drawings": {
+      "types": "./dist/types/drawings/index.d.ts",
+      "import": "./dist/esm/drawings/index.js"
+    },
+    "./workspace": {
+      "types": "./dist/types/workspace/index.d.ts",
+      "import": "./dist/esm/workspace/index.js"
+    },
+    "./persistence": {
+      "types": "./dist/types/persistence/index.d.ts",
+      "import": "./dist/esm/persistence/index.js"
+    },
+    "./time": {
+      "types": "./dist/types/time/index.d.ts",
+      "import": "./dist/esm/time/index.js"
+    },
+    "./source": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/esm",
+    "dist/types",
+    "dist/sschart.js",
+    "dist/sschart.js.map",
+    "dist/sschartui.js",
+    "dist/sschartui.js.map",
+    "src",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "sample.png",
+    "screenshots",
+    "styles"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepack": "npm run build",
+    "build:browser-fixtures": "node build-browser-fixtures.mjs",
+    "serve": "node serve.mjs",
+    "typecheck:core": "tsc -p tsconfig.typecheck.json",
+    "api:check": "node tools/check-public-api.mjs",
+    "api:update": "node tools/check-public-api.mjs --update",
+    "test": "npm run typecheck:core && npm run api:check && node build-tests.mjs && node --test \"tests/_dist/**/*.test.cjs\"",
+    "test:browser": "npm run build && npm run build:browser-fixtures && playwright test",
+    "test:browser:update": "npm run build && npm run build:browser-fixtures && playwright test --update-snapshots",
+    "test:performance": "npm run build && npm run build:browser-fixtures && playwright test tests/browser/chart.performance.spec.ts tests/browser/orderflow.performance.spec.ts --project=chromium-dpr1",
+    "pack:check": "npm pack --dry-run",
+    "release:check": "node tools/check-release-tag.mjs",
+    "release:patch": "npm version patch -m \"chore: release v%s\"",
+    "release:minor": "npm version minor -m \"chore: release v%s\"",
+    "release:major": "npm version major -m \"chore: release v%s\""
+  },
+  "dependencies": {
+    "@stocksharp/indicators": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "esbuild": "0.28.1",
+    "typescript": "7.0.2"
+  }
+}

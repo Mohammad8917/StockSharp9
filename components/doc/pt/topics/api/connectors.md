@@ -1,0 +1,195 @@
+# Conectores
+
+Para trabalhar com bolsas e fontes de dados no [S#](../api.md), recomenda-se usar a classe base [Connector](xref:StockSharp.Algo.Connector).
+
+## Repositório de código-fonte
+
+O [Connector](xref:StockSharp.Algo.Connector) base, o modelo de mensagens e os contratos comuns dos adaptadores permanecem no [repositório principal do StockSharp](https://github.com/StockSharp/StockSharp). Os adaptadores abertos específicos de cada fornecedor são mantidos separadamente no [repositório StockSharp Connectors](https://github.com/StockSharp/Connectors).
+
+Cada diretório de conector de nível superior contém o seu próprio projeto .NET, enquanto `Connectors.slnx` compila todo o repositório. Use este repositório para estudar a implementação de um adaptador, corrigir um conector existente ou contribuir com um novo.
+
+Vamos examinar o trabalho com [Connector](xref:StockSharp.Algo.Connector). O código-fonte do exemplo pode ser encontrado no projeto Samples\/01\_Basic\/01\_ConnectAndDownloadInstruments.
+
+![MultiConnection principal](../../images/multiconnection_main.png)
+
+Crie uma instância da classe [Connector](xref:StockSharp.Algo.Connector):
+
+```cs
+...
+public Connector Connector;
+...
+public MainWindow()
+{
+	InitializeComponent();
+	Connector = new Connector();
+	InitConnector();
+}
+
+```
+
+Para configurar o [Connector](xref:StockSharp.Algo.Connector), a **API** possui uma interface gráfica especial que permite configurar várias conexões simultaneamente. Como usá-la é descrito na seção [Configuração gráfica](connectors/graphical_configuration.md).
+
+```cs
+...
+private readonly IFileSystem _fileSystem = Paths.FileSystem;
+private const string _connectorFile = "ConnectorFile.json";
+...
+private void Setting_Click(object sender, RoutedEventArgs e)
+{
+	if (Connector.Configure(this))
+	{
+		Connector.Save().Serialize(_fileSystem, _connectorFile);
+	}
+}
+
+```
+
+![Janela de conexão da API GUI](../../images/api_gui_connectorwindow.png)
+
+Da mesma forma, você pode adicionar conexões diretamente pelo código (sem janelas gráficas) usando o método de extensão [TraderHelper.AddAdapter\<TAdapter\>](xref:StockSharp.Algo.TraderHelper.AddAdapter``1(StockSharp.Algo.Connector,System.Action{``0}))**(**[StockSharp.Algo.Connector](xref:StockSharp.Algo.Connector) connector, [System.Action\<TAdapter\>](xref:System.Action`1) init **)**:
+
+```cs
+...
+// Adicionar adaptador para conectar à Binance
+connector.AddAdapter<BinanceMessageAdapter>(a =>
+{
+	a.Key = "<A sua chave de API>";
+	a.Secret = "<A sua chave secreta>";
+});
+
+// Adicionar RSS para notícias
+connector.AddAdapter<RssMessageAdapter>(a =>
+{
+	a.Address = "https://news-source.com/feed";
+});
+
+```
+
+Você pode adicionar um número ilimitado de conexões a um único objeto [Connector](xref:StockSharp.Algo.Connector). Assim, é possível conectar-se simultaneamente a várias bolsas e corretoras a partir do programa.
+
+No método *InitConnector*, definimos os manipuladores de eventos necessários para [IConnector](xref:StockSharp.BusinessEntities.IConnector):
+
+```cs
+private void InitConnector()
+{
+	// Assinar evento de conexão bem-sucedida
+	Connector.Connected += () =>
+	{
+		this.GuiAsync(() => ChangeConnectStatus(true));
+	};
+
+	// Assinar evento de erro de conexão
+	Connector.ConnectionError += error => this.GuiAsync(() =>
+	{
+		ChangeConnectStatus(false);
+		MessageBox.Show(this, error.ToString(), LocalizedStrings.ErrorConnection);
+	});
+
+	// Assinar evento de desconexão
+	Connector.Disconnected += () => this.GuiAsync(() => ChangeConnectStatus(false));
+
+	// Assinar evento de erro
+	Connector.Error += error =>
+		this.GuiAsync(() => MessageBox.Show(this, error.ToString(), LocalizedStrings.Str2955));
+
+	// Assinar evento de falha na assinatura de dados de mercado
+	Connector.SubscriptionFailed += (subscription, error, isSubscribe) =>
+		this.GuiAsync(() => MessageBox.Show(this, error.ToString(),
+			LocalizedStrings.Str2956Params.Put(subscription.DataType, subscription.SecurityId)));
+
+	// Assinaturas para recebimento de dados
+
+	// Instruments
+	Connector.SecurityReceived += (sub, security) => _securitiesWindow.SecurityPicker.Securities.Add(security);
+
+	// Negócios tick
+	Connector.TickTradeReceived += (sub, trade) => _tradesWindow.TradeGrid.Trades.TryAdd(trade);
+
+	// Ordens
+	Connector.OrderReceived += (sub, order) => _ordersWindow.OrderGrid.Orders.TryAdd(order);
+
+	// Negócios próprios
+	Connector.OwnTradeReceived += (sub, trade) => _myTradesWindow.TradeGrid.Trades.TryAdd(trade);
+
+	// Posições
+	Connector.PositionReceived += (sub, position) => _portfoliosWindow.PortfolioGrid.Positions.TryAdd(position);
+
+	// Falhas no registro de ordens
+	Connector.OrderRegisterFailReceived += (sub, fail) => _ordersWindow.OrderGrid.AddRegistrationFail(fail);
+
+	// Falhas no cancelamento de ordens
+	Connector.OrderCancelFailReceived += (sub, fail) => OrderFailed(fail);
+
+	// Definir provedor de dados de mercado
+	_securitiesWindow.SecurityPicker.MarketDataProvider = Connector;
+
+	try
+	{
+		if (File.Exists(_connectorFile))
+		{
+			var ctx = new ContinueOnExceptionContext();
+			ctx.Error += ex => ex.LogError();
+			using (new Scope<ContinueOnExceptionContext>(ctx))
+				Connector.Load(_connectorFile.Deserialize<SettingsStorage>(_fileSystem));
+		}
+	}
+	catch
+	{
+	}
+
+	ConfigManager.RegisterService<IExchangeInfoProvider>(new InMemoryExchangeInfoProvider());
+
+	// Registrar provedor de adaptadores para configuração gráfica
+	ConfigManager.RegisterService<IMessageAdapterProvider>(
+		new InMemoryMessageAdapterProvider(Connector.Adapter.InnerAdapters));
+}
+```
+
+Como salvar e carregar configurações do [Connector](xref:StockSharp.Algo.Connector) em um arquivo pode ser encontrado na seção [Salvando e Carregando Configurações](connectors/save_and_load_settings.md).
+
+Informações sobre a criação do seu próprio [Connector](xref:StockSharp.Algo.Connector) podem ser encontradas na seção [Criando Seu Próprio Conector](connectors/creating_own_connector.md).
+
+O envio de ordens é descrito nas seções [Ordens](orders_management.md), [Criando uma Nova Ordem](orders_management/create_new_order.md), [Criando uma Nova Ordem Stop](orders_management/create_new_stop_order.md).
+
+## Recursos adicionais
+
+### IFileSystem e Paths.FileSystem
+
+Use `IFileSystem` para operações de arquivo, como serializar e desserializar configurações. A instância padrão está disponível através de `Paths.FileSystem`:
+
+```cs
+private readonly IFileSystem _fileSystem = Paths.FileSystem;
+```
+
+Os métodos `Serialize` e `Deserialize` sem o parâmetro `IFileSystem` estão marcados como `[Obsolete]`.
+
+### Métodos assíncronos de ordens
+
+Os seguintes métodos assíncronos estão disponíveis para trabalhar com ordens:
+
+- `RegisterOrderAsync` - registra uma ordem de forma assíncrona.
+- `CancelOrderAsync` - cancela uma ordem de forma assíncrona.
+- `EditOrderAsync` - edita uma ordem de forma assíncrona.
+
+### SubscriptionsOnConnect
+
+A propriedade `SubscriptionsOnConnect` controla as assinaturas que são realizadas automaticamente na conexão. Por padrão, inclui assinaturas de instrumentos, portfólios e ordens.
+
+### Eventos do adaptador
+
+Os seguintes eventos estão disponíveis para rastrear eventos de adaptadores específicos:
+
+- `ConnectedEx` - um adaptador específico se conectou.
+- `DisconnectedEx` - um adaptador específico se desconectou.
+- `ConnectionErrorEx` - ocorreu um erro de conexão em um adaptador específico.
+
+### Ciclo de vida da assinatura
+
+- `SubscriptionStarted` - a assinatura foi iniciada.
+- `SubscriptionOnline` - a assinatura mudou para o estado online: os dados históricos foram recebidos e a transmissão de dados em tempo real foi iniciada.
+- `SubscriptionFailed` - erro de assinatura. O terceiro parâmetro, `isSubscribe`, indica se o erro ocorreu durante a assinatura ou o cancelamento da assinatura.
+- `SubscriptionStopped` - a assinatura foi interrompida.
+
+## Veja também
+
+[Configuração gráfica](connectors/graphical_configuration.md)

@@ -1,0 +1,86 @@
+namespace Ecng.Compilation;
+
+/// <summary>
+/// The reference to the .NET assembly.
+/// </summary>
+public class AssemblyReference : BaseCodeReference
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="AssemblyReference"/>.
+	/// </summary>
+	public AssemblyReference()
+		: this(LocalFileSystem.Instance)
+	{
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="AssemblyReference"/> with a custom file system.
+	/// </summary>
+	public AssemblyReference(IFileSystem fileSystem)
+		: base(fileSystem)
+	{
+	}
+
+	/// <summary>
+	/// Gets the display name of the assembly reference.
+	/// </summary>
+	public override string Name => Path.GetFileNameWithoutExtension(FileName);
+
+	/// <summary>
+	/// Determines whether the assembly reference is valid.
+	/// </summary>
+	public override bool IsValid => FileSystem.FileExists(Location);
+
+	/// <summary>
+	/// Gets or sets the file name of the assembly reference.
+	/// </summary>
+	public string FileName { get; set; }
+
+	/// <summary>
+	/// <see cref="Location"/>.
+	/// </summary>
+	public override string Location
+	{
+		get
+		{
+			var fileName = FileName;
+
+			if (fileName.IsEmpty())
+				return string.Empty;
+
+			var justFileName = Path.GetFileName(fileName);
+
+			// If FileName is just a filename (no path), try to find it in RuntimePath
+			if (justFileName.EqualsIgnoreCase(fileName))
+			{
+				var tmp = Path.Combine(ICompilerExtensions.RuntimePath, justFileName);
+
+				if (FileSystem.FileExists(tmp))
+					return tmp;
+
+				return justFileName;
+			}
+
+			// FileName contains a path, return it as-is
+			return fileName;
+		}
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		FileName = storage.GetValue<string>(nameof(FileName)) ?? storage.GetValue<string>(nameof(Location));
+	}
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage.SetValue(nameof(FileName), FileName);
+	}
+
+	/// <inheritdoc />
+	public override ValueTask<IEnumerable<(string name, byte[] body)>> GetImages(CancellationToken cancellationToken)
+	{
+		return new([Location.ToRef(FileSystem)]);
+	}
+}

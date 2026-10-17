@@ -1,0 +1,192 @@
+namespace StockSharp.LBank;
+
+partial class LBankMessageAdapter
+{
+	private HttpClient _httpClient;
+	private PusherClient _pusherClient;
+	private DateTime? _lastTimeBalanceCheck;
+
+	private string _authKey;
+	private DateTime? _authKeyLastTimeRefresh;
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="LBankMessageAdapter"/>.
+	/// </summary>
+	/// <param name="transactionIdGenerator">Transaction id generator.</param>
+	public LBankMessageAdapter(IdGenerator transactionIdGenerator)
+		: base(transactionIdGenerator)
+	{
+		HeartbeatInterval = TimeSpan.FromSeconds(1);
+
+		this.AddMarketDataSupport();
+		this.AddTransactionalSupport();
+		this.RemoveSupportedMessage(MessageTypes.OrderReplace);
+		this.RemoveSupportedMessage(MessageTypes.OrderGroupCancel);
+
+		this.AddSupportedMarketDataType(DataType.Ticks);
+		this.AddSupportedMarketDataType(DataType.MarketDepth);
+		this.AddSupportedMarketDataType(DataType.Level1);
+		this.AddSupportedCandleTimeFrames(AllTimeFrames);
+	}
+
+	/// <inheritdoc />
+	public override bool IsAllDownloadingSupported(DataType dataType)
+		=> dataType == DataType.Securities || dataType == DataType.Transactions || dataType == DataType.PositionChanges || base.IsAllDownloadingSupported(dataType);
+
+	/// <inheritdoc />
+	public override IEnumerable<int> SupportedOrderBookDepths { get; } = [10, 50, 100];
+
+	/// <inheritdoc />
+	public override bool IsSupportCandlesUpdates(MarketDataMessage subscription) => true;
+
+	/// <inheritdoc />
+	public override string[] AssociatedBoards => [BoardCodes.LBank];
+
+	private void SubscribePusherClient()
+	{
+		_pusherClient.StateChanged += SendOutConnectionStateAsync;
+		_pusherClient.Error += SendOutErrorAsync;
+		_pusherClient.TickerChanged += SessionOnTickerChanged;
+		_pusherClient.OrderBookChanged += SessionOnOrderBookChanged;
+		_pusherClient.NewTrade += SessionOnNewTrade;
+		_pusherClient.NewCandle += SessionOnNewCandle;
+		_pusherClient.OrderUpdated += SessionOnOrderUpdated;
+		_pusherClient.BalanceUpdated += SessionOnBalanceUpdated;
+	}
+
+	private void UnsubscribePusherClient()
+	{
+		_pusherClient.StateChanged -= SendOutConnectionStateAsync;
+		_pusherClient.Error -= SendOutErrorAsync;
+		_pusherClient.TickerChanged -= SessionOnTickerChanged;
+		_pusherClient.OrderBookChanged -= SessionOnOrderBookChanged;
+		_pusherClient.NewTrade -= SessionOnNewTrade;
+		_pusherClient.NewCandle -= SessionOnNewCandle;
+		_pusherClient.OrderUpdated -= SessionOnOrderUpdated;
+		_pusherClient.BalanceUpdated -= SessionOnBalanceUpdated;
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask ResetAsync(ResetMessage message, CancellationToken cancellationToken)
+	{
+		if (_httpClient != null)
+		{
+			try
+			{
+				_httpClient.Dispose();
+			}
+			catch (Exception ex)
+			{
+				await SendOutErrorAsync(ex, cancellationToken);
+			}
+
+			_httpClient = null;
+		}
+
+		if (_pusherClient != null)
+		{
+			try
+			{
+				UnsubscribePusherClient();
+				await _pusherClient.DisconnectAsync(cancellationToken);
+			}
+			catch (Exception ex)
+			{
+				await SendOutErrorAsync(ex, cancellationToken);
+			}
+			finally
+			{
+				_pusherClient.Dispose();
+			}
+
+			_pusherClient = null;
+		}
+
+		_lastTimeBalanceCheck = null;
+
+		_authKey = null;
+		_authKeyLastTimeRefresh = null;
+
+		_candlesTransactions.Clear();
+
+		await SendOutMessageAsync(new ResetMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask ConnectAsync(ConnectMessage message, CancellationToken cancellationToken)
+	{
+		if (this.IsTransactional())
+		{
+			if (Key.IsEmpty())
+				throw new InvalidOperationException(LocalizedStrings.KeyNotSpecified);
+
+			if (Secret.IsEmpty())
+				throw new InvalidOperationException(LocalizedStrings.SecretNotSpecified);
+		}
+
+		if (_httpClient != null)
+			throw new InvalidOperationException(LocalizedStrings.NotDisconnectPrevTime);
+
+		if (_pusherClient != null)
+			throw new InvalidOperationException(LocalizedStrings.NotDisconnectPrevTime);
+
+		_httpClient = new HttpClient(RestEndpoint, Key, Secret) { Parent = this };
+
+		if (this.IsTransactional())
+		{
+			await _httpClient.SyncTimeAsync(cancellationToken);
+			_authKey = await _httpClient.GetAuthKeyAsync(cancellationToken);
+
+			if (_authKey.IsEmpty())
+				throw new InvalidOperationException("LBank returned an empty subscription key.");
+
+			_authKeyLastTimeRefresh = DateTime.UtcNow;
+		}
+
+		_pusherClient = new PusherClient(WebSocketEndpoint,
+			ReConnectionSettings.WorkingTime,
+			ReConnectionSettings.ReAttemptCount) { Parent = this };
+		SubscribePusherClient();
+		await _pusherClient.ConnectAsync(cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask DisconnectAsync(DisconnectMessage message, CancellationToken cancellationToken)
+	{
+		if (_httpClient == null)
+			throw new InvalidOperationException(LocalizedStrings.ConnectionNotOk);
+
+		if (_pusherClient == null)
+			throw new InvalidOperationException(LocalizedStrings.ConnectionNotOk);
+
+		if (_authKey != null)
+		{
+			await _httpClient.DestroyAuthKeyAsync(_authKey, cancellationToken);
+
+			_authKey = null;
+			_authKeyLastTimeRefresh = null;
+		}
+
+		_httpClient.Dispose();
+		_httpClient = null;
+
+		await _pusherClient.DisconnectAsync(cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask TimeAsync(TimeMessage timeMsg, CancellationToken cancellationToken)
+	{
+		if (BalanceCheckInterval > TimeSpan.Zero &&
+			(_lastTimeBalanceCheck == null || (CurrentTime - _lastTimeBalanceCheck) > BalanceCheckInterval))
+		{
+			await PortfolioLookupAsync(null, cancellationToken);
+		}
+
+		if (_authKeyLastTimeRefresh != null && (DateTime.UtcNow - _authKeyLastTimeRefresh.Value).TotalMinutes > 50)
+		{
+			await _httpClient.SyncTimeAsync(cancellationToken);
+			await _httpClient.RefreshAuthKeyAsync(_authKey, cancellationToken);
+			_authKeyLastTimeRefresh = DateTime.UtcNow;
+		}
+	}
+}

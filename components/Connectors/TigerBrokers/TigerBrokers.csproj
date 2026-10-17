@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\common_connectors.props" />
+
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="$(BouncyCastleVer)" />
+    <PackageReference Include="TigerBrokers.OpenAPI" Version="$(TigerBrokersOpenApiVer)" />
+  </ItemGroup>
+</Project>

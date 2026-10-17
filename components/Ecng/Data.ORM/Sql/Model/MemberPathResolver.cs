@@ -1,0 +1,145 @@
+namespace Ecng.Data.Sql.Model;
+
+using Ecng.Serialization;
+
+/// <summary>
+/// Pure resolver from a <see cref="MemberExpression"/> chain rooted at an
+/// entity parameter to an emit-ready <see cref="MemberPathResolution"/>:
+/// the qualified leaf <see cref="ColumnRef"/> plus the implicit
+/// <see cref="JoinPlan"/>s that must be registered for the alias to resolve.
+///
+/// Three traversal forms are recognised at each non-leaf hop:
+/// <list type="bullet">
+/// <item>RelationSingle navigation — emits a LEFT OUTER JOIN to the target
+/// table (so a row whose foreign key is NULL is preserved rather than silently
+/// dropped; equivalent to an INNER JOIN for a non-null FK under referential
+/// integrity); switches the running alias to the joined table.</item>
+/// <item>Inner-schema (value object) — accumulates a column-name prefix that
+/// flattens nested members into a single physical column; a
+/// <see cref="NameOverrideAttribute"/> on the hop renames the column of a
+/// member outright, as <see cref="SchemaRegistry"/> does.</item>
+/// <item>FK short-circuit — when the leaf is <c>Id</c> directly under a
+/// RelationSingle hop, no JOIN is added and the FK column on the parent
+/// alias is used instead.</item>
+/// </list>
+///
+/// Returns <see langword="null"/> for any unsupported shape (chain not rooted
+/// at a parameter, navigation target missing from <see cref="SchemaRegistry"/>,
+/// non-RelationSingle entity hop, etc.) so the caller can fall back to
+/// legacy resolution paths.
+/// </summary>
+public static class MemberPathResolver
+{
+	private const string IdColumnName = "Id";
+
+	/// <summary>
+	/// Attempts to resolve a member-access chain to a <see cref="MemberPathResolution"/>.
+	/// </summary>
+	/// <param name="member">Leaf <see cref="MemberExpression"/> (e.g. <c>x.A.B.C</c>).</param>
+	/// <param name="rootAlias">Alias of the table the chain is rooted at.</param>
+	/// <returns>
+	/// Resolution describing the leaf column and required joins, or
+	/// <see langword="null"/> if the chain shape is unsupported.
+	/// </returns>
+	public static MemberPathResolution Resolve(MemberExpression member, string rootAlias)
+	{
+		if (member is null)
+			return null;
+
+		var chain = new List<MemberInfo>();
+		Expression cur = member;
+
+		while (cur is MemberExpression me)
+		{
+			chain.Add(me.Member);
+			cur = me.Expression;
+		}
+
+		if (cur is not ParameterExpression)
+			return null;
+
+		chain.Reverse();
+
+		var joins = new List<JoinPlan>();
+		var currentAlias = rootAlias;
+		var innerPrefix = string.Empty;
+
+		// The [NameOverride]s of the inner-schema hop just passed: they rename the columns of its members.
+		IReadOnlyDictionary<string, string> nameOverrides = null;
+
+		for (var i = 0; i < chain.Count - 1; i++)
+		{
+			var hop = chain[i];
+			var hopType = hop.GetMemberType();
+
+			var isLastBeforeLeaf = i == chain.Count - 2;
+			var leaf = isLastBeforeLeaf ? chain[chain.Count - 1] : null;
+
+			if (hop.GetAttribute<RelationSingleAttribute>() is not null)
+			{
+				if (!SchemaRegistry.TryGet(hopType, out var targetSchema) || targetSchema.Identity is null)
+					return null;
+
+				var fkColumn = GetColumnName(innerPrefix, hop.Name, nameOverrides);
+
+				if (isLastBeforeLeaf && leaf.Name == IdColumnName)
+				{
+					return new MemberPathResolution(
+						new ColumnRef(currentAlias, fkColumn),
+						joins);
+				}
+
+				joins.Add(new JoinPlan(
+					// LEFT OUTER, not INNER: projecting or filtering through a
+					// RelationSingle whose foreign key is NULL must keep the parent
+					// row instead of silently dropping it. For a non-null FK this is
+					// equivalent to an INNER JOIN under referential integrity.
+					JoinKind.LeftOuter,
+					targetSchema.Name,
+					hop.Name,
+					currentAlias,
+					fkColumn,
+					targetSchema.Identity.Name));
+
+				currentAlias = hop.Name;
+				innerPrefix = string.Empty;
+				nameOverrides = null;
+			}
+			else if (IsInnerSchema(hopType))
+			{
+				innerPrefix = GetColumnName(innerPrefix, hop.Name, nameOverrides);
+				nameOverrides = GetNameOverrides(hop);
+			}
+			else
+			{
+				return null;
+			}
+		}
+
+		var leafMember = chain[chain.Count - 1];
+		return new MemberPathResolution(
+			new ColumnRef(currentAlias, GetColumnName(innerPrefix, leafMember.Name, nameOverrides)),
+			joins);
+	}
+
+	// Names the column of a member as SchemaRegistry flattens an inner schema: the name a [NameOverride] gives it, or the
+	// prefix of the inner schema followed by the member name.
+	private static string GetColumnName(string prefix, string memberName, IReadOnlyDictionary<string, string> nameOverrides)
+		=> nameOverrides is not null && nameOverrides.TryGetValue(memberName, out var columnName) ? columnName : prefix + memberName;
+
+	private static Dictionary<string, string> GetNameOverrides(MemberInfo member)
+	{
+		var overrides = new Dictionary<string, string>();
+
+		foreach (var attr in member.GetAttributes<NameOverrideAttribute>())
+			overrides[attr.OldName] = attr.NewName;
+
+		return overrides;
+	}
+
+	private static bool IsInnerSchema(Type t)
+		=> !t.IsNullable()
+			&& !t.IsSerializablePrimitive()
+			&& !t.IsAutoGenerated()
+			&& !SchemaRegistry.TryGet(t, out _);
+}

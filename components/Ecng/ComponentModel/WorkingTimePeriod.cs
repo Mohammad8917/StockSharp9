@@ -1,0 +1,107 @@
+namespace Ecng.ComponentModel;
+
+/// <summary>
+/// Schedule validity period.
+/// </summary>
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.ScheduleValidityPeriodKey,
+	Description = LocalizedStrings.ScheduleValidityPeriodKey)]
+public class WorkingTimePeriod : Cloneable<WorkingTimePeriod>, IAsyncPersistable
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="WorkingTimePeriod"/>.
+	/// </summary>
+	public WorkingTimePeriod()
+	{
+	}
+
+	/// <summary>
+	/// Schedule expiration date.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TillKey,
+		Description = LocalizedStrings.WorkingTimeTillKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 0)]
+	public DateTime Till { get; set; }
+
+	private List<Range<TimeSpan>> _times = [];
+
+	/// <summary>
+	/// Schedule working time intervals within a day.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ScheduleKey,
+		Description = LocalizedStrings.ScheduleKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 1)]
+	public List<Range<TimeSpan>> Times
+	{
+		get => _times;
+		set => _times = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private IDictionary<DayOfWeek, Range<TimeSpan>[]> _specialDays = new Dictionary<DayOfWeek, Range<TimeSpan>[]>();
+
+	/// <summary>
+	/// Special working days with custom schedules by day of week.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SpecialDaysKey,
+		Description = LocalizedStrings.SpecialDaysDescKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 2)]
+	public IDictionary<DayOfWeek, Range<TimeSpan>[]> SpecialDays
+	{
+		get => _specialDays;
+		set => _specialDays = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	/// <inheritdoc />
+	public override WorkingTimePeriod Clone()
+	{
+		return new WorkingTimePeriod
+		{
+			Till = Till,
+			Times = [.. Times.Select(t => t.Clone())],
+			SpecialDays = SpecialDays.ToDictionary(
+				p => p.Key,
+				p => p.Value.Select(r => r.Clone()).ToArray()),
+		};
+	}
+
+	/// <inheritdoc />
+	public Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		Till = storage.GetValue<DateTime>(nameof(Till));
+		Times = [.. storage.GetValue<IEnumerable<SettingsStorage>>(nameof(Times)).Select(s => s.ToRange<TimeSpan>())];
+		SpecialDays = storage.GetValue<IEnumerable<SettingsStorage>>(nameof(SpecialDays)).Select(s =>
+			new KeyValuePair<DayOfWeek, Range<TimeSpan>[]>(
+				s.GetValue<DayOfWeek>("Day"),
+				[.. s.GetValue<IEnumerable<SettingsStorage>>("Periods").Select(s1 => s1.ToRange<TimeSpan>())]))
+		.ToDictionary();
+
+		return Task.CompletedTask;
+	}
+
+	/// <inheritdoc />
+	public Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage
+			.Set(nameof(Till), Till)
+			.Set(nameof(Times), Times.Select(t => t.ToStorage()).ToArray())
+			.Set(nameof(SpecialDays), SpecialDays.Select(p => new SettingsStorage()
+				.Set("Day", p.Key)
+				.Set("Periods", p.Value.Select(r => r.ToStorage()).ToArray())
+			).ToArray());
+
+		return Task.CompletedTask;
+	}
+
+	/// <inheritdoc />
+	public override string ToString() => Till.ToString();
+}

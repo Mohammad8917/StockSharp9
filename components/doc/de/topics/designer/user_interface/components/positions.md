@@ -1,0 +1,14 @@
+# Positionen
+
+Die Komponente **Positionen (Diagramm)** ist ein Chart der Position. In der oberen linken Ecke des Charts werden alle grafischen Elemente angezeigt, die dem Chart hinzugefügt wurden. Wenn Sie das Kontrollkästchen ![Designer Grafikelement 00](../../../../images/designer_schedule_00.png) beim grafischen Element deaktivieren, wird das Element aus dem Chart entfernt. Ein Klick auf die Schaltfläche ![Designer Grafikelement 01](../../../../images/designer_schedule_01.png) öffnet die Einstellungen des grafischen Elements.
+
+![Designer Positionschart 00](../../../../images/designer_chart_position_00.png)
+
+Die Komponente **Positionen** ist eine Tabelle mit Positionen für die Strategieinstrumente.
+
+![Designer Positionstabelle 00](../../../../images/designer_table_position_00.png)
+
+## Empfohlene Inhalte
+
+[Statistik](statistics.md)
+

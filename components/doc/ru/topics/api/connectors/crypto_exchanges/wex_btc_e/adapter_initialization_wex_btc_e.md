@@ -1,0 +1,23 @@
+> [!CAUTION]
+> **Биржи BTC-e и WEX прекратили работу. Коннектор больше не работает; документация сохранена только для справки.**
+
+# Инициализация адаптера WEX (BTC\-e)
+
+Код ниже демонстрирует, как инициализировать [BtceMessageAdapter](xref:StockSharp.Btce.BtceMessageAdapter) и передать его в [Connector](xref:StockSharp.Algo.Connector).
+
+```cs
+			Connector Connector = new Connector();				
+			...				
+			var messageAdapter = new BtceMessageAdapter(Connector.TransactionIdGenerator)
+			{
+				Key = "<Ваш API-ключ>".To<SecureString>(),
+				Secret = "<Ваш API-секрет>".To<SecureString>(),
+			};
+			Connector.Adapter.InnerAdapters.Add(messageAdapter);
+			...	
+							
+```
+
+## См. также
+
+[Окно настройки подключений](../../../graphical_user_interface/connection_settings_window.md)

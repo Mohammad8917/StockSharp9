@@ -1,0 +1,10 @@
+# Aktuelle Zeit
+
+![Aktuelle Zeit Bildschirmfoto](../../../../../../images/designer_time_00.png)
+
+Dieser Block wird verwendet, um die aktuelle Uhrzeit zu erhalten.
+
+#### Ausgehende Anschlüsse
+
+- **Ausgabe** - die aktuelle Uhrzeit.
+

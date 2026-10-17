@@ -1,0 +1,89 @@
+﻿namespace StockSharp.OkexHistory;
+
+using System.ComponentModel.DataAnnotations;
+
+using Ecng.ComponentModel;
+
+/// <summary>
+/// The message adapter for <see cref="OkexHistory"/>.
+/// </summary>
+[MediaIcon(Media.MediaNames.okex)]
+[Doc("topics/api/connectors/crypto_exchanges/okex_history.html")]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.OkexHistoryKey,
+	Description = LocalizedStrings.CryptoConnectorKey,
+	GroupName = LocalizedStrings.CryptocurrencyKey)]
+[MessageAdapterCategory(MessageAdapterCategories.Crypto | MessageAdapterCategories.History |
+	MessageAdapterCategories.Free | MessageAdapterCategories.Ticks | MessageAdapterCategories.Candles)]
+public partial class OkexHistoryMessageAdapter : IAddressAdapter<string>
+{
+	/// <summary>
+	/// Possible time-frames.
+	/// </summary>
+	public static IEnumerable<TimeSpan> AllTimeFrames => _timeFrames.CachedKeys;
+
+	private string _address = "www.okx.com";
+	private string _archiveAddress = "static.okx.com";
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AddressKey,
+		Description = LocalizedStrings.ServerAddressKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public string Address
+	{
+		get => _address;
+		set => _address = value.ThrowIfEmpty(nameof(value));
+	}
+
+	/// <summary>Address of the public historical data archive.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AddressKey,
+		Description = LocalizedStrings.ServerAddressKey + LocalizedStrings.Dot,
+		GroupName = LocalizedStrings.AddressesKey,
+		Order = 1)]
+	public string ArchiveAddress
+	{
+		get => _archiveAddress;
+		set => _archiveAddress = value.ThrowIfEmpty(nameof(value));
+	}
+
+	/// <summary>
+	/// Try to check available date range before downloading.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CheckDatesKey,
+		Description = LocalizedStrings.CheckDatesDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 1)]
+	[BasicSetting]
+	public bool CheckDates { get; set; }
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+
+		storage
+			.Set(nameof(Address), Address)
+			.Set(nameof(ArchiveAddress), ArchiveAddress)
+			.Set(nameof(CheckDates), CheckDates)
+		;
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+
+		Address = storage.GetValue(nameof(Address), Address);
+		ArchiveAddress = storage.GetValue(nameof(ArchiveAddress), ArchiveAddress);
+		CheckDates = storage.GetValue(nameof(CheckDates), CheckDates);
+	}
+}

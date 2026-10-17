@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>sschart · StockSharp JS Charts</title>
+<link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+<link rel="icon" type="image/x-icon" href="./favicon.ico" />
+<link rel="stylesheet" href="./demo.css" />
+</head>
+<body class="hub">
+<header class="demo-header">
+  <span class="brand">sschart <span class="sub">· StockSharp JS Charts</span></span>
+  <span class="spacer"></span>
+  <a class="tbtn" href="https://github.com/StockSharp/JS-Charts" target="_blank" rel="noopener">GitHub</a>
+</header>
+
+<main class="hub-main">
+  <section class="hub-intro">
+    <h1>A native, broker-agnostic trading chart engine</h1>
+    <p>One chart owns every pane and a single time axis; series, primitives and
+    indicators plug in without touching the core. Pick a showcase below — each is
+    a self-contained page over the published <code>SSChart</code> global.</p>
+  </section>
+
+  <section class="cards">
+    <a class="card" href="./trading.html">
+      <div class="card-kicker">M10 · new</div>
+      <h2>Trading from the chart</h2>
+      <p>Drag orders to modify with optimistic preview and reject-revert, bracket
+      OCO groups, live position P&amp;L, executions and quote — all broker-agnostic.
+      The chart emits intents; the host owns the broker.</p>
+      <div class="card-go">Open →</div>
+    </a>
+
+    <a class="card" href="./orderflow.html">
+      <div class="card-kicker">Order flow</div>
+      <h2>Footprint · Volume Profile · TPO</h2>
+      <p>The exact, tick-accurate volume-at-price studies driven by bid/ask volume.
+      The old approximate candle-based cluster/box series were removed — one source
+      of truth for order flow.</p>
+      <div class="card-go">Open →</div>
+    </a>
+
+    <a class="card" href="./backfill.html">
+      <div class="card-kicker">Data lifecycle</div>
+      <h2>History backfill on zoom-out</h2>
+      <p>Scroll left and older bars stream in and prepend automatically; the moving
+      average extends over the new history, and the same path feeds an exact
+      footprint series.</p>
+      <div class="card-go">Open →</div>
+    </a>
+
+    <a class="card" href="./terminal.html">
+      <div class="card-kicker">Full app</div>
+      <h2>Terminal</h2>
+      <p>The complete terminal stack: native indicator panes, the JSON-catalog
+      indicator picker with live StockSharp parity, legend, context menus and
+      realtime updates.</p>
+      <div class="card-go">Open →</div>
+    </a>
+  </section>
+
+  <section class="hub-foot">
+    <span>native panes</span><span>custom series</span><span>primitives &amp; hit-test</span>
+    <span>incremental indicators</span><span>drawings + persistence</span>
+    <span>trading calendar / DST</span><span>compare</span><span>exact order flow</span>
+    <span>broker-agnostic trading</span>
+  </section>
+</main>
+
+<script>
+// Honour the OS colour scheme on the static hub (the showcases carry their own toggle).
+(function () {
+    var dark = !window.matchMedia || !window.matchMedia('(prefers-color-scheme: light)').matches;
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+})();
+</script>
+</body>
+</html>

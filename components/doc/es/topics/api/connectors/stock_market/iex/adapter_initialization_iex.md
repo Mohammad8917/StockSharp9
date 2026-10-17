@@ -1,0 +1,22 @@
+> [!CAUTION]
+> **La API de negociación de IEX utilizada por este conector ya no está disponible. El conector no funciona; la documentación se conserva únicamente como referencia.**
+
+# Inicialización del adaptador IEX
+
+El siguiente código muestra cómo inicializar [IEXMessageAdapter](xref:StockSharp.IEX.IEXMessageAdapter) y enviarlo a [Connector](xref:StockSharp.Algo.Connector).
+
+```cs
+Connector Connector = new Connector();				
+...				
+var messageAdapter = new IEXMessageAdapter(Connector.TransactionIdGenerator)
+{
+	Token  = "<Su token>".To<SecureString>(),
+};
+Connector.Adapter.InnerAdapters.Add(messageAdapter);
+...	
+							
+```
+
+## Contenido recomendado
+
+[Ventana de configuración de conexión](../../../graphical_user_interface/connection_settings_window.md)

@@ -1,0 +1,112 @@
+namespace Ecng.Common;
+
+/// <summary>
+/// Provides helper methods for working with delegates.
+/// </summary>
+public static class DelegateHelper
+{
+	/// <summary>
+	/// Executes the specified action and handles any exception using the provided error action.
+	/// </summary>
+	/// <param name="action">The action to execute.</param>
+	/// <param name="error">The action to handle exceptions.</param>
+	/// <exception cref="ArgumentNullException">Thrown when action or error is null.</exception>
+	public static void Do(this Action action, Action<Exception> error)
+	{
+		if (action is null)
+			throw new ArgumentNullException(nameof(action));
+
+		if (error is null)
+			throw new ArgumentNullException(nameof(error));
+
+		try
+		{
+			action();
+		}
+		catch (Exception ex)
+		{
+			error(ex);
+		}
+	}
+
+	/// <summary>
+	/// Invokes the <see cref="PropertyChangingEventHandler"/> with the specified sender and property name.
+	/// </summary>
+	/// <param name="handler">The <see cref="PropertyChangingEventHandler"/> to invoke.</param>
+	/// <param name="sender">The sender object.</param>
+	/// <param name="name">The name of the property that changed.</param>
+	public static void Invoke(this PropertyChangedEventHandler handler, object sender, string name)
+	{
+		handler(sender, new PropertyChangedEventArgs(name));
+	}
+
+	/// <summary>
+	/// Invokes the <see cref="PropertyChangingEventHandler"/> with the specified sender and property name.
+	/// </summary>
+	/// <param name="handler">The <see cref="PropertyChangingEventHandler"/> to invoke.</param>
+	/// <param name="sender">The sender object.</param>
+	/// <param name="name">The name of the property that is changing.</param>
+	public static void Invoke(this PropertyChangingEventHandler handler, object sender, string name)
+	{
+		handler(sender, new PropertyChangingEventArgs(name));
+	}
+
+	/// <summary>
+	/// Creates a delegate of type <typeparamref name="TDelegate"/> for the specified method.
+	/// </summary>
+	/// <typeparam name="TDelegate">The type of delegate to create.</typeparam>
+	/// <param name="method">The method information.</param>
+	/// <returns>A delegate of type <typeparamref name="TDelegate"/>.</returns>
+	public static TDelegate CreateDelegate<TDelegate>(this MethodInfo method)
+	{
+		return Delegate.CreateDelegate(typeof(TDelegate), method, true).To<TDelegate>();
+	}
+
+	/// <summary>
+	/// Creates a delegate of type <typeparamref name="TDelegate"/> for the specified method and instance.
+	/// </summary>
+	/// <typeparam name="TInstance">The type of the instance.</typeparam>
+	/// <typeparam name="TDelegate">The type of delegate to create.</typeparam>
+	/// <param name="method">The method information.</param>
+	/// <param name="instance">The instance on which the method is invoked.</param>
+	/// <returns>A delegate of type <typeparamref name="TDelegate"/> bound to the specified instance.</returns>
+	public static TDelegate CreateDelegate<TInstance, TDelegate>(this MethodInfo method, TInstance instance)
+	{
+		return Delegate.CreateDelegate(typeof(TDelegate), instance, method, true).To<TDelegate>();
+	}
+
+	/// <summary>
+	/// Combines two delegates of the same type.
+	/// </summary>
+	/// <typeparam name="TDelegate">The type of the delegate.</typeparam>
+	/// <param name="source">The source delegate.</param>
+	/// <param name="value">The delegate to combine with the source delegate.</param>
+	/// <returns>A combined delegate of type <typeparamref name="TDelegate"/>.</returns>
+	public static TDelegate AddDelegate<TDelegate>(this TDelegate source, TDelegate value)
+	{
+		return Delegate.Combine(source.To<Delegate>(), value.To<Delegate>()).To<TDelegate>();
+	}
+
+	/// <summary>
+	/// Removes the specified delegate from the source delegate.
+	/// </summary>
+	/// <typeparam name="TDelegate">The type of the delegate.</typeparam>
+	/// <param name="source">The source delegate.</param>
+	/// <param name="value">The delegate to remove from the source.</param>
+	/// <returns>The resulting delegate of type <typeparamref name="TDelegate"/> after removal.</returns>
+	public static TDelegate RemoveDelegate<TDelegate>(this TDelegate source, TDelegate value)
+	{
+		return Delegate.Remove(source.To<Delegate>(), value.To<Delegate>()).To<TDelegate>();
+	}
+
+	/// <summary>
+	/// Returns an enumerable collection of delegates from the delegate's invocation list.
+	/// </summary>
+	/// <typeparam name="TDelegate">The type of the delegate.</typeparam>
+	/// <param name="delegate">The delegate whose invocation list is retrieved.</param>
+	/// <returns>An IEnumerable of <typeparamref name="TDelegate"/> representing the invocation list.</returns>
+	public static IEnumerable<TDelegate> GetInvocationList<TDelegate>(this TDelegate @delegate)
+	{
+		return @delegate.To<Delegate>()?.GetInvocationList().Cast<TDelegate>() ?? [];
+	}
+}

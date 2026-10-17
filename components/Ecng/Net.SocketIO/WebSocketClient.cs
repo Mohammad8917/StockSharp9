@@ -1,0 +1,854 @@
+﻿namespace Ecng.Net;
+
+using System.Net.WebSockets;
+using System.Buffers;
+
+using Ecng.Reflection;
+using Ecng.Localization;
+
+using Nito.AsyncEx;
+
+/// <summary>
+/// Represents a client for WebSocket connections.
+/// </summary>
+public class WebSocketClient : Disposable, IConnection
+{
+	private ClientWebSocket _ws;
+	private CancellationTokenSource _source;
+
+	private readonly SynchronizedDictionary<CancellationTokenSource, bool> _disconnectionStates = [];
+
+	private readonly Func<Exception, CancellationToken, ValueTask> _error;
+	private readonly Func<WebSocketClient, WebSocketMessage, CancellationToken, ValueTask> _process;
+	private readonly Action<string, object> _infoLog;
+	private readonly Action<string, object> _errorLog;
+	private readonly Action<string, object> _verboseLog;
+	private readonly Uri _url;
+
+	private readonly CachedSynchronizedList<(long subId, byte[] buffer, WebSocketMessageType type, Func<long, CancellationToken, ValueTask> pre)> _reConnectCommands = [];
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="WebSocketClient"/> class.
+	/// </summary>
+	/// <param name="url">The URL to connect to.</param>
+	/// <param name="stateChanged">Async callback when connection state changes.</param>
+	/// <param name="error">Async callback to handle errors.</param>
+	/// <param name="process">Function to process incoming messages.</param>
+	/// <param name="infoLog">Action to log informational messages.</param>
+	/// <param name="errorLog">Action to log error messages.</param>
+	/// <param name="verboseLog">Action to log verbose messages.</param>
+	/// <exception cref="ArgumentNullException">If any required parameter is null.</exception>
+	public WebSocketClient(string url, Func<ConnectionStates, CancellationToken, ValueTask> stateChanged, Func<Exception, CancellationToken, ValueTask> error,
+		Func<WebSocketMessage, CancellationToken, ValueTask> process,
+		Action<string, object> infoLog, Action<string, object> errorLog, Action<string, object> verboseLog)
+		: this(url, stateChanged, error, (cl, msg, t) => process(msg, t), infoLog, errorLog, verboseLog)
+	{
+		if (process is null)
+			throw new ArgumentNullException(nameof(process));
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="WebSocketClient"/> class.
+	/// </summary>
+	/// <param name="url">The URL to connect to.</param>
+	/// <param name="stateChanged">Async callback when the connection state changes.</param>
+	/// <param name="error">Async callback to handle errors.</param>
+	/// <param name="process">Function to process incoming messages with reference to the client instance.</param>
+	/// <param name="infoLog">Action to log informational messages.</param>
+	/// <param name="errorLog">Action to log error messages.</param>
+	/// <param name="verboseLog">Action to log verbose messages.</param>
+	/// <exception cref="ArgumentNullException">If any required parameter is null.</exception>
+	public WebSocketClient(string url, Func<ConnectionStates, CancellationToken, ValueTask> stateChanged, Func<Exception, CancellationToken, ValueTask> error,
+		Func<WebSocketClient, WebSocketMessage, CancellationToken, ValueTask> process,
+		Action<string, object> infoLog, Action<string, object> errorLog, Action<string, object> verboseLog)
+	{
+		_url = new(url.ThrowIfEmpty(nameof(url)));
+
+		_stateChanged = stateChanged ?? throw new ArgumentNullException(nameof(stateChanged));
+		_error = error ?? throw new ArgumentNullException(nameof(error));
+		_process = process ?? throw new ArgumentNullException(nameof(process));
+		_infoLog = infoLog ?? throw new ArgumentNullException(nameof(infoLog));
+		_errorLog = errorLog ?? throw new ArgumentNullException(nameof(errorLog));
+		_verboseLog = verboseLog/* ?? throw new ArgumentNullException(nameof(verboseLog))*/;
+
+		BufferSize = 1024 * 1024;
+		BufferSizeUncompress = BufferSize * 10;
+	}
+
+	private Encoding _encoding = Encoding.UTF8;
+
+	/// <summary>
+	/// Gets or sets the encoding used to convert between bytes and string data.
+	/// </summary>
+	/// <exception cref="ArgumentNullException">Thrown if a null value is set.</exception>
+	public Encoding Encoding
+	{
+		get => _encoding;
+		set => _encoding = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private TimeSpan _reconnectInterval = TimeSpan.FromSeconds(2);
+
+	/// <summary>
+	/// Gets or sets the interval between reconnection attempts.
+	/// </summary>
+	/// <exception cref="ArgumentOutOfRangeException">Thrown if a negative time span is set.</exception>
+	public TimeSpan ReconnectInterval
+	{
+		get => _reconnectInterval;
+		set
+		{
+			if (value < TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value));
+
+			_reconnectInterval = value;
+		}
+	}
+
+	private TimeSpan _resendInterval = TimeSpan.FromSeconds(2);
+
+	/// <summary>
+	/// Gets or sets the interval between resend attempts for messages.
+	/// </summary>
+	/// <exception cref="ArgumentOutOfRangeException">Thrown if a negative time span is set.</exception>
+	public TimeSpan ResendInterval
+	{
+		get => _resendInterval;
+		set
+		{
+			if (value < TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value));
+
+			_resendInterval = value;
+		}
+	}
+
+	private int _reconnectAttempts;
+
+	/// <summary>
+	/// Gets or sets the number of reconnection attempts.
+	/// -1 means infinite attempts, 0 means no reconnect.
+	/// </summary>
+	/// <exception cref="ArgumentOutOfRangeException">Thrown if value is less than -1.</exception>
+	public int ReconnectAttempts
+	{
+		get => _reconnectAttempts;
+		set
+		{
+			if (value < -1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, "Invalid value.".Localize());
+
+			_reconnectAttempts = value;
+		}
+	}
+
+	/// <summary>
+	/// Gets or sets the working time schedule. When enabled, reconnection attempts
+	/// are suppressed outside working hours.
+	/// </summary>
+	public WorkingTime WorkingTime { get; set; }
+
+	private event Func<ConnectionStates, CancellationToken, ValueTask> _stateChanged;
+
+	/// <inheritdoc />
+	event Func<ConnectionStates, CancellationToken, ValueTask> IConnection.StateChanged
+	{
+		add => _stateChanged += value;
+		remove => _stateChanged -= value;
+	}
+
+	/// <summary>
+	/// Occurs when the client web socket is initialized.
+	/// </summary>
+	[Obsolete("Synchronous handler cannot await. Use InitAsync instead.")]
+	public event Action<ClientWebSocket> Init;
+
+	/// <summary>
+	/// Occurs when the client web socket is initialized, for a handler that has to be awaited.
+	/// </summary>
+	/// <remarks>
+	/// Runs after <see cref="Init"/>, on the same socket, before it is connected. Use this one
+	/// when setting the socket up needs asynchronous work — fetching a token, reading options
+	/// from a store — which the synchronous handler could only do by blocking.
+	/// </remarks>
+	public event Func<ClientWebSocket, CancellationToken, ValueTask> InitAsync;
+
+	/// <summary>
+	/// Occurs after a successful connection.
+	/// </summary>
+	public event Func<bool, CancellationToken, ValueTask> PostConnect;
+
+	/// <summary>
+	/// Occurs before processing received data.
+	/// Input: original buffer (<see cref="ReadOnlyMemory{T}"/>), output: destination buffer (<see cref="Memory{T}"/>) returns processed length.
+	/// </summary>
+	[Obsolete("Synchronous transform runs inline on the receive loop. Use PreProcessAsync instead.")]
+	public event Func<ReadOnlyMemory<byte>, Memory<byte>, int> PreProcess2;
+
+	/// <summary>
+	/// Occurs before processing received data, for a transform that has to be awaited.
+	/// Input: original buffer (<see cref="ReadOnlyMemory{T}"/>), output: destination buffer (<see cref="Memory{T}"/>) returns processed length.
+	/// </summary>
+	/// <remarks>
+	/// Runs after <see cref="PreProcess2"/> and receives whatever it produced. Use this one for
+	/// anything with an asynchronous implementation, such as decompression, so the receive loop
+	/// does not have to block on it.
+	/// </remarks>
+	public event Func<ReadOnlyMemory<byte>, Memory<byte>, CancellationToken, ValueTask<int>> PreProcessAsync;
+
+	/// <summary>
+	/// Connects to the server synchronously.
+	/// </summary>
+	/// <remarks>This method runs the asynchronous connection method synchronously.</remarks>
+	[Obsolete("Blocking sync-over-async wrapper. Use ConnectAsync instead.")]
+	public void Connect()
+		=> AsyncHelper.Run(() => ConnectAsync(default));
+
+	/// <summary>
+	/// Asynchronously connects to the server.
+	/// </summary>
+	/// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+	/// <returns>A task that represents the asynchronous connect operation.</returns>
+	public async ValueTask ConnectAsync(CancellationToken cancellationToken)
+	{
+		await RaiseStateChangedAsync(ConnectionStates.Connecting, cancellationToken).NoWait();
+
+		_reConnectCommands.Clear();
+
+		var source = new CancellationTokenSource();
+
+		_source = source;
+
+		_disconnectionStates[source] = false;
+
+		try
+		{
+			using var linked = CancellationTokenSource.CreateLinkedTokenSource(source.Token, cancellationToken);
+			await ConnectImpl(source, false, 0, linked.Token).NoWait();
+		}
+		catch
+		{
+			_source = null;
+			_disconnectionStates.Remove(source);
+			source.Dispose();
+			throw;
+		}
+	}
+
+	private async ValueTask RaiseStateChangedAsync(ConnectionStates state, CancellationToken cancellationToken)
+	{
+		if (state == ConnectionStates.Failed)
+			_errorLog("{0}", state);
+		else
+			_infoLog("{0}", state);
+
+		State = state;
+
+		await _stateChanged.InvokeAsync(state, cancellationToken).NoWait();
+	}
+
+	private ValueTask RaiseErrorAsync(Exception ex, CancellationToken cancellationToken)
+		=> _error(ex, cancellationToken);
+
+	private async ValueTask ConnectImpl(CancellationTokenSource source, bool reconnect, int attempts, CancellationToken token)
+	{
+		if (source is null)
+			throw new ArgumentNullException(nameof(source));
+
+		while (true)
+		{
+			token.ThrowIfCancellationRequested();
+
+			if (attempts > 0)
+				attempts--;
+
+			var ws = new ClientWebSocket();
+			_ws = ws;
+
+			Init?.Invoke(ws);
+
+			await InitAsync.InvokeAsync(ws, token).NoWait();
+
+			try
+			{
+				_infoLog("Connecting to {0}...", _url);
+				await ws.ConnectAsync(_url, token).NoWait();
+
+				await PostConnect.InvokeAsync(reconnect, token).NoWait();
+
+				break;
+			}
+			catch
+			{
+				// An attempt that is followed by another one is not a failure to report: an endpoint that
+				// went away would otherwise file an error on every retry, for as long as it stays away.
+				if (attempts > 0 || attempts == -1)
+				{
+					_infoLog("Reconnect failed. Attempts left {0}.", attempts);
+					await ReconnectInterval.Delay(token).NoWait();
+					continue;
+				}
+
+				_errorLog("Reconnect failed, no attempts left ({0}).", _url);
+
+				try { _ws?.Dispose(); } catch { }
+				_ws = null;
+				throw;
+			}
+		}
+
+		await RaiseStateChangedAsync(reconnect ? ConnectionStates.Restored : ConnectionStates.Connected, token).NoWait();
+
+		_ = Task.Run(() => OnReceive(source));
+
+		if (reconnect && !DisableAutoResend && _reConnectCommands.Count > 0)
+		{
+			await ResendTimeout.Delay(token).NoWait();
+			await ResendAsync(token).NoWait();
+		}
+	}
+
+	/// <summary>
+	/// Gets or sets a value that indicates whether auto resend is disabled.
+	/// </summary>
+	public bool DisableAutoResend { get; set; }
+
+	/// <summary>
+	/// Gets or sets the timeout before resend of commands after reconnection.
+	/// </summary>
+	public TimeSpan ResendTimeout { get; set; }
+
+	/// <summary>
+	/// Gets the current connection state.
+	/// </summary>
+	public ConnectionStates State { get; private set; }
+
+	/// <summary>
+	/// Gets a value indicating whether the client is connected.
+	/// </summary>
+	public bool IsConnected => _ws?.State == WebSocketState.Open;
+
+	/// <summary>
+	/// Disconnects from the server.
+	/// </summary>
+	/// <exception cref="InvalidOperationException">Thrown if the client is not connected.</exception>
+	[Obsolete("Blocking sync-over-async wrapper. Use DisconnectAsync instead.")]
+	public void Disconnect()
+		=> AsyncHelper.Run(() => DisconnectAsync(default));
+
+	/// <summary>
+	/// Asynchronously disconnects from the server.
+	/// </summary>
+	/// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+	/// <returns>A task that represents the asynchronous disconnect operation.</returns>
+	/// <exception cref="InvalidOperationException">Thrown if the client is not connected.</exception>
+	public async ValueTask DisconnectAsync(CancellationToken cancellationToken)
+	{
+		var source = _source;
+
+		if (source is null)
+			throw new InvalidOperationException("Not connected.");
+
+		await RaiseStateChangedAsync(ConnectionStates.Disconnecting, cancellationToken).NoWait();
+
+		_disconnectionStates[source] = true;
+		source.Cancel();
+		_source = null;
+
+		// Immediately make further sends fail deterministically
+		try { _ws?.Dispose(); } catch { }
+		_ws = null;
+
+		_reConnectCommands.Clear();
+	}
+
+	/// <summary>
+	/// Gets or sets the disconnect timeout period.
+	/// </summary>
+	public TimeSpan DisconnectTimeout = TimeSpan.FromSeconds(10);
+
+	private int _bufferSize;
+
+	/// <summary>
+	/// Gets or sets the buffer size for compressed data.
+	/// </summary>
+	public int BufferSize
+	{
+		get => _bufferSize;
+		set => _bufferSize = value <= 0 ? throw new ArgumentOutOfRangeException(nameof(value)) : value;
+	}
+
+	private int _bufferSizeUncompress;
+
+	/// <summary>
+	/// Gets or sets the buffer size for uncompressed data.
+	/// </summary>
+	public int BufferSizeUncompress
+	{
+		get => _bufferSizeUncompress;
+		set => _bufferSizeUncompress = value <= 0 ? throw new ArgumentOutOfRangeException(nameof(value)) : value;
+	}
+
+	private async Task OnReceive(CancellationTokenSource source)
+	{
+		try
+		{
+			var token = source.Token;
+
+#if NETSTANDARD2_0
+			ArraySegment<byte> recvMem = new(new byte[BufferSize]);
+#else
+			Memory<byte> recvMem = new byte[BufferSize];
+#endif
+			var responseBuffer = new ArrayBufferWriter<byte>(BufferSize);
+
+			var preProcess2 = PreProcess2;
+			var preProcess2Mem = preProcess2 != null ? new byte[BufferSizeUncompress] : Memory<byte>.Empty;
+
+			var preProcessAsync = PreProcessAsync;
+			var preProcessAsyncMem = preProcessAsync != null ? new byte[BufferSizeUncompress] : Memory<byte>.Empty;
+
+			// Separate counters: a parsing error must not count against the network-error budget
+			// (or vice versa), and a successful read resets both.
+			var parsingErrors = 0;
+			var networkErrors = 0;
+
+			const int maxParsingErrors = 100;
+			const int maxNetworkErrors = 10;
+
+			var attempts = ReconnectAttempts;
+
+			var needClose = true;
+
+			_infoLog("Starting receive loop, {0} attempts", attempts);
+
+			while (!token.IsCancellationRequested)
+			{
+				try
+				{
+					var ws = _ws;
+
+					if (ws is null)
+						break;
+
+#if NETSTANDARD2_0
+					WebSocketReceiveResult result;
+#else
+					ValueWebSocketReceiveResult result;
+#endif
+
+					try
+					{
+						result = await ws.ReceiveAsync(recvMem, token).NoWait();
+					}
+					catch (Exception ex)
+					{
+						if (!token.IsCancellationRequested)
+						{
+							await RaiseErrorAsync(ex, token).NoWait();
+							needClose = false;
+						}
+
+						break;
+					}
+
+					if (result.MessageType == WebSocketMessageType.Close)
+					{
+						_infoLog("Socket closed by peer.", null);
+
+						needClose = false;
+						break;
+					}
+
+#if NETSTANDARD2_0
+					responseBuffer.Write(recvMem.AsSpan().Slice(0, result.Count));
+#else
+					responseBuffer.Write(recvMem.Span[..result.Count]);
+#endif
+
+					if (!result.EndOfMessage)
+						continue;
+
+					if (responseBuffer.WrittenCount == 0)
+						continue;
+
+					try
+					{
+						// Memory-based path primary
+						var roMem = responseBuffer.WrittenMemory;
+
+						if (preProcess2 != null)
+						{
+							var count = preProcess2(roMem, preProcess2Mem);
+							roMem = preProcess2Mem.Slice(0, count);
+						}
+
+						if (preProcessAsync != null)
+						{
+							var count = await preProcessAsync(roMem, preProcessAsyncMem, token).NoWait();
+							roMem = preProcessAsyncMem.Slice(0, count);
+						}
+
+						if (_verboseLog is not null)
+							_verboseLog("{0}", Encoding.GetString(roMem.Span));
+
+						await _process(this, new(Encoding, roMem), token).NoWait();
+
+						parsingErrors = 0;
+						networkErrors = 0;
+					}
+					catch (Exception ex)
+					{
+						if (token.IsCancellationRequested)
+							break;
+
+						await RaiseErrorAsync(new InvalidOperationException($"Error parsing string '{Encoding.GetString(responseBuffer.WrittenSpan)}'.", ex), token).NoWait();
+
+						if (++parsingErrors < maxParsingErrors)
+							continue;
+
+						_errorLog("Max parsing error {0} limit reached.", maxParsingErrors);
+						break;
+					}
+					finally
+					{
+						responseBuffer.Clear();
+					}
+				}
+				catch (AggregateException ex)
+				{
+					if (!token.IsCancellationRequested)
+						await RaiseErrorAsync(ex, token).NoWait();
+
+					if (ex.InnerExceptions.FirstOrDefault() is WebSocketException)
+						break;
+
+					if (++networkErrors < maxNetworkErrors)
+					{
+						if (!token.IsCancellationRequested)
+							_errorLog("{0} errors", $"{networkErrors}/{maxNetworkErrors}");
+
+						continue;
+					}
+
+					_errorLog("Max network error {0} limit reached.", maxNetworkErrors);
+					break;
+				}
+				catch (Exception ex)
+				{
+					if (!token.IsCancellationRequested)
+						await RaiseErrorAsync(ex, token).NoWait();
+				}
+			}
+
+			try
+			{
+				if (needClose && _ws is ClientWebSocket ws)
+				{
+					using var cts = DisconnectTimeout.CreateTimeout();
+					await ws.CloseAsync(WebSocketCloseStatus.Empty, string.Empty, cts.Token).NoWait();
+				}
+			}
+			catch (Exception ex)
+			{
+				if (!token.IsCancellationRequested)
+					await RaiseErrorAsync(ex, token).NoWait();
+			}
+
+			try
+			{
+				_ws?.Dispose();
+			}
+			catch { }
+
+			_ws = null;
+
+			var expected = _disconnectionStates.TryGetAndRemove2(source);
+			_infoLog("websocket disconnected, {0}", $"expected={expected}, attempts={attempts}");
+
+			if (expected == true)
+			{
+				// Terminal transition: the connection token is already cancelled here, so deliver
+				// the final state with None — otherwise a clean disconnect looks like a cancellation.
+				await RaiseStateChangedAsync(ConnectionStates.Disconnected, default).NoWait();
+
+				if (ReferenceEquals(_source, source))
+					_source = null;
+
+				try { source.Dispose(); } catch { }
+			}
+			else
+			{
+				if (WorkingTime is { IsEnabled: true } wt && !wt.IsWorkingTime(DateTime.UtcNow, out _, out _))
+				{
+					_infoLog("Outside working hours, skipping reconnect.", null);
+				}
+				else if (attempts > 0 || attempts == -1)
+				{
+					await RaiseStateChangedAsync(ConnectionStates.Reconnecting, token).NoWait();
+
+					_infoLog("Socket re-connecting '{0}'.", _url);
+
+					try
+					{
+						await ConnectImpl(source, true, attempts, token).NoWait();
+						return;
+					}
+					catch (Exception ex)
+					{
+						if (!token.IsCancellationRequested)
+							await RaiseErrorAsync(ex, token).NoWait();
+					}
+				}
+
+				// Terminal transition: raise with None so the dead connection token does not mask
+				// the Failed notification.
+				await RaiseStateChangedAsync(ConnectionStates.Failed, default).NoWait();
+
+				if (ReferenceEquals(_source, source))
+					_source = null;
+
+				try { source.Dispose(); } catch { }
+			}
+		}
+		catch (Exception ex)
+		{
+			await RaiseErrorAsync(ex, default).NoWait();
+		}
+	}
+
+	/// <summary>
+	/// Gets or sets a value that indicates whether output JSON should be indented.
+	/// </summary>
+	public bool Indent { get; set; } = true;
+
+	/// <summary>
+	/// Gets or sets the JSON serializer settings used when sending objects.
+	/// </summary>
+	public JsonSerializerSettings SendSettings { get; set; }
+
+	private string ToJson(object obj)
+		=> obj.ToJson(Indent, SendSettings);
+
+	/// <summary>
+	/// Sends an object to the server synchronously.
+	/// </summary>
+	/// <param name="obj">The object to send. If not a byte array, it is converted to JSON.</param>
+	/// <param name="subId">The subscription identifier.</param>
+	/// <param name="pre">A pre-send callback function.</param>
+	[Obsolete("Blocking sync-over-async wrapper. Use SendAsync instead.")]
+	public void Send(object obj, long subId = default, Func<long, CancellationToken, ValueTask> pre = default)
+		=> AsyncHelper.Run(() => SendAsync(obj, subId, pre));
+
+	/// <summary>
+	/// Asynchronously sends an object to the server.
+	/// </summary>
+	/// <param name="obj">The object to send. If not a byte array, it is converted to JSON.</param>
+	/// <param name="subId">The subscription identifier.</param>
+	/// <param name="pre">A pre-send callback function.</param>
+	/// <returns>A task that represents the asynchronous send operation.</returns>
+	public ValueTask SendAsync(object obj, long subId = default, Func<long, CancellationToken, ValueTask> pre = default)
+		=> SendAsync(obj, _source?.Token ?? throw new InvalidOperationException("Connection was not established."), subId, pre);
+
+	/// <summary>
+	/// Asynchronously sends an object to the server.
+	/// </summary>
+	/// <param name="obj">The object to send. If not a byte array, it is converted to JSON.</param>
+	/// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+	/// <param name="subId">The subscription identifier.</param>
+	/// <param name="pre">A pre-send callback function.</param>
+	/// <returns>A task that represents the asynchronous send operation.</returns>
+	public ValueTask SendAsync(object obj, CancellationToken cancellationToken, long subId = default, Func<long, CancellationToken, ValueTask> pre = default)
+	{
+		if (obj is not byte[] sendBuf)
+		{
+			var json = obj as string ?? ToJson(obj);
+			_verboseLog?.Invoke("Send: '{0}'", json);
+			sendBuf = Encoding.GetBytes(json);
+		}
+
+		return SendAsync(sendBuf, WebSocketMessageType.Text, cancellationToken, subId, pre);
+	}
+
+	/// <summary>
+	/// Sends a byte array message to the server synchronously.
+	/// </summary>
+	/// <param name="sendBuf">The byte array to send.</param>
+	/// <param name="type">The type of WebSocket message.</param>
+	/// <param name="subId">The subscription identifier.</param>
+	/// <param name="pre">A pre-send callback function.</param>
+	[Obsolete("Blocking sync-over-async wrapper. Use SendAsync instead.")]
+	public void Send(byte[] sendBuf, WebSocketMessageType type, long subId = default, Func<long, CancellationToken, ValueTask> pre = default)
+		=> AsyncHelper.Run(() => SendAsync(sendBuf, type, subId, pre));
+
+	/// <summary>
+	/// Asynchronously sends a byte array message to the server.
+	/// </summary>
+	/// <param name="sendBuf">The byte array to send.</param>
+	/// <param name="type">The type of WebSocket message.</param>
+	/// <param name="subId">The subscription identifier.</param>
+	/// <param name="pre">A pre-send callback function.</param>
+	/// <returns>A task that represents the asynchronous send operation.</returns>
+	public ValueTask SendAsync(byte[] sendBuf, WebSocketMessageType type, long subId = default, Func<long, CancellationToken, ValueTask> pre = default)
+		=> SendAsync(sendBuf, type, _source?.Token ?? throw new InvalidOperationException("Connection was not established."), subId, pre);
+
+	/// <summary>
+	/// Asynchronously sends a byte array message to the server.
+	/// </summary>
+	/// <param name="sendBuf">The byte array to send.</param>
+	/// <param name="type">The type of WebSocket message.</param>
+	/// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+	/// <param name="subId">The subscription identifier.</param>
+	/// <param name="pre">A pre-send callback function.</param>
+	/// <returns>A task that represents the asynchronous send operation.</returns>
+	public async ValueTask SendAsync(byte[] sendBuf, WebSocketMessageType type, CancellationToken cancellationToken, long subId = default, Func<long, CancellationToken, ValueTask> pre = default)
+	{
+		if (_ws is not ClientWebSocket ws)
+			throw new InvalidOperationException("WebSocket is not connected.");
+
+		if (ws.State != WebSocketState.Open)
+			throw new InvalidOperationException("WebSocket is not open.");
+
+		if (subId > 0)
+			_reConnectCommands.Add((subId, sendBuf, type, pre));
+		else if (subId < 0) // unsubscribe
+			RemoveResend(subId);
+
+		// Hold the send lock across the write so a concurrent SendOpCode cannot splice a raw frame
+		// into the middle of this message.
+		using (await _sendLock.LockAsync(cancellationToken).ConfigureAwait(false))
+			await ws.SendAsync(new ArraySegment<byte>(sendBuf), type, true, cancellationToken).NoWait();
+	}
+
+	/// <summary>
+	/// Asynchronously resends stored commands after reconnecting.
+	/// </summary>
+	/// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+	/// <returns>A task that represents the asynchronous resend operation.</returns>
+	public async ValueTask ResendAsync(CancellationToken cancellationToken)
+	{
+		_infoLog("Reconnect commands: {0}", _reConnectCommands.Count);
+
+		foreach (var (id, buf, type, pre) in _reConnectCommands.Cache)
+		{
+			try
+			{
+				if (_verboseLog is not null)
+					_verboseLog("ReSend: '{0}'", Encoding.GetString(buf));
+
+				if (pre is not null)
+					await pre(id, cancellationToken).NoWait();
+
+				await SendAsync(buf, type, cancellationToken).NoWait();
+				await ResendInterval.Delay(cancellationToken).NoWait();
+			}
+			catch (Exception ex)
+			{
+				if (!cancellationToken.IsCancellationRequested)
+					await RaiseErrorAsync(ex, cancellationToken).NoWait();
+			}
+		}
+	}
+
+	/// <summary>
+	/// Removes a resend command for the specified subscription identifier.
+	/// </summary>
+	/// <param name="subId">The subscription identifier.</param>
+	public void RemoveResend(long subId)
+	{
+		subId = subId.Abs();
+
+		using (_reConnectCommands.EnterScope())
+			_reConnectCommands.RemoveWhere(t => t.subId == subId);
+	}
+
+	/// <summary>
+	/// Removes all resend commands.
+	/// </summary>
+	public void RemoveResend()
+		=> _reConnectCommands.Clear();
+
+	/// <summary>
+	/// Aborts the WebSocket connection immediately.
+	/// </summary>
+	public void Abort()
+	{
+		_ws?.Abort();
+	}
+
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		_source?.Cancel();
+
+		try { _ws?.Dispose(); } catch { }
+		_ws = null;
+
+		try { _source?.Dispose(); } catch { }
+		_source = null;
+
+		base.DisposeManaged();
+	}
+
+	// The following members are internal or private and hence not documented with XML comments for public API.
+
+	// Serialises all frame writes (normal SendAsync and the raw SendOpCode below) so they cannot
+	// interleave on the wire - SendOpCode writes through SendFrameLockAcquiredNonCancelableAsync,
+	// which bypasses the socket's own internal send lock.
+	private readonly AsyncLock _sendLock = new();
+
+	private FieldInfo _innerSocketField;
+	private PropertyInfo _socketProp;
+	private Type _opCodeEnum;
+	private MethodInfo _sendMethod;
+
+	/// <summary>
+	/// Sends an operation code directly.
+	/// </summary>
+	/// <param name="code">The operation code to send (default is 0x9 for ping).</param>
+	/// <returns>A task that represents the asynchronous operation.</returns>
+	public async ValueTask SendOpCode(byte code = 0x9 /* ping */)
+	{
+		if (_ws is not ClientWebSocket ws || ws.State != WebSocketState.Open)
+			throw new InvalidOperationException("WebSocket is not connected.");
+
+		try
+		{
+			_innerSocketField ??= typeof(ClientWebSocket).GetMember<FieldInfo>("_innerWebSocket");
+			if (_innerSocketField is null)
+				throw new NotSupportedException("Inner web socket field not found.");
+
+			var handle = _innerSocketField.GetValue(ws) ?? throw new NotSupportedException("Inner web socket handle is null.");
+
+			_socketProp ??= handle.GetType().GetMember<PropertyInfo>("WebSocket");
+			if (_socketProp is null)
+				throw new NotSupportedException("WebSocket property not found.");
+
+			var socket = (WebSocket)_socketProp.GetValue(handle) ?? throw new NotSupportedException("Managed WebSocket instance is null.");
+
+			_opCodeEnum ??= typeof(WebSocket).Assembly.GetType("System.Net.WebSockets.ManagedWebSocket+MessageOpcode");
+			if (_opCodeEnum is null)
+				throw new NotSupportedException("MessageOpcode enum type not found.");
+
+			var opCode = Enum.ToObject(_opCodeEnum, code);
+
+			_sendMethod ??= socket.GetType().GetMember<MethodInfo>("SendFrameLockAcquiredNonCancelableAsync");
+			if (_sendMethod is null)
+				throw new NotSupportedException("SendFrameLockAcquiredNonCancelableAsync method not found.");
+
+			// SendFrameLockAcquiredNonCancelableAsync assumes the caller already holds the socket's
+			// send lock, which we cannot take; hold our own _sendLock instead (the normal SendAsync
+			// path takes it too) so this raw frame never interleaves with a normal send.
+			using (await _sendLock.LockAsync().ConfigureAwait(false))
+				await ((ValueTask)_sendMethod.Invoke(socket, [opCode, true, true, ReadOnlyMemory<byte>.Empty])).NoWait();
+		}
+		catch (NotSupportedException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			throw new NotSupportedException("Sending custom opcode is not supported on this platform/runtime.", ex);
+		}
+	}
+}

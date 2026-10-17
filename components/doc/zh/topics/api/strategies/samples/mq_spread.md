@@ -1,0 +1,204 @@
+# 价差套利策略
+
+## 概览
+
+`MqSpreadStrategy`是一种策略，通过同时下达买卖报价在市场上创建价差。它使用两个报价处理器来管理市场两边的订单。
+
+## 主要组件
+
+```cs
+public class MqSpreadStrategy : Strategy
+{
+	private readonly StrategyParam<MarketPriceTypes> _priceType;
+	private readonly StrategyParam<Unit> _priceOffset;
+	private readonly StrategyParam<Unit> _bestPriceOffset;
+
+	private QuotingProcessor _buyProcessor;
+	private QuotingProcessor _sellProcessor;
+}
+```
+
+## 策略参数
+
+该策略允许自定义以下参数：
+
+- `PriceType` - 报价的市场价格类型（默认 跟随）
+- `PriceOffset` - 与市场价格的偏移
+- `BestPriceOffset` - 报价更新的最小偏差（默认 0.1%）
+
+## 策略初始化
+
+在 [OnStarted2](xref:StockSharp.Algo.Strategies.Strategy.OnStarted2(System.DateTime)) 方法中，该策略订阅市场时间的变化：
+
+```cs
+protected override void OnStarted2(DateTime time)
+{
+	base.OnStarted2(time);
+
+	// 订阅市场时间变化以更新报价
+	Connector.CurrentTimeChanged += Connector_CurrentTimeChanged;
+	Connector_CurrentTimeChanged(new TimeSpan());
+}
+```
+
+## 管理报价处理器
+
+当市场时间变化时，将调用 `Connector_CurrentTimeChanged` 方法，并管理报价处理器的创建和更新：
+
+```cs
+private void Connector_CurrentTimeChanged(TimeSpan obj)
+{
+	// 仅在零持仓且当前处理器已停止时创建新处理器
+	if (Position != 0)
+		return;
+
+	if (_buyProcessor != null && _buyProcessor.LeftVolume > 0)
+		return;
+
+	if (_sellProcessor != null && _sellProcessor.LeftVolume > 0)
+		return;
+
+	// 释放现有处理器资源
+	_buyProcessor?.Dispose();
+	_buyProcessor = null;
+
+	_sellProcessor?.Dispose();
+	_sellProcessor = null;
+
+	// 创建市价报价行为
+	var buyBehavior = new MarketQuotingBehavior(
+		PriceOffset,
+		BestPriceOffset,
+		PriceType
+	);
+
+	var sellBehavior = new MarketQuotingBehavior(
+		PriceOffset,
+		BestPriceOffset,
+		PriceType
+	);
+
+	// 创建买入处理器
+	_buyProcessor = new QuotingProcessor(
+		buyBehavior,
+		Security,
+		Portfolio,
+		Sides.Buy,
+		Volume,
+		Volume, // 最大订单数量
+		TimeSpan.Zero, // 无超时
+		this, // 策略实现 ISubscriptionProvider
+		this, // 策略实现 IMarketRuleContainer
+		this, // 策略实现 ITransactionProvider
+		this, // 策略实现 ITimeProvider
+		this, // 策略实现 IMarketDataProvider
+		IsFormedAndOnlineAndAllowTrading, // 检查交易权限
+		true, // 使用订单簿价格
+		true  // 订单簿为空时使用最后成交价
+	)
+	{
+		Parent = this
+	};
+
+	// 创建卖出处理器
+	_sellProcessor = new QuotingProcessor(
+		sellBehavior,
+		Security,
+		Portfolio,
+		Sides.Sell,
+		Volume,
+		Volume, // 最大订单数量
+		TimeSpan.Zero, // 无超时
+		this, // 策略实现 ISubscriptionProvider
+		this, // 策略实现 IMarketRuleContainer
+		this, // 策略实现 ITransactionProvider
+		this, // 策略实现 ITimeProvider
+		this, // 策略实现 IMarketDataProvider
+		IsFormedAndOnlineAndAllowTrading, // 检查交易权限
+		true, // 使用订单簿价格
+		true  // 订单簿为空时使用最后成交价
+	)
+	{
+		Parent = this
+	};
+
+	// 记录新报价处理器的创建
+	this.AddInfoLog($"已在 {CurrentTime} 创建买卖价差");
+
+	// 订阅买入处理器事件以记录日志
+	_buyProcessor.OrderRegistered += order =>
+		this.AddInfoLog($"买入订单 {order.TransactionId} 已以价格 {order.Price} 注册");
+
+	_buyProcessor.OrderFailed += fail =>
+		this.AddInfoLog($"买入订单失败: {fail.Error.Message}");
+
+	_buyProcessor.OwnTrade += trade =>
+		this.AddInfoLog($"买入成交已执行: {trade.Trade.Volume}，价格 {trade.Trade.Price}");
+
+	_buyProcessor.Finished += isOk => {
+		this.AddInfoLog($"买入报价成功完成: {isOk}");
+		_buyProcessor?.Dispose();
+		_buyProcessor = null;
+	};
+
+	// 订阅卖出处理器事件以记录日志
+	_sellProcessor.OrderRegistered += order =>
+		this.AddInfoLog($"卖出订单 {order.TransactionId} 已以价格 {order.Price} 注册");
+
+	_sellProcessor.OrderFailed += fail =>
+		this.AddInfoLog($"卖出订单失败: {fail.Error.Message}");
+
+	_sellProcessor.OwnTrade += trade =>
+		this.AddInfoLog($"卖出成交已执行: {trade.Trade.Volume}，价格 {trade.Trade.Price}");
+
+	_sellProcessor.Finished += isOk => {
+		this.AddInfoLog($"卖出报价成功完成: {isOk}");
+		_sellProcessor?.Dispose();
+		_sellProcessor = null;
+	};
+
+	// 启动两个处理器
+	_buyProcessor.Start();
+	_sellProcessor.Start();
+}
+```
+
+## 资源释放
+
+在 [OnStopped](xref:StockSharp.Algo.Strategies.Strategy.OnStopped) 方法中，该策略会释放资源：
+
+```cs
+protected override void OnStopped()
+{
+	// 取消订阅以防止内存泄漏
+	Connector.CurrentTimeChanged -= Connector_CurrentTimeChanged;
+
+	// 释放处理器资源
+	_buyProcessor?.Dispose();
+	_buyProcessor = null;
+
+	_sellProcessor?.Dispose();
+	_sellProcessor = null;
+
+	base.OnStopped();
+}
+```
+
+## 交易逻辑
+
+- 该策略应对市场时间变化
+- 在零持仓且处理器已停止时，创建两个新的处理器：
+  - 买入处理器（买入）
+  - 卖出处理器（卖出）
+- 两个处理器都配置了相同的成交量并使用相同的报价设置
+- 处理器通过同时下买单和卖单在市场上制造价差
+
+## 特征
+
+- 使用现代报价处理器 [QuotingProcessor](xref:StockSharp.Algo.Strategies.Quoting.QuotingProcessor) 和 [MarketQuotingBehavior](xref:StockSharp.Algo.Strategies.Quoting.MarketQuotingBehavior)
+- 通过同时下买单和卖单在市场中制造价差
+- 仅适用于零持仓，防止积累不必要的风险
+- 支持配置各种报价参数（价格类型、偏移量、最小偏差）
+- 包括报价处理器事件的详细日志记录
+- 在停止策略和创建新处理器时，正确管理资源
+- 支持处理不同类型的市场价格（跟随价、最佳价、相反价等）

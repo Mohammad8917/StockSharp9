@@ -1,0 +1,147 @@
+namespace StockSharp.Coincheck;
+
+public partial class CoincheckMessageAdapter
+{
+	private HttpClient _httpClient;
+	private PusherClient _pusherClient;
+	private DateTime? _lastTimeBalanceCheck;
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="CoincheckMessageAdapter"/>.
+	/// </summary>
+	/// <param name="transactionIdGenerator">Transaction id generator.</param>
+	public CoincheckMessageAdapter(IdGenerator transactionIdGenerator)
+		: base(transactionIdGenerator)
+	{
+		HeartbeatInterval = TimeSpan.FromSeconds(1);
+
+		this.AddMarketDataSupport();
+		this.AddTransactionalSupport();
+		this.RemoveSupportedMessage(MessageTypes.OrderReplace);
+		this.RemoveSupportedMessage(MessageTypes.OrderGroupCancel);
+
+		this.AddSupportedMarketDataType(DataType.Ticks);
+		this.AddSupportedMarketDataType(DataType.MarketDepth);
+	}
+
+	/// <inheritdoc />
+	public override bool IsAllDownloadingSupported(DataType dataType)
+		=> dataType == DataType.Securities || dataType == DataType.Transactions || dataType == DataType.PositionChanges || base.IsAllDownloadingSupported(dataType);
+
+	/// <inheritdoc />
+	public override bool IsSupportOrderBookIncrements => true;
+
+	/// <inheritdoc />
+	public override string[] AssociatedBoards => [BoardCodes.Coincheck];
+
+	private void SubscribePusherClient()
+	{
+		_pusherClient.StateChanged += SendOutConnectionStateAsync;
+		_pusherClient.Error += SendOutErrorAsync;
+		_pusherClient.OrderBookChanged += SessionOnOrderBookChanged;
+		_pusherClient.NewTrade += SessionOnNewTrade;
+	}
+
+	private void UnsubscribePusherClient()
+	{
+		_pusherClient.StateChanged -= SendOutConnectionStateAsync;
+		_pusherClient.Error -= SendOutErrorAsync;
+		_pusherClient.OrderBookChanged -= SessionOnOrderBookChanged;
+		_pusherClient.NewTrade -= SessionOnNewTrade;
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask ConnectAsync(ConnectMessage connectMsg, CancellationToken cancellationToken)
+	{
+		if (this.IsTransactional())
+		{
+			if (Key.IsEmpty())
+				throw new InvalidOperationException(LocalizedStrings.KeyNotSpecified);
+
+			if (Secret.IsEmpty())
+				throw new InvalidOperationException(LocalizedStrings.SecretNotSpecified);
+		}
+
+		if (_httpClient != null)
+			throw new InvalidOperationException(LocalizedStrings.NotDisconnectPrevTime);
+
+		if (_pusherClient != null)
+			throw new InvalidOperationException(LocalizedStrings.NotDisconnectPrevTime);
+
+		_httpClient = new HttpClient(RestEndpoint, Key, Secret) { Parent = this };
+
+		_pusherClient = new PusherClient(WebSocketEndpoint, ReConnectionSettings.WorkingTime) { Parent = this };
+		SubscribePusherClient();
+		await _pusherClient.ConnectAsync(cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask DisconnectAsync(DisconnectMessage disconnectMsg, CancellationToken cancellationToken)
+	{
+		if (_httpClient == null)
+			throw new InvalidOperationException(LocalizedStrings.ConnectionNotOk);
+
+		if (_pusherClient == null)
+			throw new InvalidOperationException(LocalizedStrings.ConnectionNotOk);
+
+		_httpClient.Dispose();
+		_httpClient = null;
+
+		await _pusherClient.DisconnectAsync(cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask ResetAsync(ResetMessage resetMsg, CancellationToken cancellationToken)
+	{
+		if (_httpClient != null)
+		{
+			try
+			{
+				_httpClient.Dispose();
+			}
+			catch (Exception ex)
+			{
+				await SendOutErrorAsync(ex, cancellationToken);
+			}
+
+			_httpClient = null;
+		}
+
+		if (_pusherClient != null)
+		{
+			try
+			{
+				UnsubscribePusherClient();
+				await _pusherClient.DisconnectAsync(cancellationToken);
+			}
+			catch (Exception ex)
+			{
+				await SendOutErrorAsync(ex, cancellationToken);
+			}
+
+			_pusherClient = null;
+		}
+
+		_orderInfo.Clear();
+		_orderBooks.Clear();
+		_lastTimeBalanceCheck = null;
+
+		await SendOutMessageAsync(new ResetMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected override async ValueTask TimeAsync(TimeMessage timeMsg, CancellationToken cancellationToken)
+	{
+		if (_orderInfo.Count > 0)
+		{
+			await OrderStatusAsync(null, cancellationToken);
+			await PortfolioLookupAsync(null, cancellationToken);
+		}
+
+		if (BalanceCheckInterval > TimeSpan.Zero &&
+			(_lastTimeBalanceCheck == null || (CurrentTime - _lastTimeBalanceCheck) > BalanceCheckInterval))
+		{
+			await PortfolioLookupAsync(null, cancellationToken);
+		}
+	}
+}

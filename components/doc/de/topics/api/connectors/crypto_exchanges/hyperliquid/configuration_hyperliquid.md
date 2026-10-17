@@ -1,0 +1,21 @@
+# Konfiguration Hyperliquid
+
+Für die Arbeit mit dem Connector geben Sie Handelsanmeldedaten auf Wallet-Ebene an.
+
+Haupteinstellungen:
+
+ - **Wallet-Adresse**.
+ - **Privater Schlüssel**.
+ - **Vault-Adresse** (optional).
+ - **Ablaufzeit** (optional).
+- **Handelsbereich**: `Spot` oder `Derivatives`.
+- **Testnetzmodus**.
+ - **Info-Endpunkt / Exchange-Endpunkt / WS-Endpunkt**.
+- **Markt-Slippage** für Market-Orders.
+
+Offizielle API-Dokumentation:
+
+- [Hyperliquid API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api)
+- [Info-Endpunkt](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+- [Exchange-Endpunkt](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint)
+- [Websocket](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket)

@@ -1,0 +1,744 @@
+﻿namespace Ecng.Tests.Compilation;
+
+using Ecng.IO;
+using Ecng.Compilation;
+using Ecng.Compilation.Expressions;
+using Ecng.Compilation.Roslyn;
+
+[TestClass]
+public class ExpressionTests : BaseTestClass
+{
+	private static readonly ICompiler _compiler = new CSharpCompiler();
+	private static readonly ICompilerContext _context = _compiler.CreateContext();
+
+	private static readonly IFileSystem _fileSystem = LocalFileSystem.Instance;
+	private const string _cacheDir = "asm_cache";
+
+	private static ExpressionFormula<decimal> Compile(string expression, ICompilerCache cache = default)
+		=> AsyncContext.Run(() => _compiler.Compile<decimal>(_context, _fileSystem, expression, cache));
+
+	[ClassInitialize]
+	public static void Init(TestContext _)
+	{
+		_fileSystem.SafeDeleteDir(_cacheDir);
+	}
+
+	[TestMethod]
+	public async Task Cache()
+	{
+		var cache = new CompilerCache(new MemoryFileSystem(), "compiler-cache", TimeSpan.MaxValue);
+		await cache.InitAsync(CancellationToken);
+
+		var formula = Compile("RI@FORTS - SBER@TQBR", cache);
+		formula.Calculate([6, 4]).AssertEqual(2);
+
+		cache.Count.AssertEqual(1);
+
+		formula = Compile("RI@FORTS - SBER@TQBR", cache);
+		formula.Calculate([6, 5]).AssertEqual(1);
+
+		cache.Count.AssertEqual(1);
+
+		cache.Clear();
+		cache.Count.AssertEqual(0);
+	}
+
+	[TestMethod]
+	public async Task Cache_ExpiredMemoryEntryDoesNotReviveFromDisk()
+	{
+		var cache = new CompilerCache(new MemoryFileSystem(), "compiler-cache-expire", TimeSpan.FromMilliseconds(10));
+		await cache.InitAsync(CancellationToken);
+		cache.Add(FileExts.CSharp, ["A"], ["B"], [1, 2, 3]);
+
+		await Task.Delay(50, CancellationToken);
+
+		cache.TryGet(FileExts.CSharp, ["A"], ["B"], out _).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task Cache_AddAfterClear_RecreatesCacheDirectory()
+	{
+		var cache = new CompilerCache(new MemoryFileSystem(), "compiler-cache-clear", TimeSpan.MaxValue);
+		await cache.InitAsync(CancellationToken);
+
+		cache.Add(FileExts.CSharp, ["A"], [], [1]);
+		cache.Clear();
+		cache.Add(FileExts.CSharp, ["B"], [], [2]);
+
+		cache.TryGet(FileExts.CSharp, ["B"], [], out var assembly).AssertTrue();
+		assembly.SequenceEqual(new byte[] { 2 }).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task Cache_KeySeparatesSourcesFromReferences()
+	{
+		var cache = new CompilerCache(new MemoryFileSystem(), "compiler-cache-key", TimeSpan.MaxValue);
+		await cache.InitAsync(CancellationToken);
+
+		cache.Add(FileExts.CSharp, ["A"], ["B"], [1]);
+		cache.Add(FileExts.CSharp, ["AB"], [], [2]);
+
+		cache.TryGet(FileExts.CSharp, ["A"], ["B"], out var first).AssertTrue();
+		first.SequenceEqual(new byte[] { 1 }).AssertTrue();
+
+		cache.TryGet(FileExts.CSharp, ["AB"], [], out var second).AssertTrue();
+		second.SequenceEqual(new byte[] { 2 }).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task FileCache()
+	{
+		var fs = _fileSystem;
+		var cache = new CompilerCache(fs, _cacheDir, TimeSpan.MaxValue);
+		await cache.InitAsync(CancellationToken);
+
+		fs.EnumerateFiles(_cacheDir).Count().AssertEqual(0);
+
+		var formula = Compile("RI@FORTS - SBER@TQBR", cache);
+		formula.Calculate([6, 4]).AssertEqual(2);
+
+		cache.Count.AssertEqual(1);
+		fs.EnumerateFiles(_cacheDir).Count().AssertEqual(1);
+
+		formula = Compile("RI@FORTS - SBER@TQBR", cache);
+		formula.Calculate([6, 5]).AssertEqual(1);
+
+		cache.Count.AssertEqual(1);
+		fs.EnumerateFiles(_cacheDir).Count().AssertEqual(1);
+
+		cache.Clear();
+		cache.Count.AssertEqual(0);
+
+		fs.DirectoryExists(_cacheDir).AssertFalse();
+	}
+
+	[TestMethod]
+	public void Calculate_Subtraction()
+	{
+		var formula = Compile("RI@FORTS - SBER@TQBR");
+		formula.Calculate([6, 4]).AssertEqual(2);
+	}
+
+	[TestMethod]
+	public void Calculate_Multiplication()
+	{
+		var formula = Compile("[RI@FORTS] * [SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(24);
+	}
+
+	[TestMethod]
+	public void Calculate_Addition_VariousSyntax()
+	{
+		var formula = Compile("RI@FORTS+[SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+
+		formula = Compile("RI@FORTS + [SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+
+		formula = Compile("RI@FORTS+ [SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+
+		formula = Compile("RI@FORTS +[SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+
+		formula = Compile("POW (RI@FORTS +[SBER@TQBR],2)");
+		formula.Calculate([6, 4]).AssertEqual(100);
+
+		formula = Compile("POW(RI@FORTS +SBER@TQBR,   2)");
+		formula.Calculate([6, 4]).AssertEqual(100);
+
+		formula = Compile("POW (RI@FORTS+SBER@TQBR,2)");
+		formula.Calculate([6, 4]).AssertEqual(100);
+
+		formula = Compile("POW   (RI@FORTS*SBER@TQBR,2)");
+		formula.Calculate([6, 4]).AssertEqual(576);
+	}
+
+	[TestMethod]
+	public void Calculate_UnaryNegation()
+	{
+		var formula = Compile("1*RI@FORTS + [@SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+
+		formula = Compile("-RI@FORTS +[@SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(-2);
+	}
+
+	[TestMethod]
+	public void Calculate_SpecialPrefixes_Asterisk()
+	{
+		var formula = Compile("[*RI@FORTS] + @SBER@TQBR");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	public void Calculate_DotInIdentifier_Bracketed()
+	{
+		var formula = Compile("[SPFB.SBRF@FORTS] + SBER@TQBR");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	[DataRow("[RTS-12.24@FORTS]", "RTS-12.24@FORTS")]
+	[DataRow("[V1.5]", "V1.5")]
+	public void GetVariables_DoesNotAddDecimalSuffixInsideBracketedNames(string expression, string expected)
+	{
+		var variables = ExpressionHelper.GetVariables(expression);
+
+		variables.AssertEqual([expected]);
+	}
+
+	[TestMethod]
+	public void GetVariables_TreatsAllWhitespaceAsSeparators()
+	{
+		var variables = ExpressionHelper.GetVariables("a +\nb +\tc +\rd");
+
+		variables.AssertEqual(["a", "b", "c", "d"]);
+	}
+
+	[TestMethod]
+	public Task Compile_PropagatesCancellation()
+	{
+		using var cts = new CancellationTokenSource();
+		cts.Cancel();
+
+		return ThrowsExactlyAsync<OperationCanceledException>(() =>
+			_compiler.Compile<decimal>(_context, _fileSystem, "x + 1", cancellationToken: cts.Token));
+	}
+
+	[TestMethod]
+	public void Calculate_DotInIdentifier_Unbracketed()
+	{
+		var formula = Compile("SPFB.SBRF@FORTS + SBER@TQBR");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	public void Calculate_DotPrefix_InBracket()
+	{
+		var formula = Compile("SPFB.SBRF@FORTS + [.SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	public void Calculate_DotPrefix_Variant()
+	{
+		var formula = Compile("SPFB.SBRF@FORTS + [.SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	public void Calculate_HashPrefix_Bracketed()
+	{
+		var formula = Compile("#SPFB.SBRF@FORTS + [#.SBER@TQBR]");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	public void Calculate_HashPrefix_Unbracketed()
+	{
+		var formula = Compile("#SPFB.SBRF@FORTS + #.SBER@TQBR");
+		formula.Calculate([6, 4]).AssertEqual(10);
+	}
+
+	[TestMethod]
+	public void Calculate_DecimalLiteral_SingleVariable()
+	{
+		var formula = Compile("#SPFB.SBRF@FORTS * 0.1m - #SPFB.SBRF@FORTS");
+		formula.Calculate([6]).AssertEqual(-5.4m);
+	}
+
+	[TestMethod]
+	public void Calculate_CurrencyPair_SlashSeparator()
+	{
+		var formula = Compile("RI@FORTS / [AUD/CAD@DUKAS]");
+		formula.Calculate([6, 4]).AssertEqual(1.5m);
+	}
+
+	[TestMethod]
+	public void Calculate_CurrencyPair_DashSeparator()
+	{
+		var formula = Compile("RI@FORTS / [AUD-CAD@DUKAS]");
+		formula.Calculate([6, 4]).AssertEqual(1.5m);
+	}
+
+	[TestMethod]
+	public void Calculate_AbsFunction()
+	{
+		var formula = Compile("RI@FORTS - Abs(SBER@TQBR)");
+		formula.Calculate([6, -4]).AssertEqual(2);
+	}
+
+	[TestMethod]
+	public void Calculate_AbsAsIdentifierPart()
+	{
+		var formula = Compile("POW(abs@FORTS,  abs(SBER@TQBR))");
+		formula.Calculate([2, -4]).AssertEqual(16);
+	}
+
+	[TestMethod]
+	public void Calculate_PowWithAbs()
+	{
+		var formula = Compile("POW(RI@FORTS,  Abs(SBER@TQBR))");
+		formula.Calculate([2, -4]).AssertEqual(16);
+	}
+
+	[TestMethod]
+	public void Calculate_PowWithNegativeExponent()
+	{
+		var formula = Compile("POW(RI@FORTS,  SBER@TQBR)");
+		formula.Calculate([2, -4]).AssertEqual(0.0625m);
+	}
+
+	[TestMethod]
+	public void Calculate_PowWithFractionalExponent()
+	{
+		var formula = Compile("POW(RI@FORTS*SBER@TQBR,1.0m/3)");
+		formula.Calculate([2, 4.5m]).AssertEqual(2.0800838230519m);
+	}
+
+	[TestMethod]
+	public void Calculate_PowWithBrackets_Variant1()
+	{
+		var formula = Compile("POW([RI@FORTS]*[SBER@TQBR],1m/3)");
+		formula.Calculate([2, 4.5m]).AssertEqual(2.0800838230519m);
+	}
+
+	[TestMethod]
+	public void Calculate_PowWithBrackets_Variant2()
+	{
+		var formula = Compile("POW(RI@FORTS*[SBER@TQBR],1m/3)");
+		formula.Calculate([2, 4.5m]).AssertEqual(2.0800838230519m);
+	}
+
+	[TestMethod]
+	public void Calculate_Pow_LowerCase()
+	{
+		var formula = Compile("pow(RI@FORTS*[SBER@TQBR],1m/3)");
+		formula.Calculate([2, 4.5m]).AssertEqual(2.0800838230519m);
+	}
+
+	[TestMethod]
+	public void Calculate_Pow_MixedCase()
+	{
+		var formula = Compile("Pow(RI@FORTS*[SBER@TQBR],1m/3)");
+		formula.Calculate([2, 4.5m]).AssertEqual(2.0800838230519m);
+	}
+
+	[TestMethod]
+	public void Calculate_Pow_WithWhitespace()
+	{
+		var formula = Compile("   Pow(RI@FORTS*[SBER@TQBR],1m/3) ");
+		formula.Calculate([2, 4.5m]).AssertEqual(2.0800838230519m);
+	}
+
+	[TestMethod]
+	public void Calculate_Pow_SameVariableMultipleTimes()
+	{
+		var formula = Compile("Pow(RI@FORTS*[RI@FORTS],1m/RI@FORTS)");
+		formula.Calculate([2]).AssertEqual(2);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_Addition()
+	{
+		var formula = Compile("x + y");
+		formula.Calculate([2, -4]).AssertEqual(-2);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_Multiplication()
+	{
+		var formula = Compile("x * y");
+		formula.Calculate([2, -4]).AssertEqual(-8);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_MultiplicationNoSpaces()
+	{
+		var formula = Compile("x*y");
+		formula.Calculate([2, -4]).AssertEqual(-8);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_PowAndAbs()
+	{
+		var formula = Compile("pow(x,abs(y))");
+		formula.Calculate([2, -4]).AssertEqual(16);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_ComplexExpression()
+	{
+		var formula = Compile("(x+y)*X/3");
+		formula.Calculate([2, 3]).AssertEqual(3.3333333333333333333333333333m);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_DecimalMultiplier()
+	{
+		var formula = Compile("(x+y)*5.2m/3");
+		formula.Calculate([2, 3]).AssertEqual(8.666666666666666666666666667m);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_NestedParentheses()
+	{
+		var formula = Compile("((x+y)*5.2m/3) + abs(X)");
+		formula.Calculate([2, 3]).AssertEqual(10.666666666666666666666666667m);
+	}
+
+	[TestMethod]
+	public void Calculate_NumericLiteral_Addition()
+	{
+		var formula = Compile("SBER@TQBR + 12334545");
+		formula.Calculate([2, 12334545]).AssertEqual(2 + 12334545);
+	}
+
+	[TestMethod]
+	public void Calculate_SimpleVariables_IrregularWhitespace()
+	{
+		var formula = Compile("    x*   y");
+		formula.Calculate([2, -4]).AssertEqual(-8);
+	}
+
+	private static Task<ExpressionFormula<bool>> CompileBool(string expression)
+		=> _compiler.Compile<bool>(_context, _fileSystem, expression);
+
+	[TestMethod]
+	public async Task Bool()
+	{
+		var formula = await CompileBool("C > O");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([4, 6]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolComplex()
+	{
+		var formula = await CompileBool("(C > O) && (B < C)");
+		formula.Calculate([6, 4, 3]).AssertTrue();
+		formula.Calculate([4, 6, 8]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolComplex2()
+	{
+		var formula = await CompileBool("([C] > O) && ([B] < C)");
+		formula.Calculate([6, 4, 3]).AssertTrue();
+		formula.Calculate([4, 6, 8]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolMath()
+	{
+		var formula = await CompileBool("pow(C,2) > sin(O)");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([0.1m, 360m]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolMath2()
+	{
+		var formula = await CompileBool("pow([C],2) > sin(O)");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([0.1m, 360m]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolMath3()
+	{
+		var formula = await CompileBool("    Pow(   [C],2) > sin(    O)  ");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([0.1m, 360m]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolMath4()
+	{
+		var formula = await CompileBool("    Pow(   (C*O)/O,2) > sin(    O)  ");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([0.1m, 360m]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolMath5()
+	{
+		var formula = await CompileBool("    Pow(   C*(O/O),2) > sin(    O)  ");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([0.1m, 360m]).AssertFalse();
+	}
+
+	[TestMethod]
+	public void Round()
+	{
+		var formula = Compile(" ROUND(a, b) ");
+		formula.Calculate([6, 4]).AssertEqual(6);
+		formula.Calculate([0.01m, 2]).AssertEqual(0.01m);
+		formula.Calculate([0.011m, 2]).AssertEqual(0.01m);
+	}
+
+	[TestMethod]
+	public async Task BoolLessThan()
+	{
+		var formula = await CompileBool("C < O");
+		formula.Calculate([4, 6]).AssertTrue();
+		formula.Calculate([6, 4]).AssertFalse();
+		formula.Calculate([5, 5]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolGreaterOrEqual()
+	{
+		var formula = await CompileBool("C >= O");
+		formula.Calculate([6, 4]).AssertTrue();
+		formula.Calculate([5, 5]).AssertTrue();
+		formula.Calculate([4, 6]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolLessOrEqual()
+	{
+		var formula = await CompileBool("C <= O");
+		formula.Calculate([4, 6]).AssertTrue();
+		formula.Calculate([5, 5]).AssertTrue();
+		formula.Calculate([6, 4]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolEqual()
+	{
+		var formula = await CompileBool("C == O");
+		formula.Calculate([5, 5]).AssertTrue();
+		formula.Calculate([4, 6]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolNotEqual()
+	{
+		var formula = await CompileBool("C != O");
+		formula.Calculate([4, 6]).AssertTrue();
+		formula.Calculate([5, 5]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolOr()
+	{
+		var formula = await CompileBool("(C > O) || (B > O)");
+		formula.Calculate([6, 4, 3]).AssertTrue();
+		formula.Calculate([3, 4, 6]).AssertTrue();
+		formula.Calculate([3, 4, 2]).AssertFalse();
+	}
+
+	[TestMethod]
+	public async Task BoolNot()
+	{
+		var formula = await CompileBool("!(C > O)");
+		formula.Calculate([4, 6]).AssertTrue();
+		formula.Calculate([6, 4]).AssertFalse();
+	}
+
+	[TestMethod]
+	[DataRow("x * 2", 10, 20, DisplayName = "Integer literal")]
+	[DataRow("x * 0.5", 10, 5, DisplayName = "Decimal without suffix")]
+	[DataRow("x * 0.5m", 10, 5, DisplayName = "Decimal with suffix")]
+	public void DecimalMultiply(string expression, int input, int expected)
+	{
+		var formula = Compile(expression);
+		formula.Calculate([(decimal)input]).AssertEqual((decimal)expected);
+	}
+
+	[TestMethod]
+	[DataRow("x + 10", 5, 15, DisplayName = "Integer addition")]
+	[DataRow("x + 10.5", 5, 15.5, DisplayName = "Decimal addition without suffix")]
+	[DataRow("x + 10.5m", 5, 15.5, DisplayName = "Decimal addition with suffix")]
+	public void DecimalAddition(string expression, int input, double expected)
+	{
+		var formula = Compile(expression);
+		formula.Calculate([(decimal)input]).AssertEqual((decimal)expected);
+	}
+
+	[TestMethod]
+	[DataRow("abs(x - 10)", 7, 3, DisplayName = "abs with integer")]
+	[DataRow("abs(x - 10.5)", 7, 3.5, DisplayName = "abs with decimal")]
+	[DataRow("floor(x + 0.7)", 10, 10, DisplayName = "floor with decimal")]
+	[DataRow("ceiling(x + 0.3)", 10, 11, DisplayName = "ceiling with decimal")]
+	[DataRow("round(x * 0.333, 2)", 10, 3.33, DisplayName = "round with decimal")]
+	public void DecimalFunctions(string expression, int input, double expected)
+	{
+		var formula = Compile(expression);
+		formula.Calculate([(decimal)input]).AssertEqual((decimal)expected);
+	}
+
+	[TestMethod]
+	[DataRow("pow(x, 2)", 3, 9, DisplayName = "pow with integer exponent")]
+	[DataRow("pow(x, 2.0)", 3, 9, DisplayName = "pow with decimal exponent")]
+	[DataRow("sqrt(x)", 16, 4, DisplayName = "sqrt")]
+	[DataRow("pow(x, 0.5)", 16, 4, DisplayName = "pow as sqrt")]
+	public void DecimalPowSqrt(string expression, int input, int expected)
+	{
+		var formula = Compile(expression);
+		formula.Calculate([(decimal)input]).AssertEqual((decimal)expected);
+	}
+
+	[TestMethod]
+	public void DecimalComplexFormula()
+	{
+		// abs(x - 10.5) + round(y * 0.25, 2) + max(z, 1.0)
+		var formula = Compile("abs(x - 10.5) + round(y * 0.25, 2) + max(z, 1.0)");
+		// abs(10 - 10.5) + round(8 * 0.25, 2) + max(0.5, 1.0) = 0.5 + 2 + 1 = 3.5
+		formula.Calculate([10m, 8m, 0.5m]).AssertEqual(3.5m);
+	}
+
+	[TestMethod]
+	public void DecimalTrigonometry()
+	{
+		// sin(0) + cos(0) = 0 + 1 = 1
+		var formula = Compile("sin(x * 3.14159) + cos(y * 0.5)");
+		formula.Calculate([0m, 0m]).AssertEqual(1m);
+	}
+
+	[TestMethod]
+	public void DecimalMultipleVariables()
+	{
+		// x * 0.5 + y * 0.25 + z * 0.125 = 5 + 5 + 5 = 15
+		var formula = Compile("x * 0.5 + y * 0.25 + z * 0.125");
+		formula.Calculate([10m, 20m, 40m]).AssertEqual(15m);
+	}
+
+	[TestMethod]
+	public void Min_TwoArgs()
+	{
+		var formula = Compile("min(x, y)");
+		formula.Calculate([5m, 3m]).AssertEqual(3m);
+		formula.Calculate([2m, 8m]).AssertEqual(2m);
+	}
+
+	[TestMethod]
+	public void Min_ThreeArgs()
+	{
+		var formula = Compile("min(x, y, z)");
+		formula.Calculate([5m, 3m, 7m]).AssertEqual(3m);
+		formula.Calculate([1m, 8m, 4m]).AssertEqual(1m);
+	}
+
+	[TestMethod]
+	public void Min_FourArgs()
+	{
+		var formula = Compile("min(a, b, c, d)");
+		formula.Calculate([5m, 3m, 7m, 1m]).AssertEqual(1m);
+		formula.Calculate([9m, 8m, 4m, 6m]).AssertEqual(4m);
+	}
+
+	[TestMethod]
+	public void Min_FiveArgs()
+	{
+		var formula = Compile("min(a, b, c, d, e)");
+		formula.Calculate([5m, 3m, 7m, 1m, 9m]).AssertEqual(1m);
+		formula.Calculate([9m, 8m, 4m, 6m, 2m]).AssertEqual(2m);
+	}
+
+	[TestMethod]
+	public void Max_TwoArgs()
+	{
+		var formula = Compile("max(x, y)");
+		formula.Calculate([5m, 3m]).AssertEqual(5m);
+		formula.Calculate([2m, 8m]).AssertEqual(8m);
+	}
+
+	[TestMethod]
+	public void Max_ThreeArgs()
+	{
+		var formula = Compile("max(x, y, z)");
+		formula.Calculate([5m, 3m, 7m]).AssertEqual(7m);
+		formula.Calculate([1m, 8m, 4m]).AssertEqual(8m);
+	}
+
+	[TestMethod]
+	public void Max_FourArgs()
+	{
+		var formula = Compile("max(a, b, c, d)");
+		formula.Calculate([5m, 3m, 7m, 1m]).AssertEqual(7m);
+		formula.Calculate([9m, 8m, 4m, 6m]).AssertEqual(9m);
+	}
+
+	[TestMethod]
+	public void Max_FiveArgs()
+	{
+		var formula = Compile("max(a, b, c, d, e)");
+		formula.Calculate([5m, 3m, 7m, 1m, 9m]).AssertEqual(9m);
+		formula.Calculate([2m, 8m, 4m, 6m, 3m]).AssertEqual(8m);
+	}
+
+	[TestMethod]
+	public void MinMax_Combined()
+	{
+		// min(max(a, b), max(c, d)) = min(5, 7) = 5
+		var formula = Compile("min(max(a, b), max(c, d))");
+		formula.Calculate([5m, 3m, 7m, 1m]).AssertEqual(5m);
+	}
+
+	[TestMethod]
+	public void MinMax_WithArithmetic()
+	{
+		// max(x + y, z) = max(8, 7) = 8
+		var formula = Compile("max(x + y, z)");
+		formula.Calculate([5m, 3m, 7m]).AssertEqual(8m);
+	}
+
+	[TestMethod]
+	public void EmptyExpression_ShouldThrow()
+	{
+		Throws<ArgumentNullException>(() => Compile(""));
+	}
+
+	[TestMethod]
+	public void WhitespaceOnlyExpression_ShouldThrow()
+	{
+		// Expression consisting only of whitespace should be treated as empty/invalid
+		Throws<ArgumentException>(() => Compile("   "));
+		Throws<ArgumentException>(() => Compile("\t"));
+		Throws<ArgumentException>(() => Compile("  \t  "));
+		Throws<ArgumentException>(() => Compile("\n"));
+	}
+
+	/// <summary>
+	/// Regression test for CompilerCache.Clear(): ensures clearing an empty-path cache does not
+	/// destroy unrelated files in the working directory. An empty path now defaults to a dedicated
+	/// CompilerCache subdirectory (ICompilerCache.cs:74), so Clear() only removes the cache folder.
+	/// (Was: empty path defaulted _path to the bare working directory, and Clear() recursively
+	/// deleted every unrelated file in it.)
+	/// </summary>
+	[TestMethod]
+	public void Clear_DoesNotDeleteUnrelatedFilesInWorkingDirectory()
+	{
+		var fs = new MemoryFileSystem();
+
+		// Empty path makes the cache default _path to Directory.GetCurrentDirectory().
+		var workingDir = Directory.GetCurrentDirectory();
+		var cache = new CompilerCache(fs, string.Empty, TimeSpan.MaxValue);
+
+		// Seed an unrelated user file that happens to live in the working directory.
+		fs.CreateDirectory(workingDir);
+		var unrelatedFile = Path.Combine(workingDir, "user-data.txt");
+		fs.WriteAllBytes(unrelatedFile, [1, 2, 3]);
+
+		cache.Clear();
+
+		// Clear() must not destroy files that do not belong to the cache.
+		IsTrue(fs.FileExists(unrelatedFile), "Clear() must not delete unrelated files in the working directory.");
+	}
+
+	/// <summary>
+	/// Regression test for the expression parser: ensures an unsupported operator character such as
+	/// '%' raises a descriptive parsing exception instead of being swallowed into a variable name
+	/// (ExpressionHelper.cs:104, :172). (Was: '%' was silently appended to a variable name, so
+	/// GetVariables("x % 2") returned a phantom "%" variable with no error reported.)
+	/// </summary>
+	[TestMethod]
+	public void GetVariables_UnsupportedOperatorThrows()
+	{
+		// '%' is not a supported operator, digit or identifier char and must not be swallowed.
+		Throws<Exception>(() => ExpressionHelper.GetVariables("x % 2"));
+	}
+}

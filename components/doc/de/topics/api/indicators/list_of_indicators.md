@@ -1,0 +1,181 @@
+# Liste der Indikatoren
+
+[S#](../../api.md) stellt standardmäßig mehr als 140 Indikatoren der technischen Analyse bereit. Dadurch können Sie fertige Indikatoren verwenden, statt sie von Grund auf neu zu erstellen.
+
+- [A/D](list_of_indicators/a_d.md) - Indikator A/D, misst die Beschleunigung oder Verlangsamung der Preisbewegung
+- [ADL](list_of_indicators/accumulation_distribution_line.md) - Indikator ADL, verfolgt den Geldzufluss oder -abfluss in ein Wertpapier
+- [ALF](list_of_indicators/adaptive_laguerre_filter.md) - Indikator ALF, ein Filter, der sich an Marktbedingungen anpasst, um Preisdaten zu glätten
+- [APZ](list_of_indicators/adaptive_price_zone.md) - Indikator APZ, erkennt mögliche Unterstützungs- und Widerstandsniveaus anhand der Volatilität
+- [Alligator](list_of_indicators/alligator.md) - Indikator Alligator, ein trendfolgender Indikator mit drei gleitenden Durchschnitten zur Bestimmung von Markttrends
+- [AFI](list_of_indicators/approval_flow_index.md) - Indikator AFI, misst Trendstärke anhand von Preis und Volumen
+- [ALMA](list_of_indicators/arnaud_legoux_moving_average.md) - Indikator ALMA, ein gleitender Durchschnitt mit reduzierter Verzögerung und weniger Rauschen
+- [Aroon](list_of_indicators/aroon.md) - Indikator Aroon, bestimmt Stärke und Richtung eines Trends
+- [Aroon-Oszillator](list_of_indicators/aroon_oscillator.md) - Indikator Aroon-Oszillator, zeigt die Differenz zwischen Aroon-Aufwärts und Aroon-Abwärts
+- [ADX](list_of_indicators/adx.md) - Indikator ADX, misst die Trendstärke
+- [ATR](list_of_indicators/atr.md) - Indikator ATR, misst die Marktvolatilität
+- [AO](list_of_indicators/ao.md) - Indikator AO, misst das Markt-Momentum
+- [Bärenstärke](list_of_indicators/bear_power.md) - Indikator Bärenstärke, misst bärischen Druck relativ zum EMA
+- [Bullenstärke](list_of_indicators/bull_power.md) - Indikator Bullenstärke, misst bullischen Druck relativ zum EMA
+- [BMP](list_of_indicators/balance_of_market_power.md) - Indikator BMP, vergleicht Kauf- und Verkaufsdruck
+- [BOP](list_of_indicators/balance_of_power.md) - Indikator BOP, zeigt die Stärke von Käufern gegenüber Verkäufern
+- [BV](list_of_indicators/balance_volume.md) - Indikator BV, verknüpft Volumen mit Preisänderungen
+- [Bollinger-Bänder](list_of_indicators/bollinger_bands.md) - Indikator Bollinger-Bänder, misst Volatilität und erkennt überkaufte oder überverkaufte Bedingungen
+- [BBP](list_of_indicators/bollinger_percent_b.md) - Indikator BBP, zeigt die Preisposition relativ zu den Bollinger-Bändern
+- [Pattern](../patterns.md) - Indikator Pattern, erkennt bestimmte Kursmuster in Charts
+- [CGO](list_of_indicators/center_of_gravity_oscillator.md) - Indikator CGO, identifiziert mögliche Wendepunkte
+- [CMF](list_of_indicators/chaikin_money_flow.md) - Indikator CMF, misst Kauf- und Verkaufsdruck anhand des Volumens
+- [Chaikin-Volatilität](list_of_indicators/chv.md) - Indikator Chaikin-Volatilität, misst die Änderungsrate der Handelsspanne
+- [CKS](list_of_indicators/chande_kroll_stop.md) - Indikator CKS, liefert volatilitätsbasierte Stop-Loss-Niveaus
+- [CMO](list_of_indicators/cmo.md) - Indikator CMO, misst das Momentum von Preisänderungen
+- [CHOP](list_of_indicators/choppiness_index.md) - Indikator CHOP, bestimmt, ob sich der Markt in einem Trend oder in einer Seitwärtsphase befindet
+- [CCI](list_of_indicators/cci.md) - Indikator CCI, erkennt zyklische Trends an Rohstoffmärkten
+- [CM](list_of_indicators/composite_momentum.md) - Indikator CM, kombiniert mehrere Momentum-Indikatoren
+- [CRSI](list_of_indicators/connors_rsi.md) - Indikator CRSI, ein zusammengesetzter Indikator zur Erkennung überkaufter und überverkaufter Bedingungen
+- [CBCI](list_of_indicators/constance_brown_composite_index.md) - Indikator CBCI, misst Markt-Momentum und Trendstärke
+- [DI](list_of_indicators/demand_index.md) - Indikator DI, vergleicht Kauf- und Verkaufsdruck
+- [DPO](list_of_indicators/dpo.md) - Indikator DPO, entfernt die Trendkomponente, um Zyklen zu fokussieren
+- [DSP](list_of_indicators/detrended_synthetic_price.md) - Indikator DSP, entfernt Trends zur Analyse von Preisschwankungen
+- [DMI](list_of_indicators/dmi.md) - Indikator DMI, bestimmt Trendrichtung und Trendstärke
+- [DPI](list_of_indicators/disparity_index.md) - Indikator DPI, misst die Differenz zwischen Preis und gleitendem Durchschnitt
+- [DC](list_of_indicators/donchian_channels.md) - Indikator DC, identifiziert Ausbruchsniveaus anhand von Hochs und Tiefs
+- [DEMA](list_of_indicators/dema.md) - Indikator DEMA, reduziert Verzögerung bei gleitenden Durchschnitten
+- [DeMarker](list_of_indicators/demarker.md) - Indikator DeMarker, vergleicht aufeinanderfolgende Hochs und Tiefs zur Einschätzung der Nachfrage
+- [DZRSI](list_of_indicators/dynamic_zones_rsi.md) - Indikator DZRSI, passt RSI-Niveaus an Marktbedingungen an
+- [EMV](list_of_indicators/ease_of_movement.md) - Indikator EMV, verknüpft Preisänderungen mit Volumen
+- [EFT](list_of_indicators/ehlers_fisher_transform.md) - Indikator EFT, normalisiert Preise, um Extremwerte hervorzuheben
+- [EIS](list_of_indicators/elder_impulse_system.md) - Indikator EIS, kombiniert Trend und Momentum, um Handelsgelegenheiten zu finden
+- [Elder-Ray](list_of_indicators/elder_ray.md) - Indikator Elder-Ray, bewertet das Gleichgewicht zwischen Bullen und Bären mithilfe des EMA
+- [EWO](list_of_indicators/elliot_wave_oscillator.md) - Indikator EWO, identifiziert Wellenmuster in Preisbewegungen
+- [EPMA](list_of_indicators/endpoint_moving_average.md) - Indikator EPMA, ein gleitender Durchschnitt mit reduzierter Verzögerung
+- [Hüllkurven](list_of_indicators/envelope.md) - Indikator Envelope, erstellt Bänder um einen gleitenden Durchschnitt zur Erkennung überkaufter und überverkaufter Niveaus
+- [EMA](list_of_indicators/ema.md) - Indikator EMA, gewichtet jüngere Preise stärker
+- [FR](list_of_indicators/fibonacci_retracement.md) - Indikator FR, bestimmt mögliche Umkehrniveaus anhand von Fibonacci-Verhältnissen
+- [FVE](list_of_indicators/finite_volume_element.md) - Indikator FVE, misst die Stärke von Preisbewegungen unter Berücksichtigung des Volumens
+- [FI](list_of_indicators/force_index.md) - Indikator FI, kombiniert Preis und Volumen zur Messung von Kauf- und Verkaufsdruck
+- [EFI](list_of_indicators/elder_force_index.md) - Indikator EFI, misst Kauf- und Verkaufsdruck
+- [FOSC](list_of_indicators/forecast_oscillator.md) - Indikator FOSC, vergleicht tatsächliche Preise mit prognostizierten Preisen
+- [FRAMA](list_of_indicators/fractal_adaptive_moving_average.md) - Indikator FRAMA, passt sich der Marktvolatilität an
+- [Fraktale](list_of_indicators/fractals.md) - Indikator Fractals, identifiziert mögliche Wendepunkte in Preis-Charts
+- [FDI](list_of_indicators/fractal_dimension.md) - Indikator FDI, misst die Rauheit des Marktes
+- [Gator-Oszillator](list_of_indicators/gator_oscillator.md) - Indikator Gator-Oszillator, misst Konvergenz und Divergenz gleitender Durchschnitte
+- [GAPO](list_of_indicators/gopalakrishnan_range_index.md) - Indikator GAPO, misst die Variabilität von Preisbewegungen
+- [GMMA](list_of_indicators/guppy_multiple_moving_average.md) - Indikator GMMA, nutzt mehrere gleitende Durchschnitte zur Trendidentifikation
+- [HO](list_of_indicators/harmonic_oscillator.md) - Indikator HO, erkennt harmonische Muster in Preisdaten
+- [Höchstwert](list_of_indicators/highest.md) - Indikator Höchstwert, bestimmt den höchsten Preis über einen angegebenen Zeitraum
+- [HLI](list_of_indicators/high_low_index.md) - Indikator HLI, misst die Anzahl neuer Hochs und Tiefs
+- [HVR](list_of_indicators/historical_volatility_ratio.md) - Indikator HVR, vergleicht aktuelle Volatilität mit historischen Niveaus
+- [H](list_of_indicators/hurst_exponent.md) - Indikator H, misst das Langzeitgedächtnis einer Zeitreihe
+- [HMA](list_of_indicators/hma.md) - Indikator HMA, ein schneller und glatter gleitender Durchschnitt
+- [Ichimoku](list_of_indicators/ichimoku.md) - Indikator Ichimoku, ein umfassender Indikator zur Trendidentifikation
+- [III](list_of_indicators/intraday_intensity_index.md) - Indikator III, misst Kauf- und Verkaufsdruck während des Handelstags
+- [IMI](list_of_indicators/intraday_momentum_index.md) - Indikator IMI, erkennt überkaufte und überverkaufte Bedingungen intraday
+- [JMA](list_of_indicators/jma.md) - Indikator JMA, ein glatter und reaktionsfähiger gleitender Durchschnitt
+- [KPO](list_of_indicators/kase_peak_oscillator.md) - Indikator KPO, identifiziert mögliche Wendepunkte
+- [KER](list_of_indicators/kaufman_efficiency_ratio.md) - Indikator KER, misst die Effizienz der Preisbewegung
+- [KAMA](list_of_indicators/kama.md) - Indikator KAMA, passt sich der Marktvolatilität an
+- [Kalman-Filter](list_of_indicators/kalman_filter.md) - Adaptiver Filter zur Verfolgung von Trends in verrauschten Daten
+- [KC](list_of_indicators/keltner_channels.md) - Indikator KC, definiert Handelsspannen anhand der Volatilität
+- [KVO](list_of_indicators/klinger_volume_oscillator.md) - Indikator KVO, misst Volumentrends
+- [KST](list_of_indicators/kst.md) - Indikator KST, ein Momentum-Oszillator
+- [LRSI](list_of_indicators/laguerre_rsi.md) - Indikator LRSI, ein modifizierter RSI mit reduzierter Verzögerung
+- [LRC](list_of_indicators/lrc.md) - Indikator LRC, prognostiziert künftige Preise anhand vergangener Trends
+- [LRF](list_of_indicators/linear_regression_forecast.md) - Indikator LRF, prognostiziert künftige Preise
+- [R-Quadrat](list_of_indicators/linear_reg_rsquared.md) - Indikator R-Quadrat, misst die Stärke eines linearen Zusammenhangs
+- [LRS](list_of_indicators/lrs.md) - Indikator LRS, zeigt die Neigung der Regressionslinie
+- [Tiefstwert](list_of_indicators/lowest.md) - Indikator Tiefstwert, bestimmt den niedrigsten Preis über einen angegebenen Zeitraum
+- [LP](list_of_indicators/lunar_phase.md) - Indikator LP, korreliert Marktbewegungen mit Mondzyklen
+- [MFI](list_of_indicators/market_facilitation_index.md) - Indikator MFI, misst die Effizienz der Preisbewegung
+- [MMI](list_of_indicators/market_meanness_index.md) - Indikator MMI, bestimmt mean-reverting Verhalten
+- [MI](list_of_indicators/mass_index.md) - Indikator MI, erkennt mögliche Umkehrungen anhand der Ausweitung der Handelsspanne
+- [MCO](list_of_indicators/mcclellan_oscillator.md) - Indikator MCO, misst die Marktbreite
+- [MGD](list_of_indicators/mcginley_dynamic.md) - Indikator MGD, ein reaktionsfähiger gleitender Durchschnitt
+- [Mittlere Abweichung](list_of_indicators/mean_deviation.md) - Indikator Mittlere Abweichung, misst die mittlere Abweichung vom Mittelwert
+- [Gleitender Median](list_of_indicators/median.md) - Indikator Gleitender Median, glättet Daten mit dem Median des Fensters
+- [Medianpreis](list_of_indicators/median_price.md) - Indikator Medianpreis, berechnet die Mitte der Handelsspanne
+- [Impuls](list_of_indicators/momentum.md) - Indikator Momentum, misst die Geschwindigkeit der Preisänderung
+- [MOMA](list_of_indicators/momentum_of_moving_average.md) - Indikator MOMA, misst das Momentum eines gleitenden Durchschnitts
+- [MP](list_of_indicators/momentum_pinball.md) - Indikator MP, erkennt überkaufte und überverkaufte Bedingungen
+- [MFI](list_of_indicators/money_flow_index.md) - Indikator MFI, misst Kauf- und Verkaufsdruck anhand von Preis und Volumen
+- [MACD](list_of_indicators/macd.md) - Indikator MACD, erkennt Trendwechsel
+- [MACD-Histogramm](list_of_indicators/macd_histogram.md) - Indikator MACD-Histogramm, visualisiert die Differenz zwischen MACD und Signallinie
+- [MACD-Signal](list_of_indicators/macd_with_signal_line.md) - Indikator MACD-Signal, liefert Kauf- und Verkaufssignale
+- [MAC](list_of_indicators/moving_average_crossover.md) - Indikator MAC, erkennt Trendumkehrungen mithilfe zweier gleitender Durchschnitte
+- [MAR](list_of_indicators/moving_average_ribbon.md) - Indikator MAR, nutzt mehrere gleitende Durchschnitte zur Trendvisualisierung
+- [NVI](list_of_indicators/negative_volume_index.md) - Indikator NVI, verfolgt Preisbewegungen an Tagen mit sinkendem Volumen
+- [PVI](list_of_indicators/positive_volume_index.md) - Indikator PVI, verfolgt Preisbewegungen an Tagen mit steigendem Volumen
+- [NRTR](list_of_indicators/nrtr.md) - Indikator NRTR, ein Indikator für nachgezogene Stops
+- [OBV](list_of_indicators/on_balance_volume.md) - Indikator OBV, verknüpft Volumen mit Preisänderungen
+- [OBVM](list_of_indicators/on_balance_volume_mean.md) - Indikator OBVM, eine geglättete Version von OBV
+- [optimale Nachführung](list_of_indicators/optimal_tracking.md) - Indikator optimale Nachführung, filtert Preisdaten zur Rauschreduzierung
+- [OMA](list_of_indicators/oscillator_of_moving_average.md) - Indikator OMA, misst die Differenz zwischen gleitendem Durchschnitt und Preis
+- [parabolischer SAR](list_of_indicators/parabolic_sar.md) - Indikator parabolischer SAR, identifiziert mögliche Wendepunkte
+- [Durchleitung](list_of_indicators/pass_through.md) - Ein Indikator ohne Logik. Wird zum Zeichnen von Linien oder als Platzhalter für benutzerdefinierte Indikatoren verwendet
+- [Spitzenwert](list_of_indicators/peak.md) - Indikator Spitzenwert, identifiziert lokale Hochs in Preisdaten
+- [PPO](list_of_indicators/percentage_price_oscillator.md) - Indikator PPO, misst die prozentuale Differenz zwischen zwei gleitenden Durchschnitten
+- [PPOS](list_of_indicators/percentage_price_oscillator_signal.md) - Indikator PPOS, glättet PPO mit einem EMA
+- [PPOH](list_of_indicators/percentage_price_oscillator_histogram.md) - Indikator PPOH, zeichnet die Differenz zwischen PPO und seiner Signallinie
+- [PVO](list_of_indicators/percentage_volume_oscillator.md) - Indikator PVO, misst die prozentuale Differenz von Volumentrends
+- [PP](list_of_indicators/pivot_points.md) - Indikator PP, berechnet Unterstützungs- und Widerstandsniveaus anhand vergangener Preisbewegungen
+- [PC](list_of_indicators/price_channels.md) - Indikator PC, zeigt obere und untere Preisgrenzen
+- [PVT](list_of_indicators/price_volume_trend.md) - Indikator PVT, multipliziert die Preisänderung mit dem Volumen
+- [PGO](list_of_indicators/pretty_good_oscillator.md) - Indikator PGO, erkennt überkaufte und überverkaufte Bedingungen
+- [PSY](list_of_indicators/psychological_line.md) - Indikator PSY, misst die Marktstimmung anhand von Preisänderungen
+- [QStick](list_of_indicators/qstick.md) - Indikator QStick, misst Kauf- und Verkaufsdruck
+- [RC](list_of_indicators/rainbow_charts.md) - Indikator RC, nutzt mehrere gleitende Durchschnitte zur Trendvisualisierung
+- [RCI](list_of_indicators/rank_correlation_index.md) - Indikator RCI, misst den Trend mit Spearmans Rangkorrelation
+- [RAVI](list_of_indicators/ravi.md) - Indikator RAVI, misst Trendstärke
+- [RoC](list_of_indicators/roc.md) - Indikator RoC, misst die prozentuale Preisänderung
+- [RMI](list_of_indicators/relative_momentum_index.md) - Indikator RMI, eine RSI-Variante mit Momentum-Komponente
+- [RSI](list_of_indicators/rsi.md) - Indikator RSI, misst Geschwindigkeit und Veränderung von Preisbewegungen
+- [RVI](list_of_indicators/rvi.md) - Indikator RVI, misst die Trendzuverlässigkeit
+- [STC](list_of_indicators/schaff_trend_cycle.md) - Indikator STC, erkennt Trendzyklen
+- [SuperTrend](list_of_indicators/supertrend.md) - SuperTrend-Indikator auf Basis von ATR
+- [SMA](list_of_indicators/sma.md) - Indikator SMA, berechnet den Durchschnittspreis über eine Periode
+- [Verschiebung](list_of_indicators/shift.md) - Indikator Verschiebung, verschiebt den Datenstrom um eine gewählte Anzahl von Perioden
+- [SW](list_of_indicators/sine_wave.md) - Indikator SW, identifiziert zyklische Muster in Preisdaten
+- [SMMA](list_of_indicators/smoothed_ma.md) - Indikator SMMA, ein gleitender Durchschnitt mit höherer Gewichtung jüngerer Preise
+- [Standardabweichung](list_of_indicators/standard_deviation.md) - Indikator Standardabweichung, misst die Streuung von Preisdaten
+- [Standardfehler](list_of_indicators/standard_error.md) - Indikator Standardfehler, misst die Prognosegenauigkeit
+- [Stochastischer Oszillator %K](list_of_indicators/stochastic_oscillator_k.md) - Indikator Stochastischer Oszillator %K, misst Momentum anhand der Preisposition innerhalb einer Spanne
+- [Stochastischer Oszillator](list_of_indicators/stochastic_oscillator.md) - Indikator Stochastischer Oszillator, erkennt überkaufte und überverkaufte Bedingungen
+- [Summe N](list_of_indicators/sum_n.md) - Indikator Summe N, berechnet die Summe der letzten N Preise
+- [T3MA](list_of_indicators/t3_moving_average.md) - Indikator T3MA, ein glatter und reaktionsfähiger gleitender Durchschnitt
+- [TWAP](list_of_indicators/time_weighted_average_price.md) - Indikator TWAP, berechnet den zeitgewichteten Durchschnittspreis
+- [TP](list_of_indicators/typical_price.md) - Indikator TP, Durchschnitt aus High, Low und Close
+- [TEMA](list_of_indicators/tema.md) - Indikator TEMA, reduziert Verzögerung bei gleitenden Durchschnitten
+- [TRIX](list_of_indicators/trix.md) - Indikator TRIX, erkennt Trendwechsel
+- [Tiefpunkt](list_of_indicators/trough.md) - Indikator Tiefpunkt, identifiziert lokale Tiefs in Preisdaten
+- [TR](list_of_indicators/true_range.md) - Indikator TR, misst die tatsächliche Spanne der Preisbewegung
+- [TSI](list_of_indicators/true_strength_index.md) - Indikator TSI, verwendet doppelt geglättete Momentum-Analyse
+- [TMF](list_of_indicators/twiggs_money_flow.md) - Indikator TMF, misst Kauf- und Verkaufsdruck
+- [UO](list_of_indicators/uo.md) - Indikator UO, kombiniert mehrere Zeitrahmen zur Messung von Momentum
+- [VHF](list_of_indicators/vhf.md) - Indikator VHF, unterscheidet Trendmärkte von Seitwärtsmärkten
+- [VIDIA](list_of_indicators/vidya.md) - Indikator VIDIA, passt sich der Marktvolatilität an
+- [VMA](list_of_indicators/variable_moving_average.md) - Indikator VMA, passt sich der Volatilität an
+- [Volumen](list_of_indicators/volume.md) - Indikator Volumen, misst das Handelsvolumen pro Kerze
+- [Volumenprofil](list_of_indicators/volume_profile.md) - Indikator Volumenprofil, zeigt Handelsaktivität auf verschiedenen Preisniveaus
+- [VMA](list_of_indicators/volume_weighted_ma.md) - Indikator VMA, gewichtet Preise mit höherem Volumen stärker
+- [VWAP](list_of_indicators/volume_weighted_average_price.md) - Indikator VWAP, durchschnittlicher nach gehandeltem Volumen gewichteter Preis
+- [VI](list_of_indicators/vortex_indicator.md) - Indikator VI, identifiziert den Beginn neuer Trends
+- [WTO](list_of_indicators/wave_trend_oscillator.md) - Indikator WTO, erkennt Trendumkehrungen
+- [WMA](list_of_indicators/weighted_ma.md) - Indikator WMA, gewichtet jüngere Preise stärker
+- [WCP](list_of_indicators/weighted_close_price.md) - Indikator WCP, (High + Low + 2 * Close) / 4
+- [Wilder-Gleitender Durchschnitt](list_of_indicators/wilder_ma.md) - Indikator Wilder-Gleitender Durchschnitt, ein geglätteter gleitender Durchschnitt
+- [WAD](list_of_indicators/williams_accumulation_distribution.md) - Indikator WAD, misst Kauf- und Verkaufsdruck
+- [%R](list_of_indicators/williams_r.md) - Indikator %R, erkennt überkaufte und überverkaufte Bedingungen
+- [WCCI](list_of_indicators/woodies_cci.md) - Indikator WCCI, eine CCI-Variante zur Trendidentifikation
+- [ZLEMA](list_of_indicators/zero_lag_exponential_moving_average.md) - Indikator ZLEMA, reduziert Verzögerung bei EMA-Berechnungen
+- [Zig-Zag](list_of_indicators/zigzag.md) - Indikator Zig-Zag, filtert kleinere Preisbewegungen heraus, um signifikante Trends darzustellen
+
+## Hinweise
+
+Diese Liste enthält Indikatoren der technischen Analyse aus der StockSharp-Bibliothek. Jeder Indikator ist für verschiedene Aspekte der Finanzmarktanalyse ausgelegt:
+
+- Trendidentifikation
+- Volatilitätsbewertung
+- Erkennung von Wendepunkten
+- Momentum-Messung
+- Analyse des Handelsvolumens
+- Identifikation von Unterstützungs- und Widerstandsniveaus
+
+Indikatoren unterstützen Trader dabei, fundierte Entscheidungen zu treffen, indem sie historische Preisdaten analysieren und Muster identifizieren.

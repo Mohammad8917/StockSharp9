@@ -1,0 +1,120 @@
+namespace StockSharp.SnapTrade;
+
+/// <summary>The message adapter for the official SnapTrade API.</summary>
+[MediaIcon(Media.MediaNames.snaptrade)]
+[Doc("topics/api/connectors/stock_market/snaptrade.html")]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.SnapTradeKey,
+	Description = LocalizedStrings.StockConnectorKey,
+	GroupName = LocalizedStrings.AmericaKey)]
+[MessageAdapterCategory(MessageAdapterCategories.US | MessageAdapterCategories.Level1 |
+	MessageAdapterCategories.Transactions | MessageAdapterCategories.Stock)]
+[OrderCondition(typeof(SnapTradeOrderCondition))]
+public partial class SnapTradeMessageAdapter : MessageAdapter, IKeySecretAdapter
+{
+	private const string _defaultRestEndpoint = "https://api.snaptrade.com/api/v1/";
+
+	private TimeSpan _pollingInterval = TimeSpan.FromMinutes(1);
+
+	/// <summary>Partner or Personal API client identifier.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.KeyKey,
+		Description = LocalizedStrings.SnapTradeClientIdDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 0)]
+	[BasicSetting]
+	public SecureString Key { get; set; }
+
+	/// <summary>Secret used to sign SnapTrade API requests.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SecretKey,
+		Description = LocalizedStrings.SnapTradeConsumerKeyDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 1)]
+	[BasicSetting]
+	public SecureString Secret { get; set; }
+
+	/// <summary>Commercial SnapTrade user identifier. Empty for a Personal API key.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SnapTradeUserIdKey,
+		Description = LocalizedStrings.SnapTradeUserIdDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 2)]
+	[BasicSetting]
+	public string UserId { get; set; }
+
+	/// <summary>Commercial SnapTrade user secret. Empty for a Personal API key.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SnapTradeUserSecretKey,
+		Description = LocalizedStrings.SnapTradeUserSecretDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 3)]
+	[BasicSetting]
+	public SecureString UserSecret { get; set; }
+
+	/// <summary>Brokerage-account identifier. Optional only when one usable account is available.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SnapTradeAccountKey,
+		Description = LocalizedStrings.SnapTradeAccountDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 4)]
+	[BasicSetting]
+	public string AccountId { get; set; }
+
+	/// <summary>Minimum spacing between rate-aware polling jobs.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SnapTradePollingIntervalKey,
+		Description = LocalizedStrings.SnapTradePollingIntervalDescKey,
+		GroupName = LocalizedStrings.ConnectionKey,
+		Order = 5)]
+	public TimeSpan PollingInterval
+	{
+		get => _pollingInterval;
+		set => _pollingInterval = value < TimeSpan.FromSeconds(15)
+			? TimeSpan.FromSeconds(15)
+			: value;
+	}
+
+	/// <summary>REST API endpoint.</summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.RestEndpointKey,
+		Description = LocalizedStrings.RestApiEndpointDescKey,
+		GroupName = LocalizedStrings.AddressesKey,
+		Order = 6)]
+	public string RestEndpoint { get; set; } = _defaultRestEndpoint;
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.SaveAsync(storage, cancellationToken);
+		storage
+			.Set(nameof(Key), Key)
+			.Set(nameof(Secret), Secret)
+			.Set(nameof(UserId), UserId)
+			.Set(nameof(UserSecret), UserSecret)
+			.Set(nameof(AccountId), AccountId)
+			.Set(nameof(PollingInterval), PollingInterval)
+			.Set(nameof(RestEndpoint), RestEndpoint);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await base.LoadAsync(storage, cancellationToken);
+		Key = storage.GetValue<SecureString>(nameof(Key));
+		Secret = storage.GetValue<SecureString>(nameof(Secret));
+		UserId = storage.GetValue<string>(nameof(UserId));
+		UserSecret = storage.GetValue<SecureString>(nameof(UserSecret));
+		AccountId = storage.GetValue<string>(nameof(AccountId));
+		PollingInterval = storage.GetValue(nameof(PollingInterval), PollingInterval);
+		RestEndpoint = storage.GetValue(nameof(RestEndpoint), RestEndpoint);
+	}
+}

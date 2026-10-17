@@ -1,0 +1,309 @@
+namespace Ecng.Logging;
+
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Runtime.CompilerServices;
+
+using Ecng.ComponentModel;
+
+/// <summary>
+/// Logs source interface.
+/// </summary>
+public interface ILogSource : IDisposable
+{
+	/// <summary>
+	/// The unique identifier of the source.
+	/// </summary>
+	Guid Id { get; }
+
+	/// <summary>
+	/// The source name.
+	/// </summary>
+	string Name { get; set; }
+
+	/// <summary>
+	/// Parental logs source.
+	/// </summary>
+	ILogSource Parent { get; set; }
+
+	/// <summary>
+	/// <see cref="Parent"/> removed.
+	/// </summary>
+	event Action<ILogSource> ParentRemoved;
+
+	/// <summary>
+	/// The logging level for the source.
+	/// </summary>
+	LogLevels LogLevel { get; set; }
+
+	/// <summary>
+	/// Current time, which will be passed to the <see cref="LogMessage.Time"/>.
+	/// </summary>
+	DateTime CurrentTime { get; }
+
+	/// <summary>
+	/// Whether the source is the root (even if <see cref="ILogSource.Parent"/> is not equal to <see langword="null" />).
+	/// </summary>
+	bool IsRoot { get; }
+
+	/// <summary>
+	/// New debug message event.
+	/// </summary>
+	event Action<LogMessage> Log;
+}
+
+/// <summary>
+/// The base implementation <see cref="ILogSource"/>.
+/// </summary>
+public abstract class BaseLogSource : Disposable, ILogSource, IAsyncPersistable
+{
+	private readonly bool _isLevelCacheable;
+
+	/// <summary>
+	/// Initialize <see cref="BaseLogSource"/>.
+	/// </summary>
+	protected BaseLogSource()
+	{
+		var type = GetType();
+
+		_name = type.GetDisplayName();
+		_isLevelCacheable = LogLevelCache.IsCacheable(type);
+	}
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IdKey,
+		Description = LocalizedStrings.IdKey,
+		GroupName = LocalizedStrings.LoggingKey,
+		Order = 1000)]
+	[ReadOnly(true)]
+	public virtual Guid Id { get; set; } = Guid.NewGuid();
+
+	private string _name;
+
+	/// <inheritdoc />
+	[ReadOnly(true)]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.NameKey,
+		Description = LocalizedStrings.LogSourceNameKey,
+		GroupName = LocalizedStrings.LoggingKey,
+		Order = 1001)]
+	public virtual string Name
+	{
+		get => _name;
+		set
+		{
+			if (value.IsEmpty())
+				throw new ArgumentNullException(nameof(value));
+
+			_name = value;
+		}
+	}
+
+	private ILogSource _parent;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public ILogSource Parent
+	{
+		get => _parent;
+		set
+		{
+			if (value == _parent)
+				return;
+
+			if (value != null && _parent != null)
+				throw new ArgumentException($"Parent for {this} already set to {_parent}", nameof(value));
+
+			if (value == this)
+				throw new ArgumentException($"Cyclic dependency detected for {this}.", nameof(value));
+
+			if (value != null)
+			{
+				var slow = value;
+				var fast = value;
+
+				while (true)
+				{
+					if (ReferenceEquals(slow, this))
+						throw new ArgumentException($"Cyclic dependency detected for {this}.", nameof(value));
+
+					if (ReferenceEquals(fast, this))
+						throw new ArgumentException($"Cyclic dependency detected for {this}.", nameof(value));
+
+					if (fast?.Parent == this)
+						throw new ArgumentException($"Cyclic dependency detected for {this}.", nameof(value));
+
+					// end if chain terminates
+					if (fast == null || fast.Parent == null)
+						break;
+
+					// advance pointers
+					slow = slow.Parent;
+					fast = fast.Parent.Parent;
+
+					if (ReferenceEquals(slow, fast))
+						throw new ArgumentException($"Cyclic dependency detected for {this}.", nameof(value));
+				}
+			}
+
+			_parent = value;
+
+			LogLevelCache.Invalidate();
+
+			if (_parent == null)
+				ParentRemoved?.Invoke(this);
+		}
+	}
+
+	/// <inheritdoc />
+	public event Action<ILogSource> ParentRemoved;
+
+	private LogLevels _logLevel = LogLevels.Inherit;
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.LogLevelKey,
+		Description = LocalizedStrings.LogLevelDescKey,
+		GroupName = LocalizedStrings.LoggingKey,
+		Order = 1001)]
+	public virtual LogLevels LogLevel
+	{
+		get => _logLevel;
+		set
+		{
+			if (_logLevel == value)
+				return;
+
+			_logLevel = value;
+
+			LogLevelCache.Invalidate();
+		}
+	}
+
+	// Two answers, never both in the same set: either the level is known, or it is only known
+	// where the walk still has to start. They are kept apart so that reading the level - the read
+	// on every log call - touches one field and nothing else.
+	private LogLevelEntry _levelCache;
+	private LogLevelWalk _walkCache;
+
+	/// <summary>
+	/// Whether this source keeps <see cref="LogLevel"/> and <see cref="Parent"/> where its own
+	/// setters can invalidate the cache, so a walk crossing it may be remembered.
+	/// </summary>
+	internal bool IsLevelCacheable => _isLevelCacheable;
+
+	/// <summary>
+	/// The level last remembered for this source, whichever set it was remembered in.
+	/// </summary>
+	internal LogLevelEntry LevelCache
+	{
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		get => Volatile.Read(ref _levelCache);
+	}
+
+	/// <summary>
+	/// The starting point last remembered for this source, whichever set it was remembered in.
+	/// </summary>
+	internal LogLevelWalk WalkCache
+	{
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		get => Volatile.Read(ref _walkCache);
+	}
+
+	/// <summary>
+	/// Remember <paramref name="entry"/> as the effective level of this source.
+	/// </summary>
+	/// <param name="entry">The entry, already made in the set it is to be read back in.</param>
+	internal void SetCachedLogLevel(LogLevelEntry entry)
+	{
+		// One reference write, so a reader sees the level and the set it was computed in as one
+		// pair - two sources answering at once leave one whole entry or the other, never a mix.
+		Volatile.Write(ref _levelCache, entry);
+	}
+
+	/// <summary>
+	/// Remember that the answer for this source is whatever walking from <paramref name="from"/>
+	/// gives, because from there on a level can move without the cache being told.
+	/// </summary>
+	/// <param name="current">The set the walk was made in.</param>
+	/// <param name="from">The link the walk has to start from.</param>
+	internal void SetCachedWalk(LogLevelEntry[] current, ILogSource from)
+		=> Volatile.Write(ref _walkCache, new(current, from));
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual DateTime CurrentTime => TimeHelper.Now;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public bool IsRoot { get; set; }
+
+	private Action<LogMessage> _log;
+
+	/// <inheritdoc />
+	public event Action<LogMessage> Log
+	{
+		add => _log += value;
+		remove => _log -= value;
+	}
+
+	/// <summary>
+	/// To call the event <see cref="ILogSource.Log"/>.
+	/// </summary>
+	/// <param name="message">A debug message.</param>
+	protected virtual void RaiseLog(LogMessage message)
+	{
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		var level = message.Source.GetLogLevel();
+
+		if (level != LogLevels.Inherit && message.Level < level)
+			return;
+
+		_log?.Invoke(message);
+
+		var parent = Parent as ILogReceiver;
+
+		parent?.AddLog(message);
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return Name;
+	}
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		LogLevel = storage.GetValue(nameof(LogLevel), LogLevels.Inherit);
+		Name = storage.GetValue(nameof(Name), Name);
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage.SetValue(nameof(LogLevel), LogLevel.To<string>());
+		storage.SetValue(nameof(Name), Name);
+
+		return Task.CompletedTask;
+	}
+}

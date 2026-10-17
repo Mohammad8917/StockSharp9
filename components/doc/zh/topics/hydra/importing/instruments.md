@@ -1,0 +1,32 @@
+# 交易品种
+
+要导入交易品种，请打开 **导入 \=\> 交易品种** 选项卡。
+
+![交易品种 截图 1](../../../images/hydra_import_securities.png)
+
+## 导入过程
+
+1. **导入设置**
+
+   请参阅[K线](candles.md)导入说明。
+2. 配置 [S#](../../api.md) 字段的导入参数。
+
+   请参阅[K线](candles.md)导入说明。
+
+   **下面以从 CSV 文件导入交易品种为例：**
+   - 要导入数据的文件使用以下模板：
+
+     ```none
+     {SecurityId.SecurityCode};{SecurityId.BoardCode};{PriceStep};{SecurityType};{VolumeStep}
+
+     ```
+
+     其中，{SecurityId.SecurityCode} 和 {SecurityId.BoardCode} 分别对应 **交易品种** 和 **交易板块**。因此，在 **字段顺序** 字段中分别为其分配序号 0 和 1。
+   - 对于 {PriceStep} 字段，在 **S# 字段** 窗口中选择 **名义值**，并将其序号设为 2。
+   - 对于 {SecurityType} 字段，在 **S# 字段** 窗口中选择表示交易品种类型（股票、货币、期货等）的 **类型**，并将其序号设为 3。
+   - 对于 {VolumeStep} 字段，在 **S# 字段** 窗口中选择表示基础或最小交易数量的 **最小数量（基础）**，并将其序号设为 4。
+   - 字段设置窗口将如下所示：![交易品种 截图 2](../../../images/hydra_import_prop_securitiy.png)
+
+   用户可以为导入的数据配置大量属性。需要根据导入文件模板指定属性，并为其分配对应的排列序号。
+3. 要预览数据，请单击 **预览** 按钮。![交易品种 截图 3](../../../images/hydra_import_preview_securitiy.png)
+4. 单击 **导入** 按钮。

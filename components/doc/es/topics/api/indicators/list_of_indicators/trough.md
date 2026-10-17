@@ -1,0 +1,11 @@
+# Valle
+
+El indicador **valle** muestra el valor mínimo para el período.
+
+Para utilizar el indicador, debe utilizar la clase [Trough](xref:StockSharp.Algo.Indicators.Trough). 
+
+![Gráfico del indicador Valle](../../../../images/indicatortrough.png)
+
+## Contenido recomendado
+
+[Rango verdadero](true_range.md)

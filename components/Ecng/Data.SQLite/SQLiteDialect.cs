@@ -1,0 +1,533 @@
+namespace Ecng.Data;
+
+using System;
+using System.Collections.Generic;
+using System.Data.Common;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Ecng.Common;
+using Ecng.Data.Sql;
+
+/// <summary>
+/// SQLite dialect implementation.
+/// </summary>
+public class SQLiteDialect : SqlDialectBase
+{
+	/// <summary>
+	/// Singleton instance.
+	/// </summary>
+	public static readonly SQLiteDialect Instance = new();
+
+	private SQLiteDialect() { }
+
+	/// <summary>
+	/// Registers the SQLite dialect and provider factory with <see cref="DatabaseProviderRegistry"/>.
+	/// </summary>
+	/// <param name="factory">The <see cref="DbProviderFactory"/> for SQLite.</param>
+	public static void Register(DbProviderFactory factory)
+	{
+		DatabaseProviderRegistry.Register(DatabaseProviderRegistry.SQLite, factory);
+		DatabaseProviderRegistry.RegisterDialect(DatabaseProviderRegistry.SQLite, Instance);
+	}
+
+	/// <inheritdoc />
+	public override int MaxParameters => 900; // SQLite default limit is 999, use 900 for safety
+
+	/// <inheritdoc />
+	public override string ParameterPrefix => "@";
+
+	/// <inheritdoc />
+	public override string QuoteIdentifier(string identifier)
+		=> $"\"{identifier.Replace("\"", "\"\"")}\"";
+
+	/// <inheritdoc />
+	public override string GetSqlTypeName(Type clrType)
+	{
+		var underlying = clrType.GetUnderlyingType() ?? clrType;
+
+		// SQLite has dynamic typing, but we use affinity types
+		return underlying switch
+		{
+			_ when underlying == typeof(int) => "INTEGER",
+			_ when underlying == typeof(long) => "INTEGER",
+			_ when underlying == typeof(short) => "INTEGER",
+			_ when underlying == typeof(byte) => "INTEGER",
+			_ when underlying == typeof(bool) => "INTEGER",
+			_ when underlying == typeof(decimal) => "TEXT",
+			_ when underlying == typeof(double) => "REAL",
+			_ when underlying == typeof(float) => "REAL",
+			_ when underlying == typeof(string) => "TEXT",
+			_ when underlying == typeof(DateTime) => "TEXT", // ISO8601 format
+			_ when underlying == typeof(DateTimeOffset) => "TEXT",
+			_ when underlying == typeof(TimeSpan) => "INTEGER", // stored as ticks
+			_ when underlying == typeof(Guid) => "TEXT",
+			_ when underlying == typeof(byte[]) => "BLOB",
+			_ when underlying == typeof(DateOnly) => "TEXT", // ISO8601 date format
+			_ when underlying == typeof(TimeOnly) => "TEXT", // ISO8601 time format
+			_ => throw new NotSupportedException($"Type {clrType.Name} is not supported"),
+		};
+	}
+
+	/// <inheritdoc />
+	public override string GetIdentitySelect(string idCol) => "last_insert_rowid() as " + QuoteIdentifier(idCol);
+
+	/// <inheritdoc />
+	public override string ConcatOperator => "||";
+
+	/// <inheritdoc />
+	public override string UnicodePrefix => "";
+
+	/// <inheritdoc />
+	public override string LenFunction => "LENGTH";
+
+	/// <inheritdoc />
+	public override string IsNullFunction => "coalesce";
+
+	/// <inheritdoc />
+	public override string DecimalComparisonCastSqlType => "NUMERIC";
+
+	/// <inheritdoc />
+	/// <remarks>
+	/// CAST(3 AS NUMERIC) stays the integer 3, and 3 / 4 is then integer division. SQLite has no
+	/// decimal type: a decimal stored as text already turns into a REAL in arithmetic.
+	/// </remarks>
+	public override string GetIntegerToDecimalCastSqlType(int precision) => "REAL";
+
+	/// <inheritdoc />
+	public override bool KeepsDecimalDigits => false;
+
+	/// <inheritdoc />
+	public override bool CanAlterColumn => false;
+
+	/// <inheritdoc />
+	public override void AppendDatePartOpen(StringBuilder sb, string part)
+	{
+		// SQLite doesn't have EXTRACT or DATEPART natively.
+		// Use strftime format specifiers mapped from standard part names.
+		var fmt = part switch
+		{
+			"year" => "%Y",
+			"month" => "%m",
+			"day" => "%d",
+			"hour" => "%H",
+			"minute" => "%M",
+			"second" => "%S",
+			"dayofyear" => "%j",
+			_ => throw new NotSupportedException($"Date part '{part}' is not supported in SQLite"),
+		};
+		sb.Append($"CAST(strftime('{fmt}',");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDatePartClose(StringBuilder sb)
+	{
+		sb.Append(") AS INTEGER)");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDateAdd(StringBuilder sb, string part, string amountSql, string sourceSql)
+	{
+		var sqlitePart = part switch
+		{
+			"year" => "years",
+			"month" => "months",
+			"day" => "days",
+			"hour" => "hours",
+			"minute" => "minutes",
+			"second" => "seconds",
+			_ => throw new NotSupportedException($"Date part '{part}' is not supported for DATEADD in SQLite"),
+		};
+		sb.Append($"datetime({sourceSql}, ({amountSql}) || ' {sqlitePart}')");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDateDiff(StringBuilder sb, string part, string startSql, string endSql)
+	{
+		// SQLite has no DATEDIFF. julianday() returns a (fractional) day count, so the
+		// difference of two julianday values is the gap in days, scaled to the target
+		// unit. Month/year use mean lengths (30.4375 / 365.25 days) since calendar
+		// boundaries are not representable from a day delta.
+		var perDayUnits = part switch
+		{
+			"year" => "(1.0 / 365.25)",
+			"month" => "(1.0 / 30.4375)",
+			"week" => "(1.0 / 7)",
+			"day" => "1",
+			"hour" => "24",
+			"minute" => "1440",
+			"second" => "86400",
+			"millisecond" => "86400000",
+			_ => throw new NotSupportedException($"Date part '{part}' is not supported for DATEDIFF in SQLite"),
+		};
+
+		sb.Append($"((julianday({endSql}) - julianday({startSql})) * {perDayUnits})");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>SQLite's % casts both operands to INTEGER; the math function mod() keeps the fraction.</remarks>
+	public override void AppendDecimalModulo(StringBuilder sb, string dividendSql, string divisorSql)
+	{
+		sb.Append($"mod({dividendSql}, {divisorSql})");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>trunc() is one of SQLite's math functions and takes no digits argument.</remarks>
+	protected override void AppendTruncate(StringBuilder sb, string valueSql, string digitsSql)
+	{
+		if (digitsSql is not null)
+			throw new NotSupportedException("SQLite cannot truncate to a number of fractional digits.");
+
+		sb.Append($"trunc({valueSql})");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>The two-argument max() is SQLite's scalar function; only the one-argument form aggregates.</remarks>
+	public override void AppendGreatest(StringBuilder sb, string leftSql, string rightSql)
+	{
+		sb.Append($"max({leftSql}, {rightSql})");
+	}
+
+	/// <inheritdoc />
+	/// <remarks>The two-argument min() is SQLite's scalar function; only the one-argument form aggregates.</remarks>
+	public override void AppendLeast(StringBuilder sb, string leftSql, string rightSql)
+	{
+		sb.Append($"min({leftSql}, {rightSql})");
+	}
+
+	/// <inheritdoc />
+	public override void AppendTrimOpen(StringBuilder sb)
+	{
+		sb.Append("TRIM(");
+	}
+
+	/// <inheritdoc />
+	public override void AppendTrimClose(StringBuilder sb)
+	{
+		sb.Append(")");
+	}
+
+	/// <inheritdoc />
+	public override string FormatSkip(string skip) => $"OFFSET {skip}";
+
+	/// <inheritdoc />
+	public override string FormatTake(string take) => $"LIMIT {take}";
+
+	/// <inheritdoc />
+	public override void AppendPaginationParams(StringBuilder sb, string skipParamExpr, string takeParamExpr)
+	{
+		// SQLite: LIMIT first (required for OFFSET), then OFFSET
+		if (takeParamExpr is not null)
+			sb.AppendLine(FormatTake(takeParamExpr));
+		else if (skipParamExpr is not null)
+			sb.AppendLine("LIMIT -1"); // SQLite requires LIMIT when using OFFSET
+		if (skipParamExpr is not null)
+			sb.AppendLine(FormatSkip(skipParamExpr));
+	}
+
+	/// <inheritdoc />
+	public override string Now() => "datetime('now', 'localtime')";
+
+	/// <inheritdoc />
+	public override string UtcNow() => "datetime('now')";
+
+	/// <inheritdoc />
+	public override string SysNow() => "datetime('now', 'localtime')";
+
+	/// <inheritdoc />
+	public override string SysUtcNow() => "datetime('now')";
+
+	/// <inheritdoc />
+	public override string NewId()
+		=> "lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(2)) || '-' || hex(randomblob(6)))";
+
+	/// <inheritdoc />
+	public override string GetIdentityColumnSuffix() => "PRIMARY KEY AUTOINCREMENT";
+
+	/// <inheritdoc />
+	public override void AppendCreateTable(StringBuilder sb, string tableName, string columnDefs)
+	{
+		sb.Append($"CREATE TABLE IF NOT EXISTS {QuoteIdentifier(tableName)} ({columnDefs})");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDropTable(StringBuilder sb, string tableName)
+	{
+		sb.Append($"DROP TABLE IF EXISTS {QuoteIdentifier(tableName)}");
+	}
+
+	/// <inheritdoc />
+	public override void AppendPagination(StringBuilder sb, long? skip, long? take, bool hasOrderBy)
+	{
+		if (!skip.HasValue && !take.HasValue)
+			return;
+
+		if (take.HasValue)
+			sb.Append($" LIMIT {take.Value}");
+		else if (skip.HasValue)
+			sb.Append(" LIMIT -1");
+
+		if (skip.HasValue)
+			sb.Append($" OFFSET {skip.Value}");
+	}
+
+	/// <summary>
+	/// Builds the SELECT that lists user tables from <c>sqlite_master</c>.
+	/// Routed through <see cref="Query"/> so the catalogue probe stays
+	/// aligned with the rest of the dialect's SQL emission.
+	/// </summary>
+	internal string BuildListUserTablesSql()
+		=> "select \"name\" from sqlite_master where \"type\" = 'table' and \"name\" not like 'sqlite!_%' ESCAPE '!' order by \"name\"";
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbColumnInfo>> ReadDbSchemaAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		var result = new List<DbColumnInfo>();
+
+		// get all table names
+		var tables = new List<string>();
+
+		using (var cmd = connection.CreateCommand())
+		{
+			cmd.CommandText = BuildListUserTablesSql();
+
+			using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+			while (await reader.ReadAsync(cancellationToken))
+				tables.Add(reader.GetString(0));
+		}
+
+		// read columns per table via pragma
+		foreach (var table in tables)
+		{
+			using var cmd = connection.CreateCommand();
+			cmd.CommandText = $"PRAGMA table_xinfo({QuoteIdentifier(table)})";
+
+			using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+			while (await reader.ReadAsync(cancellationToken))
+			{
+				// table_xinfo columns: cid, name, type, notnull, dflt_value, pk, hidden
+				var hidden = reader.GetInt32(6);
+				result.Add(new DbColumnInfo(
+					TableName: table,
+					ColumnName: reader.GetString(1),
+					DataType: reader.GetString(2),
+					IsNullable: reader.GetInt32(3) == 0,
+					MaxLength: null,
+					NumericPrecision: null,
+					NumericScale: null,
+					IsComputed: hidden is 2 or 3
+				));
+			}
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbForeignKeyInfo>> ReadDbForeignKeysAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		var result = new List<DbForeignKeyInfo>();
+
+		var tables = new List<string>();
+		using (var cmd = connection.CreateCommand())
+		{
+			cmd.CommandText = BuildListUserTablesSql();
+			using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+			while (await reader.ReadAsync(cancellationToken))
+				tables.Add(reader.GetString(0));
+		}
+
+		foreach (var table in tables)
+		{
+			using var cmd = connection.CreateCommand();
+			cmd.CommandText = $"PRAGMA foreign_key_list({QuoteIdentifier(table)})";
+
+			using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+			while (await reader.ReadAsync(cancellationToken))
+			{
+				// PRAGMA foreign_key_list columns:
+				// id, seq, table, from, to, on_update, on_delete, match
+				var refTable = reader.GetString(2);
+				var fromCol = reader.GetString(3);
+				var toCol = reader.IsDBNull(4) ? "Id" : reader.GetString(4);
+
+				// SQLite does not name FK constraints — synthesise a stable
+				// label from the column pair so the diff layer can match
+				// MissingForeignKey/ExtraForeignKey deterministically.
+				result.Add(new DbForeignKeyInfo(
+					ConstraintName: $"FK_{table}_{fromCol}",
+					TableName: table,
+					ColumnName: fromCol,
+					RefTableName: refTable,
+					RefColumnName: toCol));
+			}
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	public override async Task<IReadOnlyList<DbIndexInfo>> ReadDbIndexesAsync(
+		DbConnection connection,
+		string tableSchema = null,
+		CancellationToken cancellationToken = default)
+	{
+		var result = new List<DbIndexInfo>();
+
+		var tables = new List<string>();
+		using (var cmd = connection.CreateCommand())
+		{
+			cmd.CommandText = BuildListUserTablesSql();
+			using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+			while (await reader.ReadAsync(cancellationToken))
+				tables.Add(reader.GetString(0));
+		}
+
+		foreach (var table in tables)
+		{
+			// PRAGMA index_list yields one row per index with: seq, name,
+			// unique, origin ("c"=user-created via CREATE INDEX, "u"=UNIQUE
+			// constraint, "pk"=PRIMARY KEY), partial. We surface every index
+			// so the migrator can match against entity-declared
+			// [Index]/[Unique]/[Identity] attributes.
+			var indexList = new List<(string Name, bool Unique, string Origin)>();
+			using (var cmd = connection.CreateCommand())
+			{
+				cmd.CommandText = $"PRAGMA index_list({QuoteIdentifier(table)})";
+				using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+				while (await reader.ReadAsync(cancellationToken))
+				{
+					indexList.Add((
+						Name: reader.GetString(1),
+						Unique: reader.GetInt32(2) != 0,
+						Origin: reader.GetString(3)));
+				}
+			}
+
+			foreach (var (name, unique, origin) in indexList)
+			{
+				// PRAGMA index_info yields one row per indexed column with:
+				// seqno (0-based), cid (column id in table), name.
+				using var cmd = connection.CreateCommand();
+				cmd.CommandText = $"PRAGMA index_info({QuoteIdentifier(name)})";
+				using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+				while (await reader.ReadAsync(cancellationToken))
+				{
+					if (reader.IsDBNull(2))
+						continue;
+
+					result.Add(new DbIndexInfo(
+						IndexName: name,
+						TableName: table,
+						ColumnName: reader.GetString(2),
+						ColumnOrdinal: reader.GetInt32(0) + 1,
+						IsUnique: unique,
+						IsPrimaryKey: origin.EqualsIgnoreCase("pk")));
+				}
+			}
+		}
+
+		return result;
+	}
+
+	/// <inheritdoc />
+	public override string NormalizeDbType(string dbTypeName)
+	{
+		var normalized = dbTypeName.Trim().ToUpperInvariant();
+		var parenIndex = normalized.IndexOf('(');
+
+		if (parenIndex >= 0)
+			normalized = normalized[..parenIndex].Trim();
+
+		return normalized switch
+		{
+			"INTEGER" or "INT" or "BIGINT" or "SMALLINT" or "TINYINT" => "INTEGER",
+			"REAL" or "FLOAT" or "DOUBLE" or "DOUBLE PRECISION" or "NUMERIC" or "DECIMAL" => "REAL",
+			"TEXT" or "VARCHAR" or "NVARCHAR" or "CHAR" or "NCHAR" or "CLOB" => "TEXT",
+			"BLOB" or "VARBINARY" or "BINARY" or "BYTEA" => "BLOB",
+			// SQLite has no temporal type and GetSqlTypeName emits TEXT for all of them, so a
+			// column declared DATE elsewhere has to fold to the same TEXT. Without this it
+			// differs from its property on every comparison, and SQLite cannot alter a column
+			// type to settle it.
+			"DATE" or "TIME" or "DATETIME" or "TIMESTAMP" => "TEXT",
+			var other => other,
+		};
+	}
+
+	/// <inheritdoc />
+	public override bool SupportsAddForeignKeyViaAlter => false;
+
+	/// <inheritdoc />
+	public override void AppendAddForeignKey(StringBuilder sb, string tableName, string columnName, string refTableName, string refColumnName)
+	{
+		// SQLite does not support ALTER TABLE ADD CONSTRAINT for foreign keys —
+		// an FK can only be declared at CREATE TABLE time. Emitting a comment
+		// here previously let the migrator declare success while the
+		// constraint was silently dropped on the floor; surface the
+		// limitation to the caller instead.
+		throw new NotSupportedException(
+			$"SQLite cannot ALTER TABLE ADD CONSTRAINT FK on {tableName}.{columnName} → {refTableName}.{refColumnName}. " +
+			"Foreign keys must be declared inside CREATE TABLE in SQLite; " +
+			"recreate the table via the table-rename migration pattern.");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDropForeignKey(StringBuilder sb, string tableName, string constraintName)
+	{
+		// SQLite has no per-constraint ALTER TABLE DROP CONSTRAINT either —
+		// FKs disappear only when the table is dropped or recreated.
+		throw new NotSupportedException(
+			$"SQLite cannot ALTER TABLE DROP CONSTRAINT {constraintName} on {tableName}; " +
+			"recreate the table via the table-rename migration pattern.");
+	}
+
+	/// <inheritdoc />
+	public override void AppendAlterColumn(StringBuilder sb, string tableName, string columnName, Type clrType, bool isNullable, int maxLength, int precision, int scale, DbColumnInfo live)
+	{
+		// SQLite's ALTER TABLE … ALTER COLUMN does not exist — only
+		// RENAME COLUMN and a few specific cases were added in 3.25/3.35.
+		// Generic type/nullability changes need the table-rename dance.
+		throw new NotSupportedException(
+			$"SQLite cannot ALTER COLUMN ({tableName}.{columnName}). Use the table-rename migration pattern: " +
+			"create a new table with the desired schema, copy rows, drop the old table, rename the new one.");
+	}
+
+	/// <inheritdoc />
+	public override void AppendDropColumn(StringBuilder sb, string tableName, string columnName)
+	{
+		// DROP COLUMN landed in SQLite 3.35 (2021) but with a number of
+		// caveats — falls back to the table-rename pattern in our migrator
+		// to stay consistent across SQLite versions.
+		throw new NotSupportedException(
+			$"SQLite DROP COLUMN ({tableName}.{columnName}) is version-dependent and not used by this dialect. " +
+			"Use the table-rename migration pattern: create a new table without the column, copy rows, drop the old, rename.");
+	}
+
+	/// <inheritdoc />
+	public override void AppendUpsert(StringBuilder sb, string tableName, string[] allColumns, string[] keyColumns)
+	{
+		var nonKeys = allColumns.Except(keyColumns).ToArray();
+		var quotedTable = QuoteIdentifier(tableName);
+		var insertCols = allColumns.Select(QuoteIdentifier).JoinCommaSpace();
+		var insertParams = allColumns.Select(c => ParameterPrefix + c).JoinCommaSpace();
+		var conflictCols = keyColumns.Select(QuoteIdentifier).JoinCommaSpace();
+
+		sb.Append($"INSERT INTO {quotedTable} ({insertCols}) VALUES ({insertParams}) ON CONFLICT ({conflictCols})");
+
+		if (nonKeys.Length == 0)
+			sb.Append(" DO NOTHING");
+		else
+			sb.Append($" DO UPDATE SET {nonKeys.Select(c => $"{QuoteIdentifier(c)} = excluded.{QuoteIdentifier(c)}").JoinCommaSpace()}");
+	}
+}

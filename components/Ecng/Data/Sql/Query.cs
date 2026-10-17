@@ -1,0 +1,1277 @@
+namespace Ecng.Data.Sql;
+
+using System.Linq;
+using System.Diagnostics;
+
+using Ecng.Collections;
+using Ecng.Common;
+
+/// <summary>
+/// Represents a composable SQL query built from a sequence of render actions.
+/// </summary>
+[Serializable]
+[DebuggerDisplay($"{{{nameof(DebuggerString)}}}")]
+public class Query
+{
+	/// <summary>
+	/// Parameter name used for SELECT pagination offset.
+	/// </summary>
+	public const string SkipParameterName = "skip";
+
+	/// <summary>
+	/// Parameter name used for SELECT pagination limit.
+	/// </summary>
+	public const string TakeParameterName = "take";
+
+	private string DebuggerString => $"Query({Actions.Count} actions)";
+
+	/// <summary>
+	/// List of render actions that produce the SQL text.
+	/// </summary>
+	public IList<Action<ISqlDialect, StringBuilder>> Actions { get; } = [];
+
+	/// <summary>
+	/// Copies all actions from this query to the <paramref name="destination"/> query.
+	/// </summary>
+	/// <param name="destination">Target query to copy actions into.</param>
+	public void CopyTo(Query destination)
+		=> destination.CheckOnNull(nameof(destination)).Actions.AddRange(Actions);
+
+	#region Render
+
+	/// <summary>
+	/// Renders the query to a SQL string using the specified dialect.
+	/// </summary>
+	/// <param name="dialect">SQL dialect used for quoting and formatting.</param>
+	/// <returns>Rendered SQL string.</returns>
+	public virtual string Render(ISqlDialect dialect)
+	{
+		var builder = new StringBuilder();
+
+		foreach (var action in Actions)
+			action(dialect, builder);
+
+		return builder.ToString();
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Appends CASE keyword.
+	/// </summary>
+	public Query Case()
+		=> AddAction((dialect, builder) => builder.Append("case"));
+
+	/// <summary>
+	/// Appends WHEN keyword.
+	/// </summary>
+	public Query When()
+		=> AddAction((dialect, builder) => builder.Append("when "));
+
+	/// <summary>
+	/// Appends THEN keyword.
+	/// </summary>
+	public Query Then()
+		=> AddAction((dialect, builder) => builder.Append(" then "));
+
+	/// <summary>
+	/// Appends IF keyword.
+	/// </summary>
+	public Query If()
+		=> AddAction((dialect, builder) => builder.Append("if "));
+
+	/// <summary>
+	/// Appends ELSE keyword.
+	/// </summary>
+	public Query Else()
+		=> AddAction((dialect, builder) => builder.Append("else "));
+
+	/// <summary>
+	/// Appends BEGIN keyword.
+	/// </summary>
+	public Query Begin()
+		=> AddAction((dialect, builder) => builder.Append("begin"));
+
+	/// <summary>
+	/// Appends END keyword.
+	/// </summary>
+	public Query End()
+		=> AddAction((dialect, builder) => builder.Append("end"));
+
+	#region Join
+
+	/// <summary>
+	/// Appends INNER JOIN keyword.
+	/// </summary>
+	public Query InnerJoin() => Raw("inner join ");
+
+	/// <summary>
+	/// Appends LEFT JOIN keyword.
+	/// </summary>
+	public Query LeftJoin() => Raw("left join ");
+
+	#endregion
+
+	#region On
+
+	/// <summary>
+	/// Appends ON keyword.
+	/// </summary>
+	public Query On()
+		=> Raw(" on ");
+
+	#endregion
+
+	/// <summary>
+	/// Appends SELECT keyword.
+	/// </summary>
+	public Query Select()
+		=> AddAction((dialect, builder) => builder.Append("select "));
+
+	/// <summary>
+	/// Appends DISTINCT keyword.
+	/// </summary>
+	public Query Distinct()
+		=> AddAction((dialect, builder) => builder.Append("distinct "));
+
+	/// <summary>
+	/// Appends TOP clause with the specified row count.
+	/// </summary>
+	/// <param name="top">Maximum number of rows.</param>
+	public Query Top(long top) => AddAction((dialect, builder) => builder.Append($"top {top} "));
+
+	/// <summary>
+	/// Appends COUNT keyword.
+	/// </summary>
+	public Query Count()
+		=> AddAction((dialect, builder) => builder.Append("count"));
+
+	/// <summary>
+	/// Appends the * wildcard.
+	/// </summary>
+	public Query Star()
+		=> AddAction((dialect, builder) => builder.Append('*'));
+
+	/// <summary>
+	/// Appends alias.* to select all columns from a table alias.
+	/// </summary>
+	/// <param name="tableAlias">Table alias.</param>
+	public Query All(string tableAlias)
+		=> AddAction((dialect, builder) => builder.Append($"{dialect.QuoteIdentifier(tableAlias)}.*"));
+
+	/// <summary>
+	/// Appends a comma-separated list of specific columns from a table alias.
+	/// </summary>
+	/// <param name="tableAlias">Table alias.</param>
+	/// <param name="columns">Column names to include.</param>
+	public Query Exact(string tableAlias, params string[] columns)
+	{
+		return AddAction((dialect, builder) =>
+		{
+			var quotedAlias = dialect.QuoteIdentifier(tableAlias);
+			foreach (var column in columns)
+				builder.AppendFormat("{0}.{1}, ", quotedAlias, dialect.QuoteIdentifier(column));
+
+			if (columns.Length > 0)
+				builder.RemoveLast(2);
+		});
+	}
+
+	/// <summary>
+	/// Appends the dialect-specific identity select expression.
+	/// </summary>
+	/// <param name="idCol">Identity column name.</param>
+	public Query Identity(string idCol)
+		=> AddAction((dialect, builder) => builder.Append(dialect.GetIdentitySelect(idCol)));
+
+	/// <summary>
+	/// Appends FROM keyword.
+	/// </summary>
+	public Query From() => Raw("from ");
+
+	/// <summary>
+	/// Appends a quoted table name followed by its alias.
+	/// </summary>
+	/// <param name="tableName">Table name.</param>
+	/// <param name="alias">Table alias.</param>
+	public Query Table(string tableName, string alias)
+		=> AddAction((dialect, builder) =>
+		{
+			builder.Append(dialect.QuoteIdentifier(tableName));
+			if (!alias.IsEmpty())
+				builder.Append(' ').Append(dialect.QuoteIdentifier(alias));
+		});
+
+	/// <summary>
+	/// Appends GROUP BY keyword.
+	/// </summary>
+	public Query GroupBy()
+		=> AddAction((dialect, builder) => builder.Append("group by "));
+
+	/// <summary>
+	/// Appends HAVING keyword.
+	/// </summary>
+	public Query Having()
+		=> AddAction((dialect, builder) => builder.Append("having"));
+
+	/// <summary>
+	/// Appends a new line.
+	/// </summary>
+	public Query NewLine()
+		=> AddAction((dialect, builder) => builder.AppendLine());
+
+	#region Keywords
+
+	/// <summary>
+	/// Appends IN keyword.
+	/// </summary>
+	public Query In()
+		=> AddAction((dialect, builder) => builder.Append(" in "));
+
+	/// <summary>
+	/// Appends WHERE keyword.
+	/// </summary>
+	public Query Where()
+		=> AddAction((dialect, builder) => builder.Append("where"));
+
+	/// <summary>
+	/// Appends bitwise AND operator.
+	/// </summary>
+	public Query BitwiseAnd()
+		=> AddAction((dialect, builder) => builder.Append(" & "));
+
+	/// <summary>
+	/// Appends bitwise OR operator.
+	/// </summary>
+	public Query BitwiseOr()
+		=> AddAction((dialect, builder) => builder.Append(" | "));
+
+	/// <summary>
+	/// Appends AND keyword.
+	/// </summary>
+	public Query And()
+		=> AddAction((dialect, builder) => builder.Append(" and "));
+
+	/// <summary>
+	/// Appends OR keyword.
+	/// </summary>
+	public Query Or()
+		=> AddAction((dialect, builder) => builder.Append(" or "));
+
+	/// <summary>
+	/// Appends IS keyword.
+	/// </summary>
+	public Query Is()
+		=> AddAction((dialect, builder) => builder.Append(" is "));
+
+	/// <summary>
+	/// Appends IS NOT keyword.
+	/// </summary>
+	public Query IsNot()
+		=> AddAction((dialect, builder) => builder.Append(" is not "));
+
+	/// <summary>
+	/// Appends NOT keyword.
+	/// </summary>
+	public Query Not()
+		=> AddAction((dialect, builder) => builder.Append("not "));
+
+	/// <summary>
+	/// Appends = operator.
+	/// </summary>
+	public Query Equal()
+		=> AddAction((dialect, builder) => builder.Append(" = "));
+
+	/// <summary>
+	/// Appends &lt;&gt; operator.
+	/// </summary>
+	public Query NotEqual()
+		=> AddAction((dialect, builder) => builder.Append(" <> "));
+
+	/// <summary>
+	/// Appends &lt; operator.
+	/// </summary>
+	public Query Less()
+		=> AddAction((dialect, builder) => builder.Append(" < "));
+
+	/// <summary>
+	/// Appends &lt;= operator.
+	/// </summary>
+	public Query LessOrEqual()
+		=> AddAction((dialect, builder) => builder.Append(" <= "));
+
+	/// <summary>
+	/// Appends &gt; operator.
+	/// </summary>
+	public Query More()
+		=> AddAction((dialect, builder) => builder.Append(" > "));
+
+	/// <summary>
+	/// Appends &gt;= operator.
+	/// </summary>
+	public Query MoreOrEqual()
+		=> AddAction((dialect, builder) => builder.Append(" >= "));
+
+	/// <summary>
+	/// Appends NULL keyword.
+	/// </summary>
+	public Query Null()
+		=> AddAction((dialect, builder) => builder.Append("null"));
+
+	/// <summary>
+	/// Queue of wrapping actions applied around column references.
+	/// Translation-scoped: a single instance is shared between all
+	/// <see cref="Query"/> objects produced for one query translation
+	/// pass and is mutated single-threaded by that pass. Concurrent use
+	/// across translation Contexts is not supported.
+	/// The <see cref="bool"/> argument signals direction: <c>true</c>
+	/// before the column is emitted, <c>false</c> after.
+	/// </summary>
+	public Queue<Action<bool, Query>> WrapColumn;
+
+	/// <summary>
+	/// Appends a qualified column reference (owner.column).
+	/// </summary>
+	/// <param name="owner">Table alias or owner name.</param>
+	/// <param name="column">Column name.</param>
+	public Query Column(string owner, string column)
+	{
+		var actions = WrapColumn?.ToArray();
+
+		if (actions is not null)
+		{
+			foreach (var action in actions)
+				action(true, this);
+		}
+
+		AddAction((dialect, builder) =>
+			builder
+				.Append(dialect.QuoteIdentifier(owner))
+				.Append('.')
+				.Append(dialect.QuoteIdentifier(column)));
+
+		if (actions is not null)
+		{
+			foreach (var action in Enumerable.Reverse(actions))
+				action(false, this);
+		}
+
+		return this;
+	}
+
+	/// <summary>
+	/// Appends a quoted column reference.
+	/// </summary>
+	/// <param name="column">Column name.</param>
+	public Query Column(string column)
+		=> AddAction((dialect, builder) => builder.Append(dialect.QuoteIdentifier(column)));
+
+	/// <summary>
+	/// Appends dialect-specific length function (LEN for SQL Server, LENGTH for PostgreSQL/SQLite).
+	/// </summary>
+	public Query Len()
+		=> AddAction((dialect, builder) => builder.Append(dialect.LenFunction));
+
+	/// <summary>
+	/// Appends DATALENGTH function name.
+	/// </summary>
+	public Query DataLength()
+		=> Raw("dataLength");
+
+	/// <summary>
+	/// Appends WITH keyword.
+	/// </summary>
+	public Query With()
+		=> Raw("with ");
+
+	/// <summary>
+	/// Appends a comma separator.
+	/// </summary>
+	public Query Comma()
+		=> Raw(", ");
+
+	/// <summary>
+	/// Appends + arithmetic operator.
+	/// </summary>
+	public Query Plus()
+		=> Raw(" + ");
+
+	/// <summary>
+	/// Appends - arithmetic operator.
+	/// </summary>
+	public Query Minus()
+		=> Raw(" - ");
+
+	/// <summary>
+	/// Appends * arithmetic operator.
+	/// </summary>
+	public Query Multiply()
+		=> Raw(" * ");
+
+	/// <summary>
+	/// Appends / arithmetic operator.
+	/// </summary>
+	public Query Divide()
+		=> Raw(" / ");
+
+	/// <summary>
+	/// Appends % arithmetic operator.
+	/// </summary>
+	public Query Modulo()
+		=> Raw(" % ");
+
+	/// <summary>
+	/// Appends dialect-specific string concatenation operator (+ for SQL Server, || for PostgreSQL/SQLite).
+	/// </summary>
+	public Query Concat()
+		=> AddAction((dialect, builder) => builder.Append($" {dialect.ConcatOperator} "));
+
+	/// <summary>
+	/// Appends dialect-specific boolean true comparison (= 1 for SQL Server/SQLite, = TRUE for PostgreSQL).
+	/// </summary>
+	public Query IsTrue()
+		=> AddAction((dialect, builder) => builder.Append($" = {dialect.TrueLiteral}"));
+
+	/// <summary>
+	/// Appends dialect-specific boolean false comparison (= 0 for SQL Server/SQLite, = FALSE for PostgreSQL).
+	/// </summary>
+	public Query IsFalse()
+		=> AddAction((dialect, builder) => builder.Append($" = {dialect.FalseLiteral}"));
+
+	/// <summary>
+	/// Appends CAST function name.
+	/// </summary>
+	public Query Cast()
+		=> Raw("cast");
+
+	/// <summary>
+	/// Appends DATE type name.
+	/// </summary>
+	public Query Date()
+		=> Raw("date");
+
+	/// <summary>
+	/// Appends a raw SQL string.
+	/// </summary>
+	/// <param name="name">Raw SQL text to append.</param>
+	public Query Raw(string name)
+		=> AddAction((dialect, builder) => builder.Append(name));
+
+	/// <summary>
+	/// Appends AVG function name.
+	/// </summary>
+	public Query Avg()
+		=> Raw("avg");
+
+	/// <summary>
+	/// Appends SUM function name.
+	/// </summary>
+	public Query Sum()
+		=> Raw("sum");
+
+	/// <summary>
+	/// Appends CONVERT function name.
+	/// </summary>
+	public Query Convert()
+		=> Raw("convert");
+
+	/// <summary>
+	/// Appends dialect-specific NOW() expression.
+	/// </summary>
+	public Query Now()
+		=> AddAction((dialect, builder) => builder.Append(dialect.Now()));
+
+	/// <summary>
+	/// Appends dialect-specific UTC NOW() expression.
+	/// </summary>
+	public Query UtcNow()
+		=> AddAction((dialect, builder) => builder.Append(dialect.UtcNow()));
+
+	/// <summary>
+	/// Appends dialect-specific SYSDATETIME() expression.
+	/// </summary>
+	public Query SysNow()
+		=> AddAction((dialect, builder) => builder.Append(dialect.SysNow()));
+
+	/// <summary>
+	/// Appends dialect-specific SYSUTCDATETIME() expression.
+	/// </summary>
+	public Query SysUtcNow()
+		=> AddAction((dialect, builder) => builder.Append(dialect.SysUtcNow()));
+
+	/// <summary>
+	/// Appends MAX function name.
+	/// </summary>
+	public Query Max()
+		=> Raw("max");
+
+	/// <summary>
+	/// Appends MIN function name.
+	/// </summary>
+	public Query Min()
+		=> Raw("min");
+
+	/// <summary>
+	/// Appends DATEADD function name.
+	/// </summary>
+	public Query DateAdd()
+		=> Raw("dateAdd");
+
+	/// <summary>
+	/// Appends DATEPART function name.
+	/// </summary>
+	public Query DatePart()
+		=> Raw("datePart");
+
+	/// <summary>
+	/// Appends UPPER function name.
+	/// </summary>
+	public Query Upper()
+		=> Raw("Upper");
+
+	/// <summary>
+	/// Appends LOWER function name.
+	/// </summary>
+	public Query Lower()
+		=> Raw("Lower");
+
+	/// <summary>
+	/// Appends LTRIM function name.
+	/// </summary>
+	public Query LTrim()
+		=> Raw("LTrim");
+
+	/// <summary>
+	/// Appends RTRIM function name.
+	/// </summary>
+	public Query RTrim()
+		=> Raw("RTrim");
+
+	/// <summary>
+	/// Appends SUBSTRING function name.
+	/// </summary>
+	public Query SubString()
+		=> Raw("SubString");
+
+	/// <summary>
+	/// Appends dialect-specific NEWID() expression.
+	/// </summary>
+	public Query NewId()
+		=> AddAction((dialect, builder) => builder.Append(dialect.NewId()));
+
+	/// <summary>
+	/// Appends RAND() function call.
+	/// </summary>
+	public Query Rand()
+		=> Raw("rand()");
+
+	/// <summary>
+	/// Appends ROW_NUMBER() function call.
+	/// </summary>
+	public Query RowNumber()
+		=> Raw("row_number()");
+
+	/// <summary>
+	/// Appends OVER keyword.
+	/// </summary>
+	public Query Over()
+		=> Raw("over");
+
+	/// <summary>
+	/// Appends CHARINDEX function name.
+	/// </summary>
+	public Query CharIndex()
+		=> Raw("charIndex");
+
+	/// <summary>
+	/// Appends REPLACE function name.
+	/// </summary>
+	public Query Replace()
+		=> Raw("replace");
+
+	/// <summary>
+	/// Appends EXISTS keyword.
+	/// </summary>
+	public Query Exists()
+		=> Raw("exists");
+
+	/// <summary>
+	/// Appends a BETWEEN clause referencing two parameters by name. The
+	/// dialect prepends its own prefix (e.g. <c>@</c>, <c>$</c>) at render
+	/// time so callers must pass plain parameter names — passing raw values
+	/// here would land them as literals in the SQL and is not supported.
+	/// </summary>
+	/// <param name="lowParameter">Lower bound parameter name (no prefix).</param>
+	/// <param name="highParameter">Upper bound parameter name (no prefix).</param>
+	public Query Between(string lowParameter, string highParameter)
+		=> AddAction((dialect, builder) =>
+			builder.Append($" between {dialect.ParameterPrefix}{lowParameter} and {dialect.ParameterPrefix}{highParameter}"));
+
+	/// <summary>
+	/// Appends an opening parenthesis.
+	/// </summary>
+	public Query OpenBracket()
+		=> AddAction((dialect, builder) => builder.Append('('));
+
+	/// <summary>
+	/// Appends a closing parenthesis.
+	/// </summary>
+	public Query CloseBracket()
+		=> AddAction((dialect, builder) => builder.Append(')'));
+
+	/// <summary>
+	/// Appends a LIKE condition for the specified column with a matching parameter.
+	/// The column name is validated against a conservative identifier shape
+	/// before being interpolated into SQL — anything else throws so a
+	/// caller-controlled column name cannot smuggle SQL through the LIKE
+	/// clause (which previously interpolated <paramref name="columnName"/>
+	/// both as identifier and parameter name without checks).
+	/// </summary>
+	/// <param name="columnName">Column name to match.</param>
+	public Query Like(string columnName)
+	{
+		EnsureSafeIdentifier(columnName);
+		return AddAction((dialect, builder) => builder.Append($"{dialect.QuoteIdentifier(columnName)} like {dialect.ParameterPrefix}{columnName}"));
+	}
+
+	private static void EnsureSafeIdentifier(string identifier)
+	{
+		if (identifier.IsEmpty())
+			throw new ArgumentException("Identifier must not be empty.", nameof(identifier));
+
+		foreach (var ch in identifier)
+		{
+			if (!(char.IsLetterOrDigit(ch) || ch == '_'))
+				throw new ArgumentException(
+					$"Identifier '{identifier}' contains an unsupported character; only letters, digits and underscore are allowed.",
+					nameof(identifier));
+		}
+	}
+
+	#endregion
+
+	#region IsNull
+
+	/// <summary>
+	/// Appends a column IS NULL condition.
+	/// </summary>
+	/// <param name="columnName">Column name to check.</param>
+	public Query IsNull(string columnName)
+	{
+		return AddAction((dialect, builder) => builder.Append($"{dialect.QuoteIdentifier(columnName)} is null"));
+	}
+
+	/// <summary>
+	/// Appends a parameter IS NULL condition.
+	/// </summary>
+	/// <param name="columnName">Parameter name to check.</param>
+	public Query IsParamNull(string columnName)
+	{
+		return AddAction((dialect, builder) => builder.Append($"{dialect.ParameterPrefix}{columnName} is null"));
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Adds a render action to the query.
+	/// </summary>
+	/// <param name="action">Action that appends SQL text to a <see cref="StringBuilder"/>.</param>
+	public Query AddAction(Action<ISqlDialect, StringBuilder> action)
+	{
+		ArgumentNullException.ThrowIfNull(action);
+
+		Actions.Add(action);
+		return this;
+	}
+
+	#region Insert
+
+	/// <summary>
+	/// Appends INSERT keyword.
+	/// </summary>
+	public Query Insert()
+		=> AddAction((dialect, builder) => builder.Append("insert"));
+
+	#endregion
+
+	#region Into
+
+	/// <summary>
+	/// Appends INTO clause with table name and column list.
+	/// </summary>
+	/// <param name="tableName">Target table name.</param>
+	/// <param name="columns">Column names for the insert.</param>
+	public Query Into(string tableName, params string[] columns)
+	{
+		return AddAction((dialect, builder) =>
+		{
+			builder.AppendFormat(" into {0}", dialect.QuoteIdentifier(tableName));
+			builder.AppendLine().Append('(');
+
+			foreach (var column in columns)
+				builder.AppendFormat("{0}, ", dialect.QuoteIdentifier(column));
+
+			if (columns.Length > 0)
+				builder.RemoveLast(2);
+
+			builder.AppendLine(")");
+		});
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Appends ORDER BY keyword.
+	/// </summary>
+	public Query OrderBy() => Raw("order by ");
+
+	/// <summary>
+	/// Appends ASC keyword.
+	/// </summary>
+	public Query Asc() => Raw(" asc");
+
+	/// <summary>
+	/// Appends DESC keyword.
+	/// </summary>
+	public Query Desc() => Raw(" desc");
+
+	/// <summary>
+	/// Appends dialect-specific SKIP (OFFSET) clause.
+	/// </summary>
+	/// <param name="skip">Parameter name for the number of rows to skip.</param>
+	public Query Skip(string skip)
+		=> AddAction((dialect, builder) => builder.AppendLine(dialect.FormatSkip(dialect.ParameterPrefix + skip)));
+
+	/// <summary>
+	/// Appends dialect-specific TAKE (LIMIT/FETCH) clause.
+	/// </summary>
+	/// <param name="take">Parameter name for the number of rows to take.</param>
+	public Query Take(string take)
+		=> AddAction((dialect, builder) => builder.AppendLine(dialect.FormatTake(dialect.ParameterPrefix + take)));
+
+	#region Values
+
+	/// <summary>
+	/// Appends a VALUES clause with parameterized value placeholders.
+	/// </summary>
+	/// <param name="valueNames">Parameter names for the values.</param>
+	public Query Values(params string[] valueNames)
+	{
+		return AddAction((dialect, builder) =>
+		{
+			builder
+				.Append("values")
+				.AppendLine()
+				.Append('(');
+
+			foreach (var valueName in valueNames)
+				builder.AppendFormat("{0}, ", dialect.ParameterPrefix + valueName);
+
+			if (!valueNames.IsEmpty())
+				builder.RemoveLast(2);
+
+			builder.Append(')');
+		});
+	}
+
+	#endregion
+
+	#region Delete
+
+	/// <summary>
+	/// Appends DELETE keyword.
+	/// </summary>
+	public Query Delete()
+		=> AddAction((dialect, builder) => builder.Append("delete"));
+
+	#endregion
+
+	#region Update
+
+	/// <summary>
+	/// Appends UPDATE keyword with the specified table name.
+	/// </summary>
+	/// <param name="tableName">Table name to update.</param>
+	public Query Update(string tableName)
+	{
+		return AddAction((dialect, builder) =>
+			builder
+					.AppendFormat("update {0}", dialect.QuoteIdentifier(tableName))
+					.AppendLine());
+	}
+
+	#endregion
+
+	#region Set
+
+	/// <summary>
+	/// Appends a SET clause assigning parameterized values to columns.
+	/// </summary>
+	/// <param name="tableAlias">Table alias used in the assignment.</param>
+	/// <param name="columns">Column names to set.</param>
+	public Query Set(string tableAlias, params string[] columns)
+	{
+		return AddAction((dialect, builder) =>
+		{
+			var parts = columns.Select(c => new SetPart(c, dialect.ParameterPrefix + c)).ToArray();
+			Set(tableAlias, parts, dialect, builder);
+		});
+	}
+
+	private static void Set(string tableAlias, ICollection<SetPart> parts, ISqlDialect dialect, StringBuilder builder)
+	{
+		if (parts.IsEmpty())
+			throw new ArgumentOutOfRangeException(nameof(parts));
+
+		builder.AppendLine("set");
+
+		var quotedAlias = dialect.QuoteIdentifier(tableAlias);
+
+		foreach (var part in parts)
+		{
+			builder
+					.AppendFormat("\t{0}.{1} = {2},", quotedAlias, dialect.QuoteIdentifier(part.Column), part.ValueName)
+					.AppendLine();
+		}
+
+		builder.RemoveLast(1 + Environment.NewLine.Length); // remove trailing comma + newline
+		builder.AppendLine();
+	}
+
+	#endregion
+
+	#region Equals
+
+	/// <summary>
+	/// Appends equality conditions for the specified columns joined with AND.
+	/// </summary>
+	/// <param name="tableAlias">Table alias used in column references.</param>
+	/// <param name="columns">Column names to compare against parameters.</param>
+	public Query Equals(string tableAlias, params string[] columns)
+	{
+		return AddAction((dialect, builder) =>
+		{
+			var quotedAlias = dialect.QuoteIdentifier(tableAlias);
+
+			for (var i = 0; i < columns.Length; i++)
+			{
+				Equals($"{quotedAlias}.{dialect.QuoteIdentifier(columns[i])}", dialect.ParameterPrefix + columns[i], builder);
+
+				if (i < columns.Length - 1)
+					builder.AppendFormat(" and ");
+			}
+		});
+	}
+
+	private static void Equals(string column, string valueName, StringBuilder builder)
+	{
+		builder.AppendFormat("{0} = {1}", column, valueName);
+	}
+
+	#endregion
+
+	/// <summary>
+	/// Appends NULLIF function name.
+	/// </summary>
+	public Query NullIf() => AddAction((dialect, builder) => builder.Append("nullif"));
+
+	/// <summary>
+	/// Appends dialect-aware null-coalescing function name (ISNULL for SQL Server, COALESCE for PG/SQLite).
+	/// </summary>
+	public Query IsNull() => AddAction((dialect, builder) => builder.Append(dialect.IsNullFunction));
+
+	/// <summary>
+	/// Appends LIKE keyword.
+	/// </summary>
+	public Query Like() => AddAction((dialect, builder) => builder.Append(" like "));
+
+	/// <summary>
+	/// Appends an ESCAPE clause declaring <paramref name="escapeChar"/> as the
+	/// escape character of the preceding LIKE pattern.
+	/// </summary>
+	/// <param name="escapeChar">Escape character, normally <see cref="SqlLike.EscapeChar"/>.</param>
+	/// <returns>This query.</returns>
+	/// <exception cref="ArgumentException">The character cannot be written as a SQL literal.</exception>
+	public Query Escape(char escapeChar)
+	{
+		if (escapeChar == '\'')
+			throw new ArgumentException("Quote cannot be an escape character.", nameof(escapeChar));
+
+		return AddAction((dialect, builder) => builder.Append($" escape '{escapeChar}'"));
+	}
+
+	/// <summary>
+	/// Appends a whole LIKE predicate tail that matches literally the text
+	/// <paramref name="appendNeedle"/> writes: the LIKE keyword, the requested
+	/// wildcards, the needle wrapped in nested REPLACE calls neutralising every
+	/// <see cref="SqlLike.Metacharacters"/>, and the ESCAPE clause declaring
+	/// <see cref="SqlLike.EscapeChar"/>.
+	/// </summary>
+	/// <param name="appendNeedle">Appends the needle expression — a bound parameter, a column, any expression.</param>
+	/// <param name="wildcardBefore">Match any text before the needle.</param>
+	/// <param name="wildcardAfter">Match any text after the needle.</param>
+	/// <returns>This query.</returns>
+	/// <remarks>
+	/// The counterpart of <see cref="SqlLike.EscapeLike"/> for a needle that is only
+	/// known once the statement runs, which makes the escaping the database's work
+	/// rather than the caller's. REPLACE is standard SQL and behaves alike on SQL
+	/// Server, PostgreSQL, SQLite and MySQL, which keeps this free of dialect
+	/// knowledge.
+	///
+	/// The escapes and the clause that gives them meaning are emitted together on
+	/// purpose. Split apart, forgetting the clause produces no SQL error and no
+	/// failing test — the escape characters simply become part of the pattern and
+	/// the search quietly stops matching.
+	/// </remarks>
+	public Query LikeLiteral(Action appendNeedle, bool wildcardBefore, bool wildcardAfter)
+	{
+		ArgumentNullException.ThrowIfNull(appendNeedle);
+
+		Like();
+
+		if (wildcardBefore)
+		{
+			AppendWildcard();
+			Concat();
+		}
+
+		AddAction((dialect, builder) => builder.Append("replace(".Times(SqlLike.Metacharacters.Length)));
+
+		appendNeedle();
+
+		AddAction((dialect, builder) =>
+		{
+			// Closing in the same order the characters are listed applies them from
+			// the innermost call outwards, so the escape character is substituted
+			// first and the escapes it introduces are not escaped again.
+			foreach (var c in SqlLike.Metacharacters)
+				builder.Append($", {dialect.UnicodePrefix}'{c}', {dialect.UnicodePrefix}'{SqlLike.EscapeChar}{c}')");
+		});
+
+		if (wildcardAfter)
+		{
+			Concat();
+			AppendWildcard();
+		}
+
+		return Escape(SqlLike.EscapeChar);
+	}
+
+	private Query AppendWildcard()
+		=> AddAction((dialect, builder) => builder.Append($"{dialect.UnicodePrefix}'%'"));
+
+	/// <summary>
+	/// Appends AS keyword.
+	/// </summary>
+	public Query As() => AddAction((dialect, builder) => builder.Append(" as "));
+
+	/// <summary>
+	/// Appends a dialect-prefixed parameter reference.
+	/// </summary>
+	/// <param name="name">Parameter name.</param>
+	public Query Param(string name) => AddAction((dialect, builder) => builder.Append(dialect.ParameterPrefix + name));
+
+	/// <summary>
+	/// Appends UNION keyword.
+	/// </summary>
+	public Query Union() => AddAction((dialect, builder) => builder.Append("union"));
+
+	/// <summary>
+	/// Appends UNION ALL keyword.
+	/// </summary>
+	public Query UnionAll() => AddAction((dialect, builder) => builder.Append("union all"));
+
+	/// <summary>
+	/// Appends FORMATMESSAGE function name.
+	/// </summary>
+	public Query FormatMessage() => AddAction((dialect, builder) => builder.Append("formatmessage"));
+
+	#region Static Factories
+
+	/// <summary>
+	/// Creates an INSERT query.
+	/// </summary>
+	public static Query CreateInsert(string tableName, IEnumerable<string> columns)
+		=> CreateInsert(tableName, columns, returningIdColumn: null);
+
+	/// <summary>
+	/// Appends a dialect-specific RETURNING clause to the previous INSERT
+	/// in this query (no-op for dialects that don't support it).
+	/// </summary>
+	public Query Returning(string idColumn)
+		=> AddAction((dialect, sb) => dialect.AppendInsertReturningClause(sb, idColumn));
+
+	/// <summary>
+	/// Creates an INSERT query that optionally appends a dialect-specific
+	/// <c>RETURNING</c> clause for the given identity column. Useful for
+	/// PostgreSQL, where a single-statement INSERT…RETURNING is the only
+	/// pool-safe way to read back a server-generated identity. Pass
+	/// <see langword="null"/> for non-identity inserts and for dialects
+	/// that read identity via a separate select (SqlServer/SQLite).
+	/// </summary>
+	public static Query CreateInsert(string tableName, IEnumerable<string> columns, string returningIdColumn)
+	{
+		var cols = columns.ToArray();
+		return new Query().AddAction((dialect, sb) =>
+		{
+			var quotedCols = cols.Select(dialect.QuoteIdentifier);
+			var paramCols = cols.Select(c => dialect.ParameterPrefix + c);
+			sb.Append($"INSERT INTO {dialect.QuoteIdentifier(tableName)} ({quotedCols.JoinCommaSpace()}) VALUES ({paramCols.JoinCommaSpace()})");
+
+			if (!returningIdColumn.IsEmpty())
+				dialect.AppendInsertReturningClause(sb, returningIdColumn);
+		});
+	}
+
+	/// <summary>
+	/// Creates an UPDATE query.
+	/// </summary>
+	public static Query CreateUpdate(string tableName, IEnumerable<string> columns, string whereClause)
+	{
+		var cols = columns.ToArray();
+		return new Query().AddAction((dialect, sb) =>
+		{
+			var setClauses = cols.Select(c => $"{dialect.QuoteIdentifier(c)} = {dialect.ParameterPrefix}{c}");
+			sb.Append($"UPDATE {dialect.QuoteIdentifier(tableName)} SET {setClauses.JoinCommaSpace()}");
+
+			if (!whereClause.IsEmpty())
+				sb.Append($" WHERE {whereClause}");
+		});
+	}
+
+	/// <summary>
+	/// Creates a DELETE query.
+	/// </summary>
+	public static Query CreateDelete(string tableName, string whereClause)
+	{
+		return new Query().AddAction((dialect, sb) =>
+		{
+			sb.Append($"DELETE FROM {dialect.QuoteIdentifier(tableName)}");
+
+			if (!whereClause.IsEmpty())
+				sb.Append($" WHERE {whereClause}");
+		});
+	}
+
+	/// <summary>
+	/// Creates a SELECT query with optional pagination.
+	/// </summary>
+	public static Query CreateSelect(string tableName, string whereClause, string orderByClause, long? skip, long? take)
+	{
+		return new Query().AddAction((dialect, sb) =>
+		{
+			sb.Append($"SELECT * FROM {dialect.QuoteIdentifier(tableName)}");
+
+			if (!whereClause.IsEmpty())
+				sb.Append($" WHERE {whereClause}");
+
+			if (!orderByClause.IsEmpty())
+				sb.Append($" ORDER BY {orderByClause}");
+
+			if (skip.HasValue || take.HasValue)
+			{
+				if (orderByClause.IsEmpty())
+				{
+					sb.Append(' ');
+					dialect.AppendFallbackOrderBy(sb);
+				}
+				else
+					sb.Append(' ');
+
+				dialect.AppendPaginationParams(
+					sb,
+					skip.HasValue ? dialect.ParameterPrefix + SkipParameterName : null,
+					take.HasValue ? dialect.ParameterPrefix + TakeParameterName : null);
+			}
+		});
+	}
+
+	/// <summary>
+	/// Creates a CREATE TABLE query.
+	/// </summary>
+	/// <param name="tableName">Table name.</param>
+	/// <param name="columns">Column definitions (name → CLR type).</param>
+	/// <param name="identityColumn">Optional auto-increment identity column name.</param>
+	/// <param name="primaryKeyColumns">Optional primary key column(s) (without auto-increment). Ignored when <paramref name="identityColumn"/> is set.</param>
+	public static Query CreateCreateTable(string tableName, IDictionary<string, Type> columns, string identityColumn = null, IEnumerable<string> primaryKeyColumns = null)
+	{
+		return new Query().AddAction((dialect, sb) =>
+		{
+			// Name the PRIMARY KEY constraint rather than letting the database invent one.
+			var pkName = SchemaNaming.PrimaryKey(tableName);
+
+			var colDefs = columns.Select(kv =>
+			{
+				var def = $"{dialect.QuoteIdentifier(kv.Key)} {dialect.GetSqlTypeName(kv.Value)}";
+				if (identityColumn is not null && kv.Key.EqualsIgnoreCase(identityColumn))
+				{
+					def += " " + (kv.Value.IsNumeric()
+						? dialect.GetIdentityColumnSuffix(pkName)
+						: $"CONSTRAINT {dialect.QuoteIdentifier(pkName)} PRIMARY KEY");
+				}
+				return def;
+			}).JoinCommaSpace();
+
+			var pkCols = identityColumn is null ? primaryKeyColumns?.ToArray() : null;
+			if (pkCols is not null && pkCols.Length > 0)
+				colDefs += $", CONSTRAINT {dialect.QuoteIdentifier(pkName)} PRIMARY KEY (" + pkCols.Select(dialect.QuoteIdentifier).JoinCommaSpace() + ")";
+
+			dialect.AppendCreateTable(sb, tableName, colDefs);
+		});
+	}
+
+	/// <summary>
+	/// Creates a DROP TABLE query.
+	/// </summary>
+	public static Query CreateDropTable(string tableName)
+	{
+		return new Query().AddAction((dialect, sb) =>
+		{
+			dialect.AppendDropTable(sb, tableName);
+		});
+	}
+
+	/// <summary>
+	/// Creates an UPSERT (INSERT or UPDATE) query.
+	/// </summary>
+	public static Query CreateUpsert(string tableName, IEnumerable<string> allColumns, IEnumerable<string> keyColumns)
+	{
+		var allCols = allColumns.ToArray();
+		var keyCols = keyColumns.ToArray();
+		return new Query().AddAction((dialect, sb) =>
+		{
+			dialect.AppendUpsert(sb, tableName, allCols, keyCols);
+		});
+	}
+
+	/// <summary>
+	/// Creates a single WHERE condition.
+	/// </summary>
+	public static Query CreateBuildCondition(string column, ComparisonOperator op, string paramName, bool castNumericComparison = false)
+	{
+		return new Query().AddAction((dialect, sb) =>
+		{
+			if (op == ComparisonOperator.Any)
+			{
+				sb.Append("1 = 1");
+				return;
+			}
+
+			var quotedCol = dialect.QuoteIdentifier(column);
+
+			if (paramName is null)
+			{
+				sb.Append(op switch
+				{
+					ComparisonOperator.Equal => $"{quotedCol} IS NULL",
+					ComparisonOperator.NotEqual => $"{quotedCol} IS NOT NULL",
+					_ => throw new ArgumentOutOfRangeException(nameof(op), op, "Only Equal and NotEqual are supported with NULL"),
+				});
+				return;
+			}
+
+			var param = dialect.ParameterPrefix + paramName;
+			var decimalCastType = castNumericComparison && IsComparisonOperator(op)
+				? dialect.DecimalComparisonCastSqlType
+				: null;
+
+			if (!decimalCastType.IsEmpty())
+			{
+				quotedCol = $"cast({quotedCol} as {decimalCastType})";
+				param = $"cast({param} as {decimalCastType})";
+			}
+
+			sb.Append(op switch
+			{
+				ComparisonOperator.Equal => $"{quotedCol} = {param}",
+				ComparisonOperator.NotEqual => $"{quotedCol} <> {param}",
+				ComparisonOperator.Greater => $"{quotedCol} > {param}",
+				ComparisonOperator.GreaterOrEqual => $"{quotedCol} >= {param}",
+				ComparisonOperator.Less => $"{quotedCol} < {param}",
+				ComparisonOperator.LessOrEqual => $"{quotedCol} <= {param}",
+				ComparisonOperator.Like => $"{quotedCol} LIKE {param}",
+				ComparisonOperator.In => $"{quotedCol} IN ({param})",
+				_ => throw new ArgumentOutOfRangeException(nameof(op), op, "Unsupported operator"),
+			});
+		});
+	}
+
+	private static bool IsComparisonOperator(ComparisonOperator op)
+		=> op is
+			ComparisonOperator.Equal or
+			ComparisonOperator.NotEqual or
+			ComparisonOperator.Greater or
+			ComparisonOperator.GreaterOrEqual or
+			ComparisonOperator.Less or
+			ComparisonOperator.LessOrEqual;
+
+	/// <summary>
+	/// Creates an IN condition.
+	/// </summary>
+	public static Query CreateBuildInCondition(string column, IEnumerable<string> paramNames)
+	{
+		var names = paramNames.ToArray();
+		return new Query().AddAction((dialect, sb) =>
+		{
+			if (names.Length == 0)
+			{
+				sb.Append("1 = 0");
+				return;
+			}
+
+			var quotedCol = dialect.QuoteIdentifier(column);
+			var paramList = names.Select(p => dialect.ParameterPrefix + p).JoinCommaSpace();
+			sb.Append($"{quotedCol} IN ({paramList})");
+		});
+	}
+
+	#endregion
+}
+
+/// <summary>
+/// Represents a column = value assignment in a SET clause.
+/// </summary>
+/// <param name="column">Column name.</param>
+/// <param name="valueName">Value or parameter name.</param>
+public class SetPart(string column, string valueName)
+{
+	private readonly string _column = column;
+
+	/// <summary>
+	/// Column name for the assignment.
+	/// </summary>
+	public string Column => _column;
+
+	private readonly string _valueName = valueName;
+
+	/// <summary>
+	/// Value or parameter name for the assignment.
+	/// </summary>
+	public string ValueName => _valueName;
+
+	/// <inheritdoc />
+	public override string ToString() => $"{Column}={ValueName}";
+}
+
+/// <summary>
+/// A query that renders multiple child queries separated by new lines.
+/// </summary>
+[Serializable]
+public class BatchQuery : Query
+{
+	/// <summary>
+	/// List of child queries to render as a batch.
+	/// </summary>
+	public List<Query> Queries { get; } = [];
+
+	/// <inheritdoc />
+	public override string Render(ISqlDialect dialect)
+	{
+		var retVal = new StringBuilder();
+
+		foreach (var query in Queries)
+			retVal.Append(query.Render(dialect)).AppendLine(";").AppendLine();
+
+		return retVal.ToString();
+	}
+}

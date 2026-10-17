@@ -1,0 +1,1752 @@
+namespace Ecng.Tests.Serialization;
+
+using System.Drawing;
+
+using Ecng.IO;
+using Ecng.Serialization;
+using Ecng.Reflection;
+
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
+
+[TestClass]
+public class JsonTests : BaseTestClass
+{
+	private sealed class AsyncOnlyStream : MemoryStream
+	{
+		public override void Flush()
+			=> throw new InvalidOperationException("Synchronous flush is not allowed.");
+
+		public override void Write(byte[] buffer, int offset, int count)
+			=> throw new InvalidOperationException("Synchronous write is not allowed.");
+
+		public override void Write(ReadOnlySpan<byte> buffer)
+			=> throw new InvalidOperationException("Synchronous write is not allowed.");
+
+		public override void WriteByte(byte value)
+			=> throw new InvalidOperationException("Synchronous write is not allowed.");
+	}
+
+	private async Task<T> Do<T>(T value, bool fillMode = false, bool enumAsString = false, bool encryptedAsByteArray = false, NullValueHandling nullValueHandling = NullValueHandling.Include, Action<string> jsonInspector = null)
+	{
+		var ser = new JsonSerializer<T>
+		{
+			FillMode = fillMode,
+			EnumAsString = enumAsString,
+			EncryptedAsByteArray = encryptedAsByteArray,
+			NullValueHandling = nullValueHandling
+		};
+
+		var stream = new MemoryStream();
+		await ser.SerializeAsync(value, stream, CancellationToken);
+
+		// Verify intermediate format - stream should have content
+		stream.Length.AssertGreater(0L, "Serialized JSON stream should not be empty");
+
+		// Capture JSON for inspection if needed
+		stream.Position = 0;
+		var jsonBytes = stream.ToArray();
+		var jsonString = jsonBytes.UTF8();
+
+		// Allow tests to inspect the intermediate JSON format
+		jsonInspector?.Invoke(jsonString);
+
+		stream.Position = 0;
+
+		var needCast = value is SettingsStorage;
+
+		var actual = await ser.DeserializeAsync(stream, CancellationToken);
+
+		void CheckValue(object actual, object expected)
+		{
+			void AssertEqual(object actual, object expected)
+			{
+				if (expected is null)
+					actual.AssertNull();
+				else
+				{
+					actual.AssertNotNull();
+
+					if (!needCast)
+						actual.AssertEqual(expected);
+					else
+					{
+						var expType = expected.GetType();
+
+						if (expType.GetGenericType(typeof(KeyValuePair<,>)) != null)
+						{
+							dynamic expDyn = expected;
+							dynamic actDyn = actual;
+
+							((string)actDyn.Key).AssertEqual((string)expDyn.Key);
+
+							CheckValue((object)actDyn.Value, (object)expDyn.Value);
+						}
+						else
+							actual.To(expType).AssertEqual(expected);
+					}
+				}
+			}
+
+			if (expected is SettingsStorage expStorage)
+			{
+				actual.AssertNotNull();
+
+				var actStorage = (SettingsStorage)actual;
+				actStorage.Count.AssertEqual(expStorage.Count);
+
+				foreach (var key in expStorage.Keys)
+				{
+					var expItem = expStorage[key];
+					var actItem = actStorage.GetValue(expItem is Type ? typeof(Type) : expItem.GetType(), key);
+
+					if (expItem is IEnumerable)
+						CheckValue(actItem, expItem);
+					else
+						AssertEqual(actItem, expItem);
+				}
+			}
+			else if (expected is IEnumerable expEmu)
+			{
+				actual.AssertNotNull();
+
+				var actEmu = (IEnumerable)actual;
+				//actCol.Count.AssertEqual(expCol.Count);
+
+				var enumerator = expEmu.GetEnumerator();
+				foreach (var actItem in actEmu)
+				{
+					if (!enumerator.MoveNext())
+						throw new InvalidOperationException("Exp is less.");
+
+					var expItem = enumerator.Current;
+
+					if (expItem is IEnumerable)
+						CheckValue(actItem, expItem);
+					else
+						AssertEqual(actItem, expItem);
+				}
+
+				if (enumerator.MoveNext())
+					throw new InvalidOperationException("Exp is more.");
+			}
+			else
+				AssertEqual(actual, expected);
+		}
+
+		CheckValue(actual, value);
+
+		return actual;
+	}
+
+	[TestMethod]
+	public async Task Primitive()
+	{
+		await Do(123);
+		await Do("123");
+		await Do("123".Secure());
+		await Do(GCKind.Any);
+		await Do(1324554.55M);
+		await Do(DateTime.UtcNow);
+		await Do(DateTimeOffset.UtcNow);
+		await Do(DateTime.Now);
+		await Do(DateTimeOffset.Now);
+		await Do(TimeSpan.Zero);
+		await Do(TimeSpan.FromSeconds(10));
+		await Do(Guid.NewGuid());
+		await Do(new Uri("https://stocksharp.com"));
+		await Do(TimeZoneInfo.Utc);
+		await Do(TimeHelper.Moscow);
+		await Do(typeof(GCKind));
+		await Do(decimal.MinValue);
+		await Do(decimal.MaxValue);
+	}
+
+	[TestMethod]
+	public async Task PrimitiveNullable()
+	{
+		await Do((int?)null);
+		await Do((string)null);
+		await Do((SecureString)null);
+		await Do((GCKind?)null);
+		await Do((decimal?)null);
+		await Do((DateTime?)null);
+		await Do((DateTimeOffset?)null);
+		await Do((TimeZoneInfo)null);
+		await Do((TimeSpan?)null);
+		await Do((Guid?)null);
+		await Do((Uri)null);
+		await Do((Type)null);
+	}
+
+	[TestMethod]
+	public async Task PrimitiveEnumAsString()
+	{
+		// Verify enum is serialized as string, not number
+		await Do(GCKind.Any, enumAsString: true, jsonInspector: json =>
+		{
+			json.Contains("\"Any\"").AssertTrue($"Enum should be serialized as string 'Any'. JSON: {json}");
+			// Should NOT contain just the number (which would be 0 for GCKind.Any)
+			// The serializer wraps in array format, so verify the string representation is present
+			json.Contains("\"0\"").AssertFalse($"Enum should NOT be serialized as number '0'. JSON: {json}");
+		});
+
+		await Do((GCKind?)null, enumAsString: true, jsonInspector: json =>
+		{
+			json.Contains("null").AssertTrue($"Nullable null enum should serialize as null. JSON: {json}");
+		});
+	}
+
+	[TestMethod]
+	public async Task PrimitiveArray()
+	{
+		await Do(new[] { 1, 2, 3 });
+		await Do(new[] { "123", "456" });
+		await Do(new[] { null, "123", "456" });
+		await Do(new[] { null, "", "123", "", "456" });
+		await Do(new[] { "", null, "123", null, "456", null });
+		await Do(new[] { "".Secure(), null, "123".Secure(), null, "456".Secure(), null });
+		await Do(new[] { GCKind.Any, GCKind.Background });
+		await Do(new[] { 1324554.55M, 14554.55M });
+		await Do(new[] { DateTime.UtcNow, DateTime.Now });
+		await Do(new[] { DateTimeOffset.UtcNow, DateTimeOffset.Now });
+		await Do(new[] { TimeSpan.Zero, TimeSpan.FromSeconds(10) });
+		await Do(new[] { Guid.NewGuid(), Guid.NewGuid() });
+		await Do(new[] { new Uri("https://stocksharp.com"), new Uri("https://stocksharp.ru"), null });
+		await Do(new[] { TimeZoneInfo.Utc });
+		await Do(new[] { null, TimeZoneInfo.Utc });
+		await Do(new byte[] { 1, 2, 3 });
+		await Do(new string[] { null, null });
+		await Do(new SecureString[] { null, null });
+		await Do(new Type[] { null, typeof(GCKind) });
+	}
+
+	[TestMethod]
+	public async Task JsonSerializer_ListRoundTripsAsList()
+	{
+		var serializer = new JsonSerializer<List<int>>();
+		await using var stream = new MemoryStream();
+
+		await serializer.SerializeAsync([1, 2, 3], stream, CancellationToken);
+		stream.Position = 0;
+
+		var result = await serializer.DeserializeAsync(stream, CancellationToken);
+
+		result.SequenceEqual([1, 2, 3]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task JsonSerializer_StringListRoundTripsAsList()
+	{
+		var serializer = new JsonSerializer<List<string>>();
+		await using var stream = new MemoryStream();
+
+		await serializer.SerializeAsync(["a", "b", "c"], stream, CancellationToken);
+		stream.Position = 0;
+
+		var result = await serializer.DeserializeAsync(stream, CancellationToken);
+
+		result.SequenceEqual(["a", "b", "c"]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task PrimitiveArrayOfArray()
+	{
+		await Do(new[] { new[] { 1, 2, 3 }, [4, 5, 6] });
+		await Do(new[] { new[] { "123", "456" }, ["789", "000"] });
+		await Do(new[] { null, new[] { null, "123", "456" }, ["789", "000", null] });
+		await Do(new[] { null, new[] { null, "123".Secure(), "456".Secure() }, ["789".Secure(), "000".Secure(), null] });
+	}
+
+	[TestMethod]
+	public async Task PrimitiveArrayOfArrayOfArray()
+	{
+		await Do(new[] { null, new[] { new[] { 1, 2, 3 }, [4, 5, 6], [7, 8, 9] }, [[-1, -2, -3], null, [-4, -5, -6], [-7, -8, -9]] });
+		await Do(new[] { new[] { new[] { "123", "456" }, null, ["789", "000"] }, [["123", "456"], ["123", "456"]] });
+	}
+
+	[TestMethod]
+	public async Task PrimitiveLimits()
+	{
+		await Do(DateTime.MinValue);
+		await Do(DateTime.MaxValue);
+		await Do(DateTimeOffset.MinValue);
+		await Do(DateTimeOffset.MaxValue);
+		await Do(TimeSpan.MinValue);
+		await Do(TimeSpan.MaxValue);
+		await Do(decimal.MinValue);
+		await Do(decimal.MaxValue);
+		await Do(long.MinValue);
+		await Do(long.MaxValue);
+		await Do(byte.MinValue);
+		await Do(byte.MaxValue);
+	}
+
+	[TestMethod]
+	public async Task SettingsStorage()
+	{
+		var storage = new SettingsStorage()
+			.Set("DecimalMax", decimal.MaxValue)
+			.Set("DecimalMin", decimal.MinValue)
+			.Set("IntProp", 124)
+			.Set("DateProp", DateTime.UtcNow)
+			.Set("TimeProp", TimeSpan.FromSeconds(10))
+			.Set("ArrIntProp", new[] { 1, 2, 3 })
+			.Set("ArrStringProp", new[] { "123", null, string.Empty, null })
+			// TODO
+			//.Set("ArrSecureStringProp", new[] { "123".Secure(), null, string.Empty.Secure(), null })
+			.Set("ComplexProp1", new SettingsStorage())
+			.Set("ComplexProp2", new SettingsStorage()
+				.Set("IntProp", 124)
+				.Set("DateProp", DateTime.UtcNow)
+				.Set("TimeProp", TimeSpan.FromSeconds(10))
+				.Set("TypeProp", typeof(GCKind)))
+			.Set("ArrComplexProp2", new[]
+			{
+				new SettingsStorage()
+					.Set("IntProp", 124)
+					.Set("DateProp", DateTime.UtcNow)
+					.Set("TimeProp", TimeSpan.FromSeconds(10)),
+				null,
+				[],
+				new SettingsStorage()
+					.Set("IntProp", 345)
+					.Set("DateProp", DateTime.UtcNow)
+					.Set("TimeProp", TimeSpan.FromSeconds(10)),
+			});
+
+		await Do(storage);
+	}
+
+	[TestMethod]
+	public async Task SettingsStorageColors()
+	{
+		var previousCulture = CultureInfo.CurrentCulture;
+		try
+		{
+			CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("ru-RU");
+
+			await Do(Color.CornflowerBlue);
+			await Do(Color.FromArgb(17, 23, 42, 91));
+			await Do(Color.Empty);
+
+			var storage = new SettingsStorage()
+				.Set("Known", Color.CornflowerBlue)
+				.Set("Argb", Color.FromArgb(17, 23, 42, 91))
+				.Set("Empty", Color.Empty)
+				.Set<Color?>("Nullable", Color.OrangeRed);
+
+			await Do(storage);
+		}
+		finally
+		{
+			CultureInfo.CurrentCulture = previousCulture;
+		}
+	}
+
+	private class TestClass : Equatable<TestClass>, IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+		public DateTime DateProp { get; set; }
+		public string StringProp { get; set; }
+		public SecureString SecureStringProp { get; set; }
+		public TimeSpan TimeProp { get; set; }
+		public Type TypeProp { get; set; }
+
+		public override TestClass Clone()
+		{
+			return (TestClass)MemberwiseClone();
+		}
+
+		protected override bool OnEquals(TestClass other)
+		{
+			return
+				IntProp == other.IntProp &&
+				DateProp == other.DateProp &&
+				StringProp == other.StringProp &&
+				SecureStringProp.IsEqualTo(other.SecureStringProp) &&
+				TimeProp == other.TimeProp &&
+				TypeProp == other.TypeProp
+				;
+		}
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = storage.GetValue<int>(nameof(IntProp));
+			DateProp = storage.GetValue<DateTime>(nameof(DateProp));
+			StringProp = storage.GetValue<string>(nameof(StringProp));
+			SecureStringProp = storage.GetValue<SecureString>(nameof(SecureStringProp));
+			TimeProp = storage.GetValue<TimeSpan>(nameof(TimeProp));
+			TypeProp = storage.GetValue<Type>(nameof(TypeProp));
+
+			return Task.CompletedTask;
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(IntProp), IntProp)
+				.Set(nameof(DateProp), DateProp)
+				.Set(nameof(StringProp), StringProp)
+				.Set(nameof(SecureStringProp), SecureStringProp)
+				.Set(nameof(TimeProp), TimeProp)
+				.Set(nameof(TypeProp), TypeProp);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	[TestMethod]
+	public async Task Complex()
+	{
+		await Do(new TestClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+		});
+	}
+
+	[TestMethod]
+	public async Task Complex2()
+	{
+		await Do(new TestClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			StringProp = "123",
+		});
+	}
+
+	[TestMethod]
+	public async Task Complex3()
+	{
+		await Do(new TestClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			SecureStringProp = "123".Secure(),
+		});
+	}
+
+	[TestMethod]
+	public async Task Complex4()
+	{
+		await Do(new TestClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			StringProp = "123",
+			TypeProp = typeof(GCKind),
+		});
+	}
+
+	[TestMethod]
+	public async Task ComplexArray()
+	{
+		await Do(new[]
+		{
+			new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			},
+			new TestClass
+			{
+				IntProp = 456,
+				DateProp = DateTime.UtcNow.AddDays(1),
+				TimeProp = TimeSpan.FromSeconds(20),
+			},
+		});
+	}
+
+	[TestMethod]
+	public async Task ComplexEnumerable()
+	{
+		await Do<IEnumerable<TestClass>>(
+		[
+			new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			},
+			new TestClass
+			{
+				IntProp = 456,
+				DateProp = DateTime.UtcNow.AddDays(1),
+				TimeProp = TimeSpan.FromSeconds(20),
+			},
+		]);
+	}
+
+	[TestMethod]
+	public async Task ComplexArrayOfArray()
+	{
+		await Do(new[]
+		{
+			new[]
+			{
+				new TestClass
+				{
+					IntProp = 124,
+					DateProp = DateTime.UtcNow,
+					TimeProp = TimeSpan.FromSeconds(10),
+				},
+				null,
+				new TestClass
+				{
+					IntProp = 456,
+					DateProp = DateTime.UtcNow.AddDays(1),
+					TimeProp = TimeSpan.FromSeconds(20),
+				},
+			},
+			null,
+			[
+				new TestClass
+				{
+					IntProp = 124,
+					DateProp = DateTime.UtcNow,
+					TimeProp = TimeSpan.FromSeconds(10),
+				},
+				null,
+				new TestClass
+				{
+					IntProp = 456,
+					DateProp = DateTime.UtcNow.AddDays(1),
+					TimeProp = TimeSpan.FromSeconds(20),
+				},
+			],
+		});
+	}
+
+	[TestMethod]
+	public async Task ComplexArrayWithNull()
+	{
+		await Do(new[]
+		{
+			null,
+			new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			},
+			new TestClass
+			{
+				IntProp = 456,
+				DateProp = DateTime.UtcNow.AddDays(1),
+				TimeProp = TimeSpan.FromSeconds(20),
+			},
+		});
+
+		await Do(new[]
+		{
+			null,
+			new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			},
+			new TestClass
+			{
+				IntProp = 456,
+				DateProp = DateTime.UtcNow.AddDays(1),
+				TimeProp = TimeSpan.FromSeconds(20),
+			},
+			null,
+		});
+	}
+
+	private class TestClassAsync : Equatable<TestClassAsync>, IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+		public DateTime DateProp { get; set; }
+		public TimeSpan TimeProp { get; set; }
+
+		public override TestClassAsync Clone()
+		{
+			return PersistableHelper.CloneAsync(this).AsTask().Result;
+		}
+
+		protected override bool OnEquals(TestClassAsync other)
+		{
+			return
+				IntProp == other.IntProp &&
+				DateProp == other.DateProp &&
+				TimeProp == other.TimeProp
+				;
+		}
+
+		async Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = await storage.GetValueAsync<int>(nameof(IntProp), cancellationToken: cancellationToken);
+			DateProp = await storage.GetValueAsync<DateTime>(nameof(DateProp), cancellationToken: cancellationToken);
+			TimeProp = await storage.GetValueAsync<TimeSpan>(nameof(TimeProp), cancellationToken: cancellationToken);
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(IntProp), IntProp)
+				.Set(nameof(DateProp), DateProp)
+				.Set(nameof(TimeProp), TimeProp);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	[TestMethod]
+	public async Task EntireAsync_RoundTripsTypeAndState()
+	{
+		var source = new TestClassAsync
+		{
+			IntProp = 7,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(3),
+		};
+
+		var storage = await source.SaveEntireAsync(false, CancellationToken);
+		var restored = await storage.LoadEntireAsync<IAsyncPersistable>(CancellationToken);
+
+		IsInstanceOfType<TestClassAsync>(restored);
+		AreEqual(source, (TestClassAsync)restored);
+	}
+
+	[TestMethod]
+	public async Task EntireAsync_RoundTripsEveryProperty()
+	{
+		var source = new TestClass
+		{
+			IntProp = 11,
+			DateProp = DateTime.UtcNow,
+			StringProp = "entire",
+			TimeProp = TimeSpan.FromSeconds(5),
+		};
+
+		var storage = await source.SaveEntireAsync(false, CancellationToken);
+		var restored = await storage.LoadEntireAsync<IAsyncPersistable>(CancellationToken);
+
+		IsInstanceOfType<TestClass>(restored);
+		AreEqual(source.IntProp, ((TestClass)restored).IntProp);
+		AreEqual(source.StringProp, ((TestClass)restored).StringProp);
+	}
+
+	[TestMethod]
+	public async Task CloneAsync_ClonesPersistedObject()
+	{
+		var source = new TestClass { IntProp = 3, StringProp = "clone" };
+
+		var clone = await source.CloneAsync(CancellationToken);
+
+		AreNotSame(source, clone);
+		AreEqual(source.IntProp, clone.IntProp);
+		AreEqual(source.StringProp, clone.StringProp);
+	}
+
+	[TestMethod]
+	public async Task ComplexAsync()
+	{
+		await Do(new TestClassAsync
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+		});
+	}
+
+	private static async Task<TestClass> LoadOrNullAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		=> storage is null ? null : await storage.LoadAsync<TestClass>(cancellationToken);
+
+	private static async Task<TestClass[]> LoadAllAsync(SettingsStorage[] storages, CancellationToken cancellationToken)
+	{
+		if (storages is null)
+			return null;
+
+		var items = new TestClass[storages.Length];
+
+		for (var i = 0; i < storages.Length; i++)
+			items[i] = await LoadOrNullAsync(storages[i], cancellationToken);
+
+		return items;
+	}
+
+	private static async Task<SettingsStorage[]> SaveAllAsync(TestClass[] items, CancellationToken cancellationToken)
+	{
+		if (items is null)
+			return null;
+
+		var storages = new SettingsStorage[items.Length];
+
+		for (var i = 0; i < items.Length; i++)
+			storages[i] = items[i] is null ? null : await items[i].SaveAsync(cancellationToken);
+
+		return storages;
+	}
+
+	private class TestComplexClass : Equatable<TestComplexClass>, IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+		public DateTime DateProp { get; set; }
+		public TimeSpan TimeProp { get; set; }
+		public TimeSpan[] TimeArrayProp { get; set; }
+		public TestClass Obj1 { get; set; }
+		public TimeSpan[] TimeArray2Prop { get; set; }
+		public TestClass[] Obj2 { get; set; }
+		public string[] StringArrayProp { get; set; }
+		public string[] StringArray2Prop { get; set; }
+		public SecureString[] SecureStringArrayProp { get; set; }
+
+		public override TestComplexClass Clone()
+		{
+			return (TestComplexClass)MemberwiseClone();
+		}
+
+		protected override bool OnEquals(TestComplexClass other)
+		{
+			return
+				IntProp == other.IntProp &&
+				DateProp == other.DateProp &&
+				TimeProp == other.TimeProp &&
+				Obj1 == other.Obj1 &&
+				((Obj2 is null && other.Obj2 is null) || Obj2?.SequenceEqual(other.Obj2) == true) &&
+				((TimeArrayProp is null && other.TimeArrayProp is null) || TimeArrayProp?.SequenceEqual(other.TimeArrayProp) == true) &&
+				((TimeArray2Prop is null && other.TimeArray2Prop is null) || TimeArray2Prop?.SequenceEqual(other.TimeArray2Prop) == true) &&
+				((StringArrayProp is null && other.StringArrayProp is null) || StringArrayProp?.SequenceEqual(other.StringArrayProp) == true) &&
+				((StringArray2Prop is null && other.StringArray2Prop is null) || StringArray2Prop?.SequenceEqual(other.StringArray2Prop) == true) &&
+				((SecureStringArrayProp is null && other.SecureStringArrayProp is null) || SecureStringArrayProp?.SequenceEqual(other.SecureStringArrayProp, StringHelper.IsEqualTo) == true)
+				;
+		}
+
+		async Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = storage.GetValue<int>(nameof(IntProp));
+			DateProp = storage.GetValue<DateTime>(nameof(DateProp));
+			TimeProp = storage.GetValue<TimeSpan>(nameof(TimeProp));
+
+			TimeArrayProp = storage.GetValue<TimeSpan[]>(nameof(TimeArrayProp));
+			TimeArray2Prop = storage.GetValue<TimeSpan[]>(nameof(TimeArray2Prop));
+			StringArrayProp = storage.GetValue<string[]>(nameof(StringArrayProp));
+			StringArray2Prop = storage.GetValue<string[]>(nameof(StringArray2Prop));
+			SecureStringArrayProp = storage.GetValue<SecureString[]>(nameof(SecureStringArrayProp));
+
+			//if (storage.ContainsKey(nameof(Obj1)))
+			Obj1 = await LoadOrNullAsync(storage.GetValue<SettingsStorage>(nameof(Obj1)), cancellationToken);
+
+			//if (storage.ContainsKey(nameof(Obj2)))
+			Obj2 = await LoadAllAsync(storage.GetValue<SettingsStorage[]>(nameof(Obj2)), cancellationToken);
+		}
+
+		async Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(IntProp), IntProp)
+				.Set(nameof(DateProp), DateProp)
+				.Set(nameof(TimeProp), TimeProp)
+				.Set(nameof(TimeArrayProp), TimeArrayProp)
+				.Set(nameof(TimeArray2Prop), TimeArray2Prop)
+				.Set(nameof(StringArrayProp), StringArrayProp)
+				.Set(nameof(StringArray2Prop), StringArray2Prop)
+				.Set(nameof(SecureStringArrayProp), SecureStringArrayProp)
+				.Set(nameof(Obj1), Obj1 is null ? null : await Obj1.SaveAsync(cancellationToken))
+				.Set(nameof(Obj2), await SaveAllAsync(Obj2, cancellationToken));
+		}
+	}
+
+	[TestMethod]
+	public async Task ComplexComplex()
+	{
+		await Do(new TestComplexClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+		});
+	}
+
+	[TestMethod]
+	public async Task ComplexComplexIgnoreNull()
+	{
+		await Do(new TestComplexClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+		}, fillMode: true, nullValueHandling: NullValueHandling.Ignore);
+	}
+
+	[TestMethod]
+	public async Task ComplexComplexNull()
+	{
+		await Do<TestComplexClass>(null);
+	}
+
+	[TestMethod]
+	public async Task ComplexComplex2()
+	{
+		await Do(new TestComplexClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj1 = new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			}
+		});
+	}
+
+	[TestMethod]
+	public async Task ComplexComplex2IgnoreNull()
+	{
+		await Do(new TestComplexClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj1 = new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			}
+		}, fillMode: true, nullValueHandling: NullValueHandling.Ignore);
+	}
+
+	[TestMethod]
+	public async Task ComplexComplex3()
+	{
+		await Do(new TestComplexClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj1 = new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			},
+			TimeArrayProp = [TimeSpan.FromSeconds(10)],
+			StringArray2Prop = [null, "", "123"],
+			SecureStringArrayProp = [null, "".Secure(), "123".Secure()],
+			Obj2 =
+			[
+				null,
+				new TestClass
+				{
+					IntProp = 124,
+					DateProp = DateTime.UtcNow,
+					TimeProp = TimeSpan.FromSeconds(10),
+				},
+				null,
+				new TestClass
+				{
+					IntProp = 124,
+					DateProp = DateTime.UtcNow,
+					TimeProp = TimeSpan.FromSeconds(10),
+				},
+			]
+		});
+	}
+
+	private class TestContainsClass : Equatable<TestContainsClass>, IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+		public DateTime DateProp { get; set; }
+		public TimeSpan TimeProp { get; set; }
+		public TestClass Obj1 { get; set; }
+		public TestClass[] Obj2 { get; set; }
+
+		public override TestContainsClass Clone()
+		{
+			return (TestContainsClass)MemberwiseClone();
+		}
+
+		protected override bool OnEquals(TestContainsClass other)
+		{
+			return
+				IntProp == other.IntProp &&
+				DateProp == other.DateProp &&
+				TimeProp == other.TimeProp &&
+				Obj1 == other.Obj1 &&
+				((Obj2 is null && other.Obj2 is null) || Obj2?.SequenceEqual(other.Obj2) == true)
+				;
+		}
+
+		async Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = storage.GetValue<int>(nameof(IntProp));
+			DateProp = storage.GetValue<DateTime>(nameof(DateProp));
+			TimeProp = storage.GetValue<TimeSpan>(nameof(TimeProp));
+
+			if (storage.ContainsKey(nameof(Obj1)))
+				Obj1 = await storage.GetValue<SettingsStorage>(nameof(Obj1)).LoadAsync<TestClass>(cancellationToken);
+
+			if (storage.ContainsKey(nameof(Obj2)))
+				Obj2 = await LoadAllAsync([.. storage.GetValue<object[]>(nameof(Obj2)).Cast<SettingsStorage>()], cancellationToken);
+		}
+
+		async Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(IntProp), IntProp)
+				.Set(nameof(DateProp), DateProp)
+				.Set(nameof(TimeProp), TimeProp);
+
+			if (Obj1 != null)
+				storage.Set(nameof(Obj1), await Obj1.SaveAsync(cancellationToken));
+
+			if (Obj2 != null)
+				storage.Set(nameof(Obj2), await SaveAllAsync(Obj2, cancellationToken));
+		}
+	}
+
+	[TestMethod]
+	public async Task Contains()
+	{
+		await Do(new TestContainsClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj1 = new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			}
+		}, fillMode: true);
+
+		await Do(new TestContainsClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj2 = [],
+		}, fillMode: true);
+
+		await Do(new TestContainsClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj2 = [null],
+		}, fillMode: true);
+	}
+
+	[TestMethod]
+	public async Task ContainsNull()
+	{
+		await Do<TestContainsClass>(null, true);
+	}
+
+	private class TestDirectClass : Equatable<TestDirectClass>, IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+		public DateTime DateProp { get; set; }
+		public TimeSpan TimeProp { get; set; }
+		public TestClass Obj1 { get; set; }
+		public TestClass[] Obj2 { get; set; }
+
+		public override TestDirectClass Clone()
+		{
+			return (TestDirectClass)MemberwiseClone();
+		}
+
+		protected override bool OnEquals(TestDirectClass other)
+		{
+			return
+				IntProp == other.IntProp &&
+				DateProp == other.DateProp &&
+				TimeProp == other.TimeProp &&
+				Obj1 == other.Obj1 &&
+				((Obj2 is null && other.Obj2 is null) || Obj2?.SequenceEqual(other.Obj2) == true)
+				;
+		}
+
+		async Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = storage.GetValue<int>(nameof(IntProp));
+			DateProp = storage.GetValue<DateTime>(nameof(DateProp));
+			TimeProp = storage.GetValue<TimeSpan>(nameof(TimeProp));
+
+			Obj1 = await storage.GetValueAsync<TestClass>(nameof(Obj1), cancellationToken: cancellationToken);
+
+			if (storage.ContainsKey(nameof(Obj2)))
+				Obj2 = await storage.GetValueAsync<TestClass[]>(nameof(Obj2), cancellationToken: cancellationToken);
+		}
+
+		async Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(IntProp), IntProp)
+				.Set(nameof(DateProp), DateProp)
+				.Set(nameof(TimeProp), TimeProp);
+
+			if (Obj1 != null)
+				storage.Set(nameof(Obj1), await Obj1.SaveAsync(cancellationToken));
+
+			if (Obj2 != null)
+				storage.Set(nameof(Obj2), await SaveAllAsync(Obj2, cancellationToken));
+		}
+	}
+
+	[TestMethod]
+	public async Task Direct()
+	{
+		await Do(new TestDirectClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj1 = new TestClass
+			{
+				IntProp = 124,
+				DateProp = DateTime.UtcNow,
+				TimeProp = TimeSpan.FromSeconds(10),
+			}
+		}, fillMode: true);
+
+		await Do(new TestDirectClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj2 = [new TestClass()],
+		}, fillMode: true);
+
+		await Do(new TestDirectClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj2 = [],
+		}, fillMode: true);
+
+		await Do(new TestDirectClass
+		{
+			IntProp = 124,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(10),
+			Obj2 = [null],
+		}, fillMode: true);
+	}
+
+	private class TestEnumClass : Equatable<TestEnumClass>, IAsyncPersistable
+	{
+		public GCKind EnumProp { get; set; }
+		public GCKind? NullableEnumProp { get; set; }
+
+		public override TestEnumClass Clone()
+		{
+			return (TestEnumClass)MemberwiseClone();
+		}
+
+		protected override bool OnEquals(TestEnumClass other)
+		{
+			return
+				EnumProp == other.EnumProp &&
+				NullableEnumProp == other.NullableEnumProp;
+		}
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			EnumProp = storage.GetValue<GCKind>(nameof(EnumProp));
+			NullableEnumProp = storage.GetValue<GCKind?>(nameof(NullableEnumProp));
+
+			return Task.CompletedTask;
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(EnumProp), EnumProp)
+				.Set(nameof(NullableEnumProp), NullableEnumProp);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	[TestMethod]
+	public async Task ComplexEnum()
+	{
+		await Do(new TestEnumClass
+		{
+			EnumProp = GCKind.Ephemeral,
+			NullableEnumProp = GCKind.FullBlocking,
+		}, enumAsString: true);
+
+		await Do(new TestEnumClass
+		{
+			EnumProp = GCKind.Ephemeral,
+		}, enumAsString: true);
+
+		await Do(new TestEnumClass
+		{
+			EnumProp = GCKind.Ephemeral,
+			NullableEnumProp = GCKind.FullBlocking,
+		});
+
+		await Do(new TestEnumClass
+		{
+			EnumProp = GCKind.Ephemeral,
+		});
+	}
+
+	private class TestSecureString : Equatable<TestSecureString>, IAsyncPersistable
+	{
+		public SecureString SecureStringProp { get; set; }
+
+		public override TestSecureString Clone()
+		{
+			return (TestSecureString)MemberwiseClone();
+		}
+
+		protected override bool OnEquals(TestSecureString other)
+		{
+			return
+				SecureStringProp.IsEqualTo(other.SecureStringProp);
+		}
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			SecureStringProp = storage.GetValue<SecureString>(nameof(SecureStringProp));
+
+			return Task.CompletedTask;
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(SecureStringProp), SecureStringProp);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	[TestMethod]
+	public async Task ComplexSecureString()
+	{
+		const string plainTextPassword = "SuperSecret123!";
+		var obj = new TestSecureString
+		{
+			SecureStringProp = plainTextPassword.Secure(),
+		};
+
+		// Test with encryptedAsByteArray: true - verify plain text password is NOT in JSON
+		await Do(obj, encryptedAsByteArray: true, jsonInspector: json =>
+		{
+			json.Contains(plainTextPassword).AssertFalse($"Plain text password should NOT appear in JSON when encryptedAsByteArray=true. JSON: {json}");
+		});
+
+		// Test without encryptedAsByteArray - verify JSON has some content for the property
+		await Do(obj, jsonInspector: json =>
+		{
+			json.Contains("SecureStringProp").AssertTrue("JSON should contain the property name");
+		});
+
+		var ss = (await obj.SaveAsync(CancellationToken));
+
+		await Do(ss, encryptedAsByteArray: true);
+		await Do(ss);
+
+		obj.AssertEqual(await (await Do(ss, encryptedAsByteArray: true)).LoadAsync<TestSecureString>(CancellationToken));
+		obj.AssertEqual(await (await Do(ss)).LoadAsync<TestSecureString>(CancellationToken));
+	}
+
+	private struct CurrencyPersistableAdapter : IPersistableAdapter, IAsyncPersistable
+	{
+		private Currency _underlyingValue;
+
+		object IPersistableAdapter.UnderlyingValue
+		{
+			readonly get => _underlyingValue;
+			set => _underlyingValue = (Currency)value;
+		}
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			_underlyingValue = new()
+			{
+				Type = storage.GetValue<CurrencyTypes>(nameof(_underlyingValue.Type)),
+				Value = storage.GetValue<decimal>(nameof(_underlyingValue.Value))
+			};
+
+			return Task.CompletedTask;
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage
+				.Set(nameof(_underlyingValue.Type), _underlyingValue.Type)
+				.Set(nameof(_underlyingValue.Value), _underlyingValue.Value);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	private class TestCurrencyComplex : Equatable<TestCurrencyComplex>, IAsyncPersistable
+	{
+		public Currency Currency { get; set; }
+
+		protected override bool OnEquals(TestCurrencyComplex other)
+		{
+			return Currency == other.Currency;
+		}
+
+		public override TestCurrencyComplex Clone()
+		{
+			return new() { Currency = Currency };
+		}
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			Currency = storage.GetValue<Currency>(nameof(Currency));
+
+			return Task.CompletedTask;
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage.Set(nameof(Currency), Currency);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	[TestMethod]
+	public async Task Currency()
+	{
+		PersistableHelper.RegisterAdapterType(typeof(Currency), typeof(CurrencyPersistableAdapter));
+
+		try
+		{
+			var curr = 10m.ToCurrency(CurrencyTypes.USD);
+
+			await Do(curr);
+			await Do<Currency>(null);
+			await Do<TestCurrencyComplex>(new() { Currency = curr });
+			await Do<TestCurrencyComplex>(null);
+			await Do<TestCurrencyComplex>(new());
+		}
+		finally
+		{
+			PersistableHelper.RemoveAdapterType(typeof(Currency));
+		}
+	}
+
+	[TestMethod]
+	public void NullDeserialize()
+	{
+		((string)null).DeserializeObject<CurrencyTypes?>().AssertEqual(null);
+		string.Empty.DeserializeObject<CurrencyTypes?>().AssertEqual(null);
+		((JToken)null).DeserializeObject<CurrencyTypes?>().AssertEqual(null);
+
+		((string)null).DeserializeObject<TestClass>().AssertEqual(null);
+		string.Empty.DeserializeObject<TestClass>().AssertEqual(null);
+		((JToken)null).DeserializeObject<TestClass>().AssertEqual(null);
+	}
+
+	[TestMethod]
+	public void JTokenStringNullStaysString()
+	{
+		const string value = "null";
+
+		new JValue(value).DeserializeObject<string>().AssertEqual(value);
+	}
+
+	[TestMethod]
+	public void JTokenObjectStringNullStaysString()
+	{
+		new JValue("null").DeserializeObject<object>().AssertEqual((object)"null");
+	}
+
+	[TestMethod]
+	public void NullDeserializeError1()
+	{
+		ThrowsExactly<ArgumentNullException>(() => ((string)null).DeserializeObject<CurrencyTypes>());
+	}
+
+	[TestMethod]
+	public void NullDeserializeError2()
+	{
+		ThrowsExactly<ArgumentNullException>(() => string.Empty.DeserializeObject<CurrencyTypes>());
+	}
+
+	[TestMethod]
+	public void NullDeserializeError3()
+	{
+		ThrowsExactly<ArgumentNullException>(() => ((JToken)null).DeserializeObject<CurrencyTypes>());
+	}
+
+	[TestMethod]
+	public async Task Object2Storage()
+	{
+		async Task Do<T>(T v)
+			=> (await (await v.ToStorageAsync(false, CancellationToken)).FromStorageAsync(CancellationToken)).AssertEqual(v);
+
+		await Do("123");
+		await Do(123);
+		await Do(123L);
+		await Do(DateTime.UtcNow);
+		await Do(DateTimeOffset.UtcNow);
+		await Do(TimeSpan.FromSeconds(123));
+		await Do(new Uri("https://google.com"));
+	}
+
+	[TestMethod]
+	public async Task Object2Storage_AsyncPersistableRoundTrips()
+	{
+		var value = new TestClassAsync
+		{
+			IntProp = 9,
+			DateProp = DateTime.UtcNow,
+			TimeProp = TimeSpan.FromSeconds(4),
+		};
+
+		var restored = await (await value.ToStorageAsync(false, CancellationToken)).FromStorageAsync(CancellationToken);
+
+		IsInstanceOfType<TestClassAsync>(restored);
+		AreEqual(value, (TestClassAsync)restored);
+	}
+
+	private sealed class NestedTypeStorageMarker
+	{
+	}
+
+	[TestMethod]
+	public void MemberStorage_NestedTypeRoundTripsAsType()
+	{
+		var type = typeof(NestedTypeStorageMarker);
+
+		type.ToStorage().ToMember<Type>().AssertEqual(type);
+		type.ToStorage().ToMember().AssertEqual(type);
+	}
+
+	[TestMethod]
+	[DataRow("2024-01-01T12:00:00.0000000Z")]
+	[DataRow("2024-06-15T23:59:59.0000000Z")]
+	public async Task Object2Storage_UtcDateTimeDoesNotShift(string text)
+	{
+		var value = DateTime.Parse(text, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+		var restored = (DateTime)await (await value.ToStorageAsync(false, CancellationToken)).FromStorageAsync(CancellationToken);
+
+		restored.AssertEqual(value);
+		restored.Kind.AssertEqual(DateTimeKind.Utc);
+	}
+
+	[TestMethod]
+	public async Task Object2Storage_UnspecifiedDateTimeDoesNotShift()
+	{
+		var value = new DateTime(2024, 1, 1, 12, 0, 0, DateTimeKind.Unspecified);
+
+		var restored = (DateTime)await (await value.ToStorageAsync(false, CancellationToken)).FromStorageAsync(CancellationToken);
+
+		restored.AssertEqual(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+		restored.Kind.AssertEqual(DateTimeKind.Utc);
+	}
+
+	[TestMethod]
+	public async Task Bom()
+	{
+		var requestBody = new MemoryStream();
+		await new JsonSerializer<TestClass> { Encoding = JsonHelper.UTF8NoBom }.SerializeAsync(new(), requestBody, CancellationToken);
+		requestBody.To<byte[]>().UTF8().DeserializeObject<TestClass>();
+	}
+
+	[TestMethod]
+	public async Task SerializeAsync_DoesNotUseSynchronousStreamWrites()
+	{
+		var serializer = new JsonSerializer<SettingsStorage>();
+		await using var stream = new AsyncOnlyStream();
+
+		await serializer.SerializeAsync(new SettingsStorage().Set("Name", "Value"), stream, CancellationToken);
+	}
+
+	[TestMethod]
+	public async Task BomError()
+	{
+		var requestBody = new MemoryStream();
+		await new JsonSerializer<TestClass>().SerializeAsync(new(), requestBody, CancellationToken);
+		ThrowsExactly<InvalidOperationException>(() => requestBody.To<byte[]>().UTF8().DeserializeObject<TestClass>());
+	}
+
+	[JsonConverter(typeof(JArrayToObjectConverter<OrderBookEntry>))]
+	private class OrderBookEntry
+	{
+		public double Price { get; set; }
+		public double Size { get; set; }
+	}
+
+	[TestMethod]
+	public void JArray()
+	{
+		var jArray = new JArray
+		{
+			new JArray { 1.1, 2.2 },
+			new JArray { 3.3, 4.4 },
+		};
+
+		var entries = jArray.DeserializeObject<OrderBookEntry[]>();
+		entries[0].Price.AssertEqual(1.1);
+		entries[0].Size.AssertEqual(2.2);
+		entries[1].Price.AssertEqual(3.3);
+		entries[1].Size.AssertEqual(4.4);
+
+		var str = jArray.ToString();
+		entries = str.DeserializeObject<OrderBookEntry[]>();
+		entries[0].Price.AssertEqual(1.1);
+		entries[0].Size.AssertEqual(2.2);
+		entries[1].Price.AssertEqual(3.3);
+		entries[1].Size.AssertEqual(4.4);
+	}
+
+	[JsonConverter(typeof(JArrayToObjectConverter))]
+	private class OrderBookEntry2
+	{
+		public double Price { get; set; }
+		public double Size { get; set; }
+	}
+
+	[TestMethod]
+	public void JArrayGeneric()
+	{
+		var jArray = new JArray
+		{
+			new JArray { 1.1, 2.2 },
+			new JArray { 3.3, 4.4 },
+		};
+
+		var entries = jArray.DeserializeObject<OrderBookEntry2[]>();
+		entries[0].Price.AssertEqual(1.1);
+		entries[0].Size.AssertEqual(2.2);
+		entries[1].Price.AssertEqual(3.3);
+		entries[1].Size.AssertEqual(4.4);
+
+		var str = jArray.ToString();
+		entries = str.DeserializeObject<OrderBookEntry2[]>();
+		entries[0].Price.AssertEqual(1.1);
+		entries[0].Size.AssertEqual(2.2);
+		entries[1].Price.AssertEqual(3.3);
+		entries[1].Size.AssertEqual(4.4);
+	}
+
+	[JsonConverter(typeof(JArrayToObjectConverter<OB_WithStatic_Generic>))]
+	private class OB_WithStatic_Generic
+	{
+		public double Price { get; set; }
+		public double Size { get; set; }
+		public static double Bias; // must be ignored by converter
+	}
+
+	[JsonConverter(typeof(JArrayToObjectConverter))]
+	private class OB_WithStatic_NonGeneric
+	{
+		public double Price { get; set; }
+		public double Size { get; set; }
+		public static double Bias; // must be ignored by converter
+	}
+
+	[TestMethod]
+	public void JArray_IgnoresStaticFields_Generic()
+	{
+		OB_WithStatic_Generic.Bias = 10.0;
+		var obj = new OB_WithStatic_Generic { Price = 1.1, Size = 2.2 };
+
+		var json = JsonConvert.SerializeObject(obj);
+		var arr = Newtonsoft.Json.Linq.JArray.Parse(json);
+
+		arr.Count.AssertEqual(2);
+		arr[0].ToObject<double>().AssertEqual(1.1);
+		arr[1].ToObject<double>().AssertEqual(2.2);
+	}
+
+	[TestMethod]
+	public void JArray_IgnoresStaticFields_NonGeneric()
+	{
+		OB_WithStatic_NonGeneric.Bias = 10.0;
+		var obj = new OB_WithStatic_NonGeneric { Price = 1.1, Size = 2.2 };
+
+		var json = JsonConvert.SerializeObject(obj);
+		var arr = Newtonsoft.Json.Linq.JArray.Parse(json);
+
+		arr.Count.AssertEqual(2);
+		arr[0].ToObject<double>().AssertEqual(1.1);
+		arr[1].ToObject<double>().AssertEqual(2.2);
+	}
+
+	#region Nested Arrays Tests
+
+	/// <summary>
+	/// Verifies that SettingsStorage can deserialize nested arrays correctly.
+	/// JSON like {"matrix": [[1,2],[3,4]]} should deserialize properly.
+	/// </summary>
+	[TestMethod]
+	public async Task SettingsStorage_NestedArrays_DeserializesCorrectly()
+	{
+		var storage = new SettingsStorage();
+		storage.Set("matrix", new[] { new[] { 1, 2 }, new[] { 3, 4 } });
+
+		var result = await Do(storage, fillMode: true);
+
+		var matrix = result.GetValue<object[]>("matrix");
+		matrix.AssertNotNull("Nested array should be deserialized");
+		matrix.Length.AssertEqual(2, "Should have 2 inner arrays");
+
+		var row0 = matrix[0] as object[];
+		var row1 = matrix[1] as object[];
+
+		row0.AssertNotNull("First inner array should exist");
+		row1.AssertNotNull("Second inner array should exist");
+
+		row0.Length.AssertEqual(2, "First row should have 2 elements");
+		row1.Length.AssertEqual(2, "Second row should have 2 elements");
+	}
+
+	/// <summary>
+	/// Verifies that deeply nested arrays are handled correctly.
+	/// </summary>
+	[TestMethod]
+	public async Task SettingsStorage_DeeplyNestedArrays_DeserializesCorrectly()
+	{
+		var storage = new SettingsStorage();
+		var deepArray = new[] { new[] { new[] { 1, 2 }, new[] { 3, 4 } } };
+		storage.Set("deep", deepArray);
+
+		var result = await Do(storage, fillMode: true);
+
+		var deep = result.GetValue<object[]>("deep");
+		deep.AssertNotNull("Deep nested array should be deserialized");
+		deep.Length.AssertEqual(1, "Should have 1 element at top level");
+	}
+
+	/// <summary>
+	/// Verifies that mixed nested structures (arrays with objects) deserialize correctly.
+	/// </summary>
+	[TestMethod]
+	public async Task SettingsStorage_ArrayOfObjects_DeserializesCorrectly()
+	{
+		var storage = new SettingsStorage();
+		var inner1 = new SettingsStorage();
+		inner1.Set("value", 1);
+		var inner2 = new SettingsStorage();
+		inner2.Set("value", 2);
+		storage.Set("items", new[] { inner1, inner2 });
+
+		var result = await Do(storage, fillMode: true);
+
+		var items = result.GetValue<object[]>("items");
+		items.AssertNotNull("Array of objects should be deserialized");
+		items.Length.AssertEqual(2, "Should have 2 objects in array");
+	}
+
+	#endregion
+
+	private class ExtraPropClass : IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = storage.GetValue<int>(nameof(IntProp));
+
+			return Task.CompletedTask;
+		}
+
+		Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage.Set(nameof(IntProp), IntProp);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	/// <summary>
+	/// Regression test for FillMode=false deserialization: ensures unconsumed/extra properties left
+	/// by IPersistable.Load are skipped deterministically to the matching EndObject in all build
+	/// configurations, so a following element still deserializes correctly.
+	/// (Was: the reader was only validated by the [Conditional("DEBUG")] CheckExpectedToken, so in
+	/// Release an extra property left the reader mid-object and desynced subsequent tokens; now
+	/// handled by SkipToEndObjectAsync, JsonSerializer.cs.)
+	/// </summary>
+	[TestMethod]
+	public async Task FillModeFalse_ExtraProperty_DoesNotDesyncReader()
+	{
+		var ser = new JsonSerializer<ExtraPropClass[]>
+		{
+			FillMode = false,
+		};
+
+		// An array of two objects; the FIRST carries an extra, unconsumed property ("Extra").
+		// A correct reader skips it to the object's EndObject so the SECOND object still parses.
+		var json =
+			"[" +
+			"{\"IntProp\":11,\"Extra\":\"unconsumed\"}," +
+			"{\"IntProp\":22}" +
+			"]";
+
+		using var stream = new MemoryStream(json.UTF8());
+
+		var arr = await ser.DeserializeAsync(stream, CancellationToken);
+
+		arr.AssertNotNull();
+		arr.Length.AssertEqual(2);
+		arr[0].IntProp.AssertEqual(11);
+		arr[1].IntProp.AssertEqual(22);
+	}
+
+	[TestMethod]
+	public async Task DeserializeAsync_Bytes_ReadsBackWhatWasWritten()
+	{
+		var serializer = new JsonSerializer<List<int>>();
+
+		var bytes = new MemoryStream();
+		await serializer.SerializeAsync([1, 2, 3], bytes, CancellationToken);
+
+		var read = await serializer.DeserializeAsync(bytes.ToArray(), CancellationToken);
+
+		read.SequenceEqual([1, 2, 3]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task DeserializeAsync_File_ReadsBackWhatWasWritten()
+	{
+		var serializer = new JsonSerializer<List<int>>();
+		var fs = new MemoryFileSystem();
+
+		using (var stream = fs.OpenWrite("values.json"))
+			await serializer.SerializeAsync([4, 5], stream, CancellationToken);
+
+		var read = await serializer.DeserializeAsync(fs, "values.json", CancellationToken);
+
+		read.SequenceEqual([4, 5]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task StringAsync_Value_RoundTrips()
+	{
+		var serializer = new JsonSerializer<List<int>>();
+
+		var text = await serializer.SaveToStringAsync([7, 8, 9], CancellationToken);
+		var read = await serializer.LoadFromStringAsync(text, CancellationToken);
+
+		read.SequenceEqual([7, 8, 9]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task StringAsync_Persistable_RoundTrips()
+	{
+		var serializer = new JsonSerializer<SettingsStorage>();
+		var original = new TestClass { IntProp = 3, StringProp = "alpha" };
+
+		var text = await serializer.SaveToStringAsync(original, CancellationToken);
+
+		var read = new TestClass();
+		await serializer.LoadFromStringAsync(read, text, CancellationToken);
+
+		read.AssertEqual(original);
+	}
+
+	[TestMethod]
+	public async Task String_BlockingFormsMatchTheAwaitableOnes()
+	{
+		var serializer = new JsonSerializer<List<int>>();
+
+		var text = await serializer.SaveToStringAsync([1, 2], CancellationToken);
+
+#pragma warning disable CS0618 // the blocking forms are kept as wrappers over the awaitable ones
+		serializer.LoadFromString(text).SequenceEqual([1, 2]).AssertTrue();
+		serializer.SaveToString([1, 2]).AssertEqual(text);
+#pragma warning restore CS0618
+	}
+
+#pragma warning disable CS0618 // the obsolete contract is still honoured for types that have not moved
+	private class SyncPropClass : IPersistable
+	{
+		public int IntProp { get; set; }
+
+		void IPersistable.Load(SettingsStorage storage)
+			=> IntProp = storage.GetValue<int>(nameof(IntProp));
+
+		void IPersistable.Save(SettingsStorage storage)
+			=> storage.Set(nameof(IntProp), IntProp);
+	}
+#pragma warning restore CS0618
+
+	private struct StructPropValue : IAsyncPersistable
+	{
+		public int IntProp { get; set; }
+
+		Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			IntProp = storage.GetValue<int>(nameof(IntProp));
+
+			return Task.CompletedTask;
+		}
+
+		readonly Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		{
+			storage.Set(nameof(IntProp), IntProp);
+
+			return Task.CompletedTask;
+		}
+	}
+
+	[TestMethod]
+	public async Task SaveAllAsync_SavesEveryItemInOrder()
+	{
+		ExtraPropClass[] items = [new() { IntProp = 1 }, new() { IntProp = 2 }, new() { IntProp = 3 }];
+
+		var storages = await items.SaveAllAsync(CancellationToken);
+
+		storages.Select(s => s.GetValue<int>(nameof(ExtraPropClass.IntProp))).SequenceEqual([1, 2, 3]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task LoadAllAsync_LoadsAnItemFromEveryStorage()
+	{
+		var storages = new[] { 4, 5 }.Select(v => new SettingsStorage().Set(nameof(ExtraPropClass.IntProp), v)).ToArray();
+
+		var items = await storages.LoadAllAsync<ExtraPropClass>(CancellationToken);
+
+		items.Select(i => i.IntProp).SequenceEqual([4, 5]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task AllAsync_Structs_RoundTrip()
+	{
+		StructPropValue[] items = [new() { IntProp = 6 }, new() { IntProp = 7 }];
+
+		var restored = await (await items.SaveAllAsync(CancellationToken)).LoadAllAsync<StructPropValue>(CancellationToken);
+
+		restored.Select(i => i.IntProp).SequenceEqual([6, 7]).AssertTrue();
+	}
+
+	[TestMethod]
+	public async Task AllAsync_NoItems_GiveEmptyArrays()
+	{
+		(await Array.Empty<ExtraPropClass>().SaveAllAsync(CancellationToken)).Length.AssertEqual(0);
+		(await Array.Empty<SettingsStorage>().LoadAllAsync<ExtraPropClass>(CancellationToken)).Length.AssertEqual(0);
+	}
+
+	[TestMethod]
+	public async Task Load_BlockingForm_LoadsEveryKindOfPersistable()
+	{
+		var storage = await new ExtraPropClass { IntProp = 9 }.SaveAsync(CancellationToken);
+
+#pragma warning disable CS0618 // the blocking form is kept as a wrapper over the awaitable one
+		storage.Load<ExtraPropClass>().IntProp.AssertEqual(9);
+		storage.Load<StructPropValue>().IntProp.AssertEqual(9);
+		storage.Load<SyncPropClass>().IntProp.AssertEqual(9);
+#pragma warning restore CS0618
+	}
+}

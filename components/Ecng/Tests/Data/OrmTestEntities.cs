@@ -1,0 +1,660 @@
+namespace Ecng.Tests.Data;
+
+using System.ComponentModel;
+
+using Ecng.Data.Sql;
+using Ecng.Serialization;
+
+[Entity(Name = "Ecng_TestItem")]
+public class TestItem : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+	public int Priority { get; set; }
+	public decimal Price { get; set; }
+	public DateTime CreatedAt { get; set; }
+	public DateTime? ModifiedAt { get; set; }
+	public bool IsActive { get; set; }
+	public int? NullableValue { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.Set(nameof(Name), Name)
+			.Set(nameof(Priority), Priority)
+			.Set(nameof(Price), Price)
+			.Set(nameof(CreatedAt), CreatedAt)
+			.Set(nameof(ModifiedAt), ModifiedAt)
+			.Set(nameof(IsActive), IsActive)
+			.Set(nameof(NullableValue), NullableValue);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Name = storage.GetValue<string>(nameof(Name));
+		Priority = storage.GetValue<int>(nameof(Priority));
+		Price = storage.GetValue<decimal>(nameof(Price));
+		CreatedAt = storage.GetValue<DateTime>(nameof(CreatedAt));
+		ModifiedAt = storage.GetValue<DateTime?>(nameof(ModifiedAt));
+		IsActive = storage.GetValue<bool>(nameof(IsActive));
+		NullableValue = storage.GetValue<int?>(nameof(NullableValue));
+		return default;
+	}
+}
+
+[Entity(Name = "Ecng_TestCategory")]
+public class TestCategory : IDbPersistable
+{
+	public long Id { get; set; }
+	public string CategoryName { get; set; }
+	public string Description { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.Set(nameof(CategoryName), CategoryName)
+			.Set(nameof(Description), Description);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		CategoryName = storage.GetValue<string>(nameof(CategoryName));
+		Description = storage.GetValue<string>(nameof(Description));
+		return default;
+	}
+}
+
+[Entity(Name = "Ecng_TestItemCategory")]
+public class TestItemCategory : IDbPersistable
+{
+	public long Id { get; set; }
+
+	[RelationSingle]
+	public TestItem Item { get; set; }
+
+	[RelationSingle]
+	public TestCategory Category { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.SetFk(nameof(Item), Item?.Id)
+			.SetFk(nameof(Category), Category?.Id);
+	}
+
+	public async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Item = await storage.LoadFkAsync<TestItem>(nameof(Item), db, cancellationToken);
+		Category = await storage.LoadFkAsync<TestCategory>(nameof(Category), db, cancellationToken);
+	}
+}
+
+[Entity(Name = "Ecng_TestPerson")]
+public class TestPerson : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+
+	[AllColumnsField]
+	public object AllColumns;
+
+	[RelationMany(typeof(TestPersonTaskList))]
+	public TestPersonTaskList Tasks { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage.Set(nameof(Name), Name);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Name = storage.GetValue<string>(nameof(Name));
+		return default;
+	}
+
+	public void InitLists(IStorage db)
+	{
+		Tasks = new TestPersonTaskList(db, this);
+	}
+}
+
+[Entity(Name = "Ecng_TestMultiIx")]
+public class TestMultiIx : IDbPersistable
+{
+	public long Id { get; set; }
+
+	// One column carries three [Index] decorations — its own single-column
+	// index plus the leading slot of two different composites. Verifies the
+	// schema registry collects every attribute (AllowMultiple = true) and
+	// each declared index reaches the migrator.
+	[Index]
+	[Index(Name = "IX_MultiIx_TenantCreated", Order = 0)]
+	[Index(Name = "IX_MultiIx_TenantEntryType", Order = 0)]
+	public long TenantId { get; set; }
+
+	[Index(Name = "IX_MultiIx_TenantCreated", Order = 1)]
+	public DateTime CreatedAt { get; set; }
+
+	[Index(Name = "IX_MultiIx_TenantEntryType", Order = 1)]
+	public int EntryType { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+		=> storage.Set(nameof(TenantId), TenantId).Set(nameof(CreatedAt), CreatedAt).Set(nameof(EntryType), EntryType);
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		TenantId = storage.GetValue<long>(nameof(TenantId));
+		CreatedAt = storage.GetValue<DateTime>(nameof(CreatedAt));
+		EntryType = storage.GetValue<int>(nameof(EntryType));
+		return default;
+	}
+}
+
+[Entity(Name = "Ecng_TestCompositeIx")]
+public class TestCompositeIx : IDbPersistable
+{
+	public long Id { get; set; }
+
+	// Same IndexName + different Order on two columns groups them into one
+	// composite index `IX_TenantCreated` in CREATE TABLE.
+	[Index(Name = "IX_TenantCreated", Order = 0)]
+	public long TenantId { get; set; }
+
+	[Index(Name = "IX_TenantCreated", Order = 1)]
+	public DateTime CreatedAt { get; set; }
+
+	// Stand-alone single-column index lives next to the composite — verifies
+	// the two paths don't interfere when they share a table.
+	[Index]
+	public int Priority { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+		=> storage.Set(nameof(TenantId), TenantId).Set(nameof(CreatedAt), CreatedAt).Set(nameof(Priority), Priority);
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		TenantId = storage.GetValue<long>(nameof(TenantId));
+		CreatedAt = storage.GetValue<DateTime>(nameof(CreatedAt));
+		Priority = storage.GetValue<int>(nameof(Priority));
+		return default;
+	}
+}
+
+// Type-level partial (filtered) unique composite: (TenantId, IdempotencyKey) is unique only over
+// rows with a non-empty key, so many "no key" rows coexist while real keys stay unique per tenant.
+[Entity(Name = "Ecng_TestFilteredUniqueIx")]
+[Unique(nameof(TenantId), nameof(IdempotencyKey), Name = "UX_FilteredUnique_Tenant_Key", Condition = "{IdempotencyKey} <> ''")]
+public class TestFilteredUniqueIx : IDbPersistable
+{
+	public long Id { get; set; }
+	public long TenantId { get; set; }
+	[Column(MaxLength = 128)]
+	public string IdempotencyKey { get; set; } = string.Empty;
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+		=> storage.Set(nameof(TenantId), TenantId).Set(nameof(IdempotencyKey), IdempotencyKey);
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		TenantId = storage.GetValue<long>(nameof(TenantId));
+		IdempotencyKey = storage.GetValue<string>(nameof(IdempotencyKey));
+		return default;
+	}
+}
+
+[Entity(Name = "Ecng_TestIndexed")]
+public class TestIndexed : IDbPersistable
+{
+	public long Id { get; set; }
+
+	// Two integer index targets — picked because every dialect can index
+	// fixed-width numeric columns out of the box, no MaxLength gymnastics
+	// to make CREATE INDEX accept the column type.
+	[Index]
+	public int Priority { get; set; }
+
+	[Index]
+	public long Owner { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+		=> storage.Set(nameof(Priority), Priority).Set(nameof(Owner), Owner);
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Priority = storage.GetValue<int>(nameof(Priority));
+		Owner = storage.GetValue<long>(nameof(Owner));
+		return default;
+	}
+}
+
+[Entity(Name = "Ecng_TestTask")]
+public class TestTask : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Title { get; set; }
+	public int Priority { get; set; }
+	public bool IsDone { get; set; }
+
+	[RelationSingle]
+	public TestPerson Person { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.Set(nameof(Title), Title)
+			.Set(nameof(Priority), Priority)
+			.Set(nameof(IsDone), IsDone)
+			.SetFk(nameof(Person), Person?.Id);
+	}
+
+	public async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Title = storage.GetValue<string>(nameof(Title));
+		Priority = storage.GetValue<int>(nameof(Priority));
+		IsDone = storage.GetValue<bool>(nameof(IsDone));
+		Person = await storage.LoadFkAsync<TestPerson>(nameof(Person), db, cancellationToken);
+	}
+}
+
+/// <summary>
+/// Sub-task of a <see cref="TestTask"/>. Used to exercise two-level navigation
+/// in LINQ expressions, e.g. <c>subTasks.Where(s =&gt; s.Task.Person.Id == X)</c>.
+/// </summary>
+[Entity(Name = "Ecng_TestSubTask")]
+public class TestSubTask : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Description { get; set; }
+
+	[RelationSingle]
+	public TestTask Task { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.Set(nameof(Description), Description)
+			.SetFk(nameof(Task), Task?.Id);
+	}
+
+	public async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Description = storage.GetValue<string>(nameof(Description));
+		Task = await storage.LoadFkAsync<TestTask>(nameof(Task), db, cancellationToken);
+	}
+}
+
+public class TestPersonTaskList(IStorage storage, TestPerson person) : RelationManyList<TestTask, long>(storage)
+{
+	private readonly TestPerson _person = person ?? throw new ArgumentNullException(nameof(person));
+
+	public override IQueryable<TestTask> ToQueryable()
+		=> base.ToQueryable().Where(t => t.Person.Id == _person.Id);
+
+	protected override ValueTask<long> OnGetCount(bool deleted, CancellationToken cancellationToken)
+		=> ToQueryable().CountAsyncEx(cancellationToken);
+
+	protected override async ValueTask<TestTask[]> OnGetGroup(long startIndex, long count, bool deleted, string orderBy, ListSortDirection direction, CancellationToken cancellationToken)
+	{
+		var q = ToQueryable();
+
+		if (startIndex > 0)
+			q = q.Skip((int)startIndex);
+
+		if (count < long.MaxValue)
+			q = q.Take((int)count);
+
+		return await q.ToArrayAsyncEx(cancellationToken);
+	}
+
+	protected override ValueTask<bool> IsSaved(TestTask item, CancellationToken cancellationToken)
+		=> new(item.Id > 0);
+
+	public override ValueTask<bool> ContainsAsync(TestTask item, CancellationToken cancellationToken)
+		=> ToQueryable().Where(t => t.Id == item.Id).AnyAsyncEx(cancellationToken);
+}
+
+public class TestItemWithIgnored : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+
+	[Ignore]
+	public string Computed { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage.Set(nameof(Name), Name);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Name = storage.GetValue<string>(nameof(Name));
+		return default;
+	}
+}
+
+/// <summary>
+/// View entity for testing Join with MemberInit in result selector.
+/// Simulates a view where computed columns come from joined tables.
+/// </summary>
+public class VTestItemWithCategory : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+	public string JoinedCategoryName { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+	public void Save(SettingsStorage storage) { }
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken) => default;
+}
+
+/// <summary>
+/// View entity for testing SelectMany (left join) with MemberInit in result selector.
+/// </summary>
+public class VTestItemWithOptionalCategory : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+	public string LeftJoinedDescription { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+	public void Save(SettingsStorage storage) { }
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken) => default;
+}
+
+/// <summary>
+/// Self-referencing tree node for testing multi-level RelationMany nesting.
+/// Mirrors the Client → ClientGroup → Client pattern in the web app.
+/// </summary>
+[Entity(Name = "Ecng_TestNode")]
+public class TestNode : IDbPersistable
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+
+	[RelationMany(typeof(TestNodeChildList))]
+	public TestNodeChildList Children { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage.Set(nameof(Name), Name);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Name = storage.GetValue<string>(nameof(Name));
+		return default;
+	}
+
+	public void InitLists(IStorage db)
+	{
+		Children = new TestNodeChildList(db, this);
+	}
+}
+
+/// <summary>
+/// Junction entity linking a parent TestNode to a child TestNode.
+/// Mirrors ClientGroup (Client FK + Group FK).
+/// </summary>
+[Entity(Name = "Ecng_TestNodeChild")]
+public class TestNodeChild : IDbPersistable
+{
+	public long Id { get; set; }
+
+	[RelationSingle]
+	public TestNode Parent { get; set; }
+
+	[RelationSingle]
+	public TestNode Child { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.SetFk(nameof(Parent), Parent?.Id)
+			.SetFk(nameof(Child), Child?.Id);
+	}
+
+	public async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Parent = await storage.LoadFkAsync<TestNode>(nameof(Parent), db, cancellationToken);
+		Child = await storage.LoadFkAsync<TestNode>(nameof(Child), db, cancellationToken);
+	}
+}
+
+/// <summary>
+/// Join entity without identity column — simulates BaseJoinEntity pattern.
+/// </summary>
+[Entity(Name = "Ecng_TestItemTag")]
+public class TestItemTag : IDbPersistable
+{
+	[RelationSingle]
+	public TestItem Item { get; set; }
+
+	public string Tag { get; set; }
+
+	object IDbPersistable.GetIdentity() => null;
+	void IDbPersistable.SetIdentity(object id) { }
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.SetFk(nameof(Item), Item?.Id)
+			.Set(nameof(Tag), Tag);
+	}
+
+	public async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Item = await storage.LoadFkAsync<TestItem>(nameof(Item), db, cancellationToken);
+		Tag = storage.GetValue<string>(nameof(Tag));
+	}
+}
+
+/// <summary>
+/// Abstract base with two RelationSingle audit FKs (Created/Modified) for
+/// regression tests around FK-cycle resolution and inheritance-driven joins.
+/// </summary>
+public abstract class TestBrokerBase : IDbPersistable
+{
+	public long Id { get; set; }
+
+	[RelationSingle]
+	public TestBrokerUser CreatedBy { get; set; }
+
+	[RelationSingle]
+	public TestBrokerUser ModifiedBy { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public virtual void Save(SettingsStorage storage)
+	{
+		storage
+			.SetFk(nameof(CreatedBy), CreatedBy?.Id)
+			.SetFk(nameof(ModifiedBy), ModifiedBy?.Id);
+	}
+
+	public virtual async ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken ct)
+	{
+		CreatedBy = await storage.LoadFkAsync<TestBrokerUser>(nameof(CreatedBy), db, ct);
+		ModifiedBy = await storage.LoadFkAsync<TestBrokerUser>(nameof(ModifiedBy), db, ct);
+	}
+}
+
+[Entity(Name = "Ecng_TestBrokerUser")]
+public partial class TestBrokerUser : TestBrokerBase
+{
+	public string Email { get; set; } = string.Empty;
+	public string FirstName { get; set; } = string.Empty;
+	public string LastName { get; set; } = string.Empty;
+}
+
+[Entity(Name = "Ecng_TestBrokerPortfolio")]
+public partial class TestBrokerPortfolio : TestBrokerBase
+{
+	[RelationSingle]
+	public TestBrokerUser User { get; set; }
+
+	public string Name { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Relaxes an audit FK it inherits: this table's very first row is written before any
+/// user exists, so <see cref="TestBrokerBase.CreatedBy"/> is nullable here and stays
+/// NOT NULL on every other entity over the same base. The column belongs to the base
+/// class, so the override has to name it — the same shape the type-level
+/// <see cref="IndexAttribute"/> declarations use for inherited columns.
+/// </summary>
+[Entity(Name = "Ecng_TestBrokerTenant")]
+[ColumnOverride(nameof(TestBrokerBase.CreatedBy), IsNullable = true)]
+public partial class TestBrokerTenant : TestBrokerBase
+{
+	public string Name { get; set; } = string.Empty;
+}
+
+public class TestNodeChildList(IStorage storage, TestNode parent) : RelationManyList<TestNodeChild, long>(storage)
+{
+	private readonly TestNode _parent = parent ?? throw new ArgumentNullException(nameof(parent));
+
+	public override IQueryable<TestNodeChild> ToQueryable()
+		=> base.ToQueryable().Where(c => c.Parent.Id == _parent.Id);
+
+	protected override ValueTask<long> OnGetCount(bool deleted, CancellationToken cancellationToken)
+		=> ToQueryable().CountAsyncEx(cancellationToken);
+
+	protected override async ValueTask<TestNodeChild[]> OnGetGroup(long startIndex, long count, bool deleted, string orderBy, ListSortDirection direction, CancellationToken cancellationToken)
+	{
+		var q = ToQueryable();
+
+		if (startIndex > 0)
+			q = q.Skip((int)startIndex);
+
+		if (count < long.MaxValue)
+			q = q.Take((int)count);
+
+		return await q.ToArrayAsyncEx(cancellationToken);
+	}
+
+	protected override ValueTask<bool> IsSaved(TestNodeChild item, CancellationToken cancellationToken)
+		=> new(item.Id > 0);
+
+	public override ValueTask<bool> ContainsAsync(TestNodeChild item, CancellationToken cancellationToken)
+		=> ToQueryable().Where(c => c.Id == item.Id).AnyAsyncEx(cancellationToken);
+}
+
+/// <summary>
+/// A calendar date and a time of day, which are not moments and bind to their own
+/// column types.
+/// </summary>
+[Entity(Name = "Ecng_TestSchedule")]
+public class TestSchedule : IDbPersistable
+{
+	public long Id { get; set; }
+	public DateOnly Day { get; set; }
+	public DateOnly? Until { get; set; }
+	public TimeOnly OpensAt { get; set; }
+	public TimeOnly? ClosesAt { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.Set(nameof(Day), Day)
+			.Set(nameof(Until), Until)
+			.Set(nameof(OpensAt), OpensAt)
+			.Set(nameof(ClosesAt), ClosesAt);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Day = storage.GetValue<DateOnly>(nameof(Day));
+		Until = storage.GetValue<DateOnly?>(nameof(Until));
+		OpensAt = storage.GetValue<TimeOnly>(nameof(OpensAt));
+		ClosesAt = storage.GetValue<TimeOnly?>(nameof(ClosesAt));
+		return default;
+	}
+}
+
+/// <summary>
+/// Grouped view over <see cref="TestItem"/>: one row per priority and activity with the
+/// aggregates of the items in it. <see cref="Rank"/> mixes the group key with an aggregate,
+/// <see cref="LastId"/> is an aggregate of a nullable identifier.
+/// </summary>
+[Entity(Name = "Ecng_VTestItemPriorityCount", NoCache = true)]
+public class VTestItemPriorityCount : IDbPersistable
+{
+	public long Id { get; set; }
+	public int Priority { get; set; }
+	public bool IsActive { get; set; }
+	public int Count { get; set; }
+	public decimal Total { get; set; }
+	public int Rank { get; set; }
+	public long? LastId { get; set; }
+
+	object IDbPersistable.GetIdentity() => Id;
+	void IDbPersistable.SetIdentity(object id) => Id = id.To<long>();
+
+	public void Save(SettingsStorage storage)
+	{
+		storage
+			.Set(nameof(Priority), Priority)
+			.Set(nameof(IsActive), IsActive)
+			.Set(nameof(Count), Count)
+			.Set(nameof(Total), Total)
+			.Set(nameof(Rank), Rank)
+			.Set(nameof(LastId), LastId);
+	}
+
+	public ValueTask LoadAsync(SettingsStorage storage, IStorage db, CancellationToken cancellationToken)
+	{
+		Priority = storage.GetValue<int>(nameof(Priority));
+		IsActive = storage.GetValue<bool>(nameof(IsActive));
+		Count = storage.GetValue<int>(nameof(Count));
+		Total = storage.GetValue<decimal>(nameof(Total));
+		Rank = storage.GetValue<int>(nameof(Rank));
+		LastId = storage.GetValue<long?>(nameof(LastId));
+		return default;
+	}
+}
