@@ -38,7 +38,7 @@ jobs:
             rsync -a --delete --exclude='.git' "/tmp/$repo/" "$GITHUB_WORKSPACE/components/$repo/"
           done
 
-          git add -A
+          git add -A -f
           if git diff --cached --quiet; then
             echo "Destination already matches the copied source snapshots."
             exit 0
