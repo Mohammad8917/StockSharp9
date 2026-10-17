@@ -23,16 +23,25 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Copy official source snapshot
+      - name: Copy official StockSharp core and public companion repositories
         shell: bash
         run: |
           set -euo pipefail
+
           git clone --depth 1 --branch master https://github.com/StockSharp/StockSharp.git /tmp/stocksharp-source
-          rsync -a --delete --exclude='.git' --exclude='.github/workflows' /tmp/stocksharp-source/ "$GITHUB_WORKSPACE/"
+          rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/stocksharp-source/ "$GITHUB_WORKSPACE/"
+
+          mkdir -p "$GITHUB_WORKSPACE/components"
+          for repo in Connectors Ecng AlgoTrading JS-Charts doc; do
+            git clone --depth 1 "https://github.com/StockSharp/$repo.git" "/tmp/$repo"
+            mkdir -p "$GITHUB_WORKSPACE/components/$repo"
+            rsync -a --delete --exclude='.git' "/tmp/$repo/" "$GITHUB_WORKSPACE/components/$repo/"
+          done
+
           git add -A
           if git diff --cached --quiet; then
-            echo "Destination already matches the copied source tree."
+            echo "Destination already matches the copied source snapshots."
             exit 0
           fi
-          git commit -m "Copy official StockSharp source snapshot"
+          git commit -m "Copy official StockSharp source and companion repositories"
           git push origin HEAD:main
