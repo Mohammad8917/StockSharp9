@@ -15,11 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - name: Checkout destination
+      - name: Checkout destination with workflow-capable token
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          token: ${{ secrets.STOCKSHARP_SYNC_TOKEN || github.token }}
           persist-credentials: true
+      - name: Require token with workflow write permission
+        shell: bash
+        env:
+          STOCKSHARP_SYNC_TOKEN: ${{ secrets.STOCKSHARP_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${STOCKSHARP_SYNC_TOKEN}" ]; then
+            echo "::error::Missing repository Actions secret STOCKSHARP_SYNC_TOKEN. Add a fine-grained PAT with Contents: Read and write and Workflows: Read and write for Mohammad8917/StockSharp9, then rerun this workflow."
+            exit 1
+          fi
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
@@ -59,13 +70,13 @@ jobs:
           fail=0
           : > /tmp/verify-report.txt
           rsync -nrc --delete --itemize-changes --exclude='.git' --exclude='.github/workflows/copy-stocksharp.yml' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/" > /tmp/core-diff.txt
-          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' ! -path '*/.git/*' | wc -l)
+          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' | wc -l)
           if [ -s /tmp/core-diff.txt ]; then
             echo "FAIL StockSharp core: differences found" | tee -a /tmp/verify-report.txt
             cat /tmp/core-diff.txt >> /tmp/verify-report.txt
             fail=1
           else
-            echo "PASS StockSharp core: $core_count files; checksum and path-set match (excluding this repository's workflow directory and companion bundle)" | tee -a /tmp/verify-report.txt
+            echo "PASS StockSharp core: $core_count files; checksum and path-set match (excluding destination sync workflow and companion bundle)" | tee -a /tmp/verify-report.txt
           fi
           for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
             rsync -nrc --delete --itemize-changes --exclude='.git' "/tmp/companions/$repo/" "$GITHUB_WORKSPACE/components/$repo/" > "/tmp/$repo-diff.txt"
@@ -82,7 +93,7 @@ jobs:
           if [ "$fail" -ne 0 ]; then
             exit 1
           fi
-          echo "RESULT: 100% verified for all listed upstream snapshots at the SHAs above." >> "$GITHUB_STEP_SUMMARY"
+          echo "RESULT: 100% verified for all listed upstream snapshots at the SHAs above, with documented destination-layout exclusions." >> "$GITHUB_STEP_SUMMARY"
       - name: Upload verification report
         if: always()
         uses: actions/upload-artifact@v4
@@ -90,4 +101,4 @@ jobs:
           name: stocksharp-copy-verification
           path: /tmp/verify-report.txt
           if-no-files-found: ignore
-# Manual exact-source synchronization trigger: 2026-10-17.
+# Manual exact-source synchronization trigger: 2026-10-18.
