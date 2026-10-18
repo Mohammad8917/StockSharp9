@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rsync -a --delete --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/"
+          rsync -a --delete --exclude='.git' --exclude='.github/workflows/copy-stocksharp.yml' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/"
           mkdir -p "$GITHUB_WORKSPACE/components"
           for repo in Connectors Ecng AlgoTrading JS-Charts JS-Grids JS-Indicators JS-TradingControls JS-Diagram doc; do
             mkdir -p "$GITHUB_WORKSPACE/components/$repo"
@@ -58,8 +58,8 @@ jobs:
           set -euo pipefail
           fail=0
           : > /tmp/verify-report.txt
-          rsync -nrc --delete --itemize-changes --exclude='.git' --exclude='.github/workflows' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/" > /tmp/core-diff.txt
-          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' ! -path '*/.github/workflows/*' | wc -l)
+          rsync -nrc --delete --itemize-changes --exclude='.git' --exclude='.github/workflows/copy-stocksharp.yml' --exclude='components' /tmp/StockSharp/ "$GITHUB_WORKSPACE/" > /tmp/core-diff.txt
+          core_count=$(find /tmp/StockSharp -type f ! -path '*/.git/*' ! -path '*/.git/*' | wc -l)
           if [ -s /tmp/core-diff.txt ]; then
             echo "FAIL StockSharp core: differences found" | tee -a /tmp/verify-report.txt
             cat /tmp/core-diff.txt >> /tmp/verify-report.txt
