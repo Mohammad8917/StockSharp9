@@ -217,6 +217,27 @@ export class FakeElement {
         return node;
     }
 
+    /// A repaint moves the rows that stayed into their new order instead of building them again.
+    insertBefore<T extends FakeNode>(node: T, reference: FakeNode | null): T {
+        node.parentNode?._remove(node);
+        node.parentNode = this;
+        const at = reference ? this.childNodes.indexOf(reference) : -1;
+        if (at < 0) this.childNodes.push(node);
+        else this.childNodes.splice(at, 0, node);
+        return node;
+    }
+
+    /// A cell that reads otherwise is swapped for a new one in the row it belongs to.
+    replaceChild<T extends FakeNode>(node: T, old: FakeNode): T {
+        node.parentNode?._remove(node);
+        const at = this.childNodes.indexOf(old);
+        if (at < 0) throw new Error('replaceChild: the node to replace is not a child');
+        this.childNodes[at] = node;
+        node.parentNode = this;
+        old.parentNode = null;
+        return node;
+    }
+
     replaceChildren(...nodes: FakeNode[]): void {
         this.childNodes = [];
         for (const node of nodes) this.appendChild(node);
@@ -335,11 +356,45 @@ export const fakeDocument = {
     clipboard: '',
 };
 
-export const fakeWindow = {
+export const fakeWindow: {
+    innerWidth: number;
+    innerHeight: number;
+    addEventListener: (type: string, handler: FakeListener) => void;
+    removeEventListener: (type: string, handler: FakeListener) => void;
+    requestAnimationFrame?: (paint: () => void) => number;
+    cancelAnimationFrame?: (handle: number) => void;
+} = {
     innerWidth: 1024,
     innerHeight: 768,
     addEventListener: (type: string, handler: FakeListener): void => bind(windowListeners, type, handler),
     removeEventListener: (type: string, handler: FakeListener): void => unbind(windowListeners, type, handler),
+};
+
+const pendingFrames = new Map<number, () => void>();
+let nextFrame = 1;
+
+/// The frames a page paints in. A browser runs them once per screen refresh, and not at all in a hidden tab;
+/// here a test runs them when it says so. Not installed by default: a window without one paints at once.
+export const frameClock = {
+    install(): void {
+        fakeWindow.requestAnimationFrame = (paint: () => void): number => {
+            const handle = nextFrame++;
+            pendingFrames.set(handle, paint);
+            return handle;
+        };
+        fakeWindow.cancelAnimationFrame = (handle: number): void => { pendingFrames.delete(handle); };
+    },
+    uninstall(): void {
+        delete fakeWindow.requestAnimationFrame;
+        delete fakeWindow.cancelAnimationFrame;
+        pendingFrames.clear();
+    },
+    /// The next frame: everything asked for until now is painted, once.
+    run(): void {
+        const due = [...pendingFrames.values()];
+        pendingFrames.clear();
+        for (const paint of due) paint();
+    },
 };
 
 /// Fire what the page would fire: a click somewhere else, an Escape, a scroll.

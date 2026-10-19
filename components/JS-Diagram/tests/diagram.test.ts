@@ -4094,3 +4094,32 @@ test('fullscreen gives every gesture to the diagram and page scroll returns when
 
     diagram.destroy();
 });
+
+// Giving a canvas a new size clears it. A resize that only asked for a draw on the next frame let the frame in
+// between show the cleared canvas - the panel behind it, black, flashing on every step of a dragged splitter.
+test('a resize draws the diagram again before the frame that shows it', () => {
+    const { diagram, host } = makeDiagram();
+    const canvas = host.canvas!;
+    const drawsBefore = canvas.fillStyles.length;
+
+    diagram.resize(640, 360);
+
+    assert.ok(canvas.fillStyles.length > drawsBefore, 'the resized canvas was left cleared until the next frame');
+    assert.equal(canvas.width, 640);
+    assert.equal(canvas.height, 360);
+});
+
+// Setting a canvas's size clears it even when the size is the one it has, so an observer or a host repeating the
+// size it already gave must leave the canvas, and what is drawn on it, alone.
+test('a resize to the size the diagram already has leaves the canvas as it is', () => {
+    const { diagram, host } = makeDiagram();
+    const canvas = host.canvas!;
+    diagram.resize(640, 360);
+    const drawsBefore = canvas.fillStyles.length;
+    const transformsBefore = canvas.transforms.length;
+
+    diagram.resize(640, 360);
+
+    assert.equal(canvas.fillStyles.length, drawsBefore);
+    assert.equal(canvas.transforms.length, transformsBefore);
+});

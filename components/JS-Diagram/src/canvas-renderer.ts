@@ -1871,14 +1871,18 @@ export class Diagram {
     }
     resize(w: number, h: number): void {
         if (w < 2 || h < 2) return;
+        const dpr = window.devicePixelRatio || 1;
+        // Setting a canvas's size clears it, even to the size it has: a size it already has is left alone.
+        if (w === this.width && h === this.height && dpr === this.dpr) return;
         this.width = w; this.height = h;
-        this.dpr = window.devicePixelRatio || 1;
+        this.dpr = dpr;
         this.canvas.width = Math.round(w * this.dpr);
         this.canvas.height = Math.round(h * this.dpr);
         this.canvas.style.width = `${w}px`;
         this.canvas.style.height = `${h}px`;
         this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-        this.scheduleDraw();
+        // Drawn now, not on the next frame: the frame being laid out would otherwise show the cleared canvas.
+        if (!this.destroyed) this.draw();
     }
     getInteractionPermissions(): DiagramInteractionPermissions {
         return { ...this.permissions };
