@@ -101,4 +101,4 @@ jobs:
           name: stocksharp-copy-verification
           path: /tmp/verify-report.txt
           if-no-files-found: ignore
-# Manual exact-source synchronization trigger: 2026-10-18 refresh.
+# Manual exact-source synchronization trigger: 2026-10-19 refresh.
