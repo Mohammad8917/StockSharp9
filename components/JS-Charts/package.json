@@ -1,6 +1,6 @@
 {
   "name": "@stocksharp/chart",
-  "version": "2.4.1",
+  "version": "2.6.1",
   "description": "StockSharp JS Trading Charts — a dependency-free browser trading-chart engine: native panes, custom series, primitives, incremental indicators, exact order flow (footprint / volume profile / TPO) and a broker-agnostic trading layer, with a TypeScript API and the SSChart global.",
   "license": "SEE LICENSE IN LICENSE",
   "author": {
@@ -49,6 +49,10 @@
       "import": "./dist/esm/chart/ui.js"
     },
     "./ui.css": "./styles/chart-ui.css",
+    "./legend": {
+      "types": "./dist/types/chart/legend.d.ts",
+      "import": "./dist/esm/chart/legend.js"
+    },
     "./indicators": {
       "types": "./dist/types/chart/indicators/index.d.ts",
       "import": "./dist/esm/chart/indicators/index.js"

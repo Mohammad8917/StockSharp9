@@ -5,30 +5,31 @@ using System.Runtime.CompilerServices;
 class RestClient : RestBaseApiClient
 {
 	private const string _dateFormat = "yyyy-MM-dd";
-	private DateTime? _lastCallTime;
+	private static readonly SemaphoreSlim _requestGate = new(1, 1);
 
 	public RestClient(HttpClient http, string domain)
-		: base(http, new JsonMediaTypeFormatter(), new JsonMediaTypeFormatter())
+		: base(http, new NewtonsoftMediaTypeFormatter(), new NewtonsoftMediaTypeFormatter())
 	{
 		BaseAddress = $"https://api.{domain}".To<Uri>();
+		ExtractBadResponse = true;
 	}
 
 	private async Task<Response<T>> Do<T>(TimeSpan delay, Uri url, CancellationToken cancellationToken)
 	{
-		var diff = _lastCallTime is null ? TimeSpan.Zero : delay - (DateTime.UtcNow - _lastCallTime.Value);
-
-		if (diff > TimeSpan.Zero)
-			await diff.Delay(cancellationToken);
-
-		_lastCallTime = DateTime.UtcNow;
-
+		await _requestGate.WaitAsync(cancellationToken);
 		try
 		{
+			if (delay > TimeSpan.Zero)
+				await delay.Delay(cancellationToken);
 			return await DoAsync<Response<T>>(HttpMethod.Get, url, default, cancellationToken);
 		}
-		catch (Exception ex)
+		catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
 		{
-			throw new InvalidOperationException($"Error download '{url}'.", ex);
+			throw new InvalidOperationException($"Error downloading '{url.GetLeftPart(UriPartial.Path)}'.", ex);
+		}
+		finally
+		{
+			_requestGate.Release();
 		}
 	}
 
@@ -149,7 +150,7 @@ class RestClient : RestBaseApiClient
 			.Append(nameof(apiKey), apiKey)
 		;
 
-		var response = await DoAsync<Response<Quote>>(HttpMethod.Get, url, default, cancellationToken);
+		var response = await Do<Quote>(delay, url, cancellationToken);
 
 		await foreach (var item in ProcessResponse(delay, response, apiKey, cancellationToken).WithEnforcedCancellation(cancellationToken))
 			yield return item;
@@ -159,6 +160,9 @@ class RestClient : RestBaseApiClient
 	{
 		while (true)
 		{
+			if (!response.Status.IsEmpty() && !response.Status.EqualsIgnoreCase("OK") && !response.Status.EqualsIgnoreCase("DELAYED"))
+				throw new InvalidOperationException($"{response.Status}: {response.Error ?? response.Message}");
+
 			if (response.Results is null)
 				break;
 

@@ -39,10 +39,33 @@ export type {
     LegendCrosshairParam,
     LegendIndicatorEngine,
     LegendIndicatorValue,
+    LegendLine,
     LegendMenuLayer,
     LegendPaneHost,
     LegendSeriesData,
+    LegendTradeMarks,
 } from './chart-legend.js';
+
+// Executed trades on the candles: the marks and the list of a mark's trades under the pointer. The legend names the
+// trades of the bar under the pointer through `setTradeMarks`.
+export {
+    TradeMarks,
+    barOf,
+    describeTrade,
+    groupTradesByBar,
+    tradeMarkers,
+} from './trade-marks.js';
+
+export type {
+    ChartTrade,
+    TradeMarkColors,
+    TradeMarksBar,
+    TradeMarksChart,
+    TradeMarksCrosshairParam,
+    TradeMarksOptions,
+    TradeMarksPlugin,
+    TradeMarksSeries,
+} from './trade-marks.js';
 
 export {
     ChartContextMenu,

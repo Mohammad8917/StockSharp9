@@ -728,17 +728,38 @@
     font-size: 11px;
 }
 
-/* Natural height, so the best ask sits just above the mid line and the best bid
-   just below it. Centring each block inside its half leaves a dead band above a
-   shallow book. */
-.orderbook-asks,
-.orderbook-bids {
+/* Each side at its natural height, so its levels sit just above and below the mid
+   line; centring each block inside its half leaves a dead band above a shallow
+   book. A side takes at most half the ladder, and its best level stands against
+   the mid line outside the list that scrolls, so it stays in sight however far
+   the side is scrolled. */
+.orderbook-ask-side,
+.orderbook-bid-side {
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     min-height: 0;
     max-height: calc(50% - 12px);
+}
+
+/* Each list holds its levels nearest the spread first and runs away from the mid
+   line, so it opens on them: the asks above the line run upward. */
+.orderbook-asks,
+.orderbook-bids {
+    flex: 0 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     overflow-y: auto;
+}
+
+.orderbook-asks { flex-direction: column-reverse; }
+
+.orderbook-best-ask,
+.orderbook-best-bid {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
 }
 
 /* One level. The volume bar sits behind the figures, absolutely positioned, so
@@ -853,9 +874,11 @@
 /* Inverted sides — the bid block floats above the mid line. Each block reverses
    internally as well, so the levels nearest the spread stay nearest the mid
    line in both orders. */
-.orderbook-panel.ob-invert .orderbook-content { flex-direction: column-reverse; }
-.orderbook-panel.ob-invert .orderbook-asks,
+.orderbook-panel.ob-invert .orderbook-content,
+.orderbook-panel.ob-invert .orderbook-ask-side,
+.orderbook-panel.ob-invert .orderbook-bid-side,
 .orderbook-panel.ob-invert .orderbook-bids { flex-direction: column-reverse; }
+.orderbook-panel.ob-invert .orderbook-asks { flex-direction: column; }
 
 /* Buy-versus-sell strip along the bottom. One measured property splits it — the
    bid half takes it, the ask half takes what is left — so the two can never
@@ -1232,8 +1255,9 @@
 
 /* A field the current order type does not use, and the take-profit block while
    it is switched off. The control toggles this class rather than a display
-   style, so what a field looks like when it is away stays here. */
-.oe-field-hidden { display: none; }
+   style, so what a field looks like when it is away stays here; it outranks the
+   display every part of the form gives itself, wherever that rule stands. */
+.oe-field-hidden { display: none !important; }
 
 .oe-input-grp {
     display: flex;

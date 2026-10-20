@@ -762,7 +762,13 @@ public static partial class StorageHelper
 			if (range == default)
 				yield break;
 
-			var messages = storage.LoadAsync(range.from, range.to);
+			// The days the storage loads, then the newest ones, read already while the window was worked out.
+			var messages = range.from < range.to
+				? storage.LoadAsync(range.from, range.to)
+				: AsyncEnumerable.Empty<TMessage>();
+
+			if (range.read.Length > 0)
+				messages = messages.Concat(range.read.Cast<TMessage>().ToAsyncEnumerable());
 
 			// range.skip is the surplus at the front of a count-from-end window (see
 			// GetRangeAsync); combined with any caller-supplied Skip it drops the older
@@ -1085,7 +1091,7 @@ public static partial class StorageHelper
 		}
 	}
 
-	private static async ValueTask<(DateTime from, DateTime to, long skip)> GetRangeAsync(IMarketDataStorage storage, ISubscriptionMessage subscription, CancellationToken cancellationToken)
+	private static async ValueTask<(DateTime from, DateTime to, long skip, Message[] read)> GetRangeAsync(IMarketDataStorage storage, ISubscriptionMessage subscription, CancellationToken cancellationToken)
 	{
 		if (storage is null)
 			throw new ArgumentNullException(nameof(storage));
@@ -1111,56 +1117,82 @@ public static partial class StorageHelper
 		// A null To means "no upper bound" — cap at the newest stored date.
 		var to = subscription.To ?? last.Value.EndOfDay();
 
-		var first = dates.First();
-
-		long skip = 0;
-		DateTime from;
-
 		if (subscription.From is DateTime f)
 		{
-			from = f;
+			var from = f;
+			var first = dates.First();
 
 			if (from < first)
 				from = first;
+
+			if (from >= to)
+				return default;
+
+			return (from, to, 0, []);
 		}
 		else if (subscription.Count > 0 && subscription is MarketDataMessage md && Equals(storage.DataType, md.DataType2))
 		{
-			// Count-from-end: no start date was given, so resolve the last Count records
-			// by walking stored dates newest-first, summing each day's record count until
-			// the window covers Count. The surplus at the front of the earliest day is
-			// skipped (see LoadFromStorage) so exactly the last Count records survive.
+			// Count-from-end: no start date was given, so the window is the last Count records up to the end, found by
+			// walking the stored days newest-first. A day the end does not cut is counted by its header, which holds how
+			// many records the day has, and is loaded with the window; the surplus at the front of the earliest of them
+			// is skipped (see LoadFromStorage). A day that has to be read to be counted - the one the end cuts, and every
+			// day of candles built from smaller time frames, which have no such number until they are built - is read
+			// once, up to the end, and what the window takes of it is kept.
 			var target = subscription.Count.Value;
 
-			from = first;
 			long covered = 0;
+			var read = new List<Message[]>();
+			DateTime? from = null;
+			var loadTo = default(DateTime);
 
-			// Count each day's records by loading it (candle storages don't expose a
-			// reliable per-day Count in meta-info — the buildable wrapper throws — so we
-			// count what LoadAsync actually yields, which is correct for every storage).
 			foreach (var date in dates.Where(d => d <= to).OrderByDescending(d => d))
 			{
-				var dayCount = await storage.LoadAsync(date).CountAsync(cancellationToken);
+				if (to >= date.EndOfDay() && storage is not CandleMessageBuildableStorage)
+				{
+					var dayCount = (await storage.GetMetaInfoAsync(date, cancellationToken))?.Count ?? 0;
 
-				if (dayCount == 0)
-					continue;
+					if (dayCount == 0)
+						continue;
 
-				covered += dayCount;
-				from = date;
+					if (from is null)
+						loadTo = date.EndOfDay();
+
+					from = date;
+					covered += dayCount;
+				}
+				else
+				{
+					// A load stops at the first record past its end, and so does this read.
+					var day = await storage.LoadAsync(date)
+						.TakeWhile(m => m.GetServerTime() <= to)
+						.TakeLast((int)Math.Min(target - covered, int.MaxValue))
+						.ToArrayAsync(cancellationToken);
+
+					if (day.Length == 0)
+						continue;
+
+					read.Add(day);
+					covered += day.Length;
+				}
 
 				if (covered >= target)
 					break;
 			}
 
-			if (covered > target)
-				skip = covered - target;
+			if (covered == 0)
+				return default;
+
+			// A day has to be read only when it is the newest, or when no day is counted by its header, so what was
+			// kept of the read ones ends the window.
+			read.Reverse();
+			Message[] kept = [.. read.SelectMany(day => day)];
+
+			return from is DateTime start
+				? (start, loadTo, Math.Max(covered - target, 0), kept)
+				: (default, default, 0, kept);
 		}
 		else
 			return default;
-
-		if (from >= to)
-			return default;
-
-		return (from, to, skip);
 	}
 
 	private static async IAsyncEnumerable<Message> LoadMessagesAsyncCore<TMessage>(

@@ -97,6 +97,9 @@ export class OrderBookWidget {
     rootEl: HTMLElement;
     asksEl: HTMLElement | null;
     bidsEl: HTMLElement | null;
+    /// The best level of each side, against the mid line and outside the side's scrolling list.
+    bestAskEl: HTMLElement | null;
+    bestBidEl: HTMLElement | null;
     midEl: HTMLElement | null;
     spreadEl: HTMLElement | null;
     contentEl: HTMLElement | null;
@@ -182,12 +185,18 @@ export class OrderBookWidget {
                 makeElement('span', 'ob-col-total', {}, [host.t('Total')]),
             ]),
             makeElement('div', 'orderbook-content', { 'aria-live': 'polite', 'aria-atomic': 'false' }, [
-                makeElement('div', 'orderbook-asks', { 'aria-label': host.t('AskOrders') }, []),
+                makeElement('div', 'orderbook-ask-side', { 'aria-label': host.t('AskOrders') }, [
+                    makeElement('div', 'orderbook-asks', {}, []),
+                    makeElement('div', 'orderbook-best-ask', {}, []),
+                ]),
                 makeElement('div', 'orderbook-mid', { 'aria-label': host.t('MidPrice') }, [
                     makeElement('span', 'ob-mid-price', {}, ['--']),
                     makeElement('span', 'ob-mid-spread', { 'aria-live': 'polite' }, []),
                 ]),
-                makeElement('div', 'orderbook-bids', { 'aria-label': host.t('BidOrders') }, []),
+                makeElement('div', 'orderbook-bid-side', { 'aria-label': host.t('BidOrders') }, [
+                    makeElement('div', 'orderbook-best-bid', {}, []),
+                    makeElement('div', 'orderbook-bids', {}, []),
+                ]),
             ]),
             makeElement('div', 'ob-sentiment', { 'aria-label': host.t('OrderBookSentiment') }, [
                 makeElement('div', 'ob-sent-bid', {}, [
@@ -214,6 +223,8 @@ export class OrderBookWidget {
 
         this.asksEl = this.rootEl.querySelector('.orderbook-asks');
         this.bidsEl = this.rootEl.querySelector('.orderbook-bids');
+        this.bestAskEl = this.rootEl.querySelector('.orderbook-best-ask');
+        this.bestBidEl = this.rootEl.querySelector('.orderbook-best-bid');
         this.midEl = this.rootEl.querySelector('.ob-mid-price');
         this.spreadEl = this.rootEl.querySelector('.spread-label');
         this.contentEl = this.rootEl.querySelector('.orderbook-content');
@@ -667,34 +678,34 @@ export class OrderBookWidget {
         const own = this._ownQuantities();
         const painted = new Map<string, number>();
 
-        // Asks are rendered worst-first so the best ask ends up next to the mid
-        // line, while the cumulative total runs the other way — the best ask
-        // reads `qty == total` and the sum grows as the eye moves away from the
-        // spread.
-        const askTotals: number[] = [];
+        // Both sides list their levels nearest the spread first, and the
+        // stylesheet lays the asks out upward from the mid line, so each list
+        // opens on the levels nearest the spread. The cumulative total grows as
+        // the eye moves away from it: the best ask reads `qty == total`.
         let running = 0;
+        const askRows: HTMLElement[] = [];
         for (const level of visibleAsks) {
             running += level.quantity;
-            askTotals.push(running);
-        }
-        const askRows: HTMLElement[] = [];
-        for (let i = visibleAsks.length - 1; i >= 0; i--) {
-            askRows.push(this._levelRow(visibleAsks[i], {
+            askRows.push(this._levelRow(level, {
                 rowClass: 'ob-row ask',
                 orderSide: 'buy',
-                key: `a_${visibleAsks[i].price}`,
-                cumulative: askTotals[i],
-                barPct: (visibleAsks[i].quantity / maxAsk) * 100,
-                heatPct: HEAT_FLOOR_PCT + HEAT_RANGE_PCT * (visibleAsks[i].quantity / maxBoth),
+                key: `a_${level.price}`,
+                cumulative: running,
+                barPct: (level.quantity / maxAsk) * 100,
+                heatPct: HEAT_FLOOR_PCT + HEAT_RANGE_PCT * (level.quantity / maxBoth),
                 // More size on the offer is pressure downward, so a growing ask
                 // level flashes in the falling colour.
                 growthClass: 'flash-red',
                 shrinkClass: 'flash-green',
-                ownQuantity: own.asks.get(OrderBookWidget._priceKey(visibleAsks[i].price)),
+                ownQuantity: own.asks.get(OrderBookWidget._priceKey(level.price)),
                 painted,
             }));
         }
+        // The best level of each side stands against the mid line outside the side's list, so scrolling a side to
+        // deeper levels never takes it out of sight.
+        const bestAsk = askRows.shift();
         this.asksEl.replaceChildren(...askRows);
+        this.bestAskEl?.replaceChildren(...(bestAsk === undefined ? [] : [bestAsk]));
 
         running = 0;
         const bidRows: HTMLElement[] = [];
@@ -713,7 +724,9 @@ export class OrderBookWidget {
                 painted,
             }));
         }
+        const bestBid = bidRows.shift();
         this.bidsEl.replaceChildren(...bidRows);
+        this.bestBidEl?.replaceChildren(...(bestBid === undefined ? [] : [bestBid]));
 
         this._prevQuantities = painted;
 

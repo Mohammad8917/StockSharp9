@@ -6,6 +6,7 @@
 // `window`, so a page can mount one legend per chart tile and the two neither share an element nor
 // tear down each other's menu.
 import type { ChartUiHost } from './chart-host.js';
+import type { ChartTrade } from './trade-marks.js';
 
 /**
  * A bar as the legend reads it. Every price field is optional on purpose: the crosshair
@@ -54,6 +55,24 @@ export interface LegendIndicatorValue {
     colors: readonly string[];
     /** null = overlay on the main chart; anything else names the sub-pane it lives in. */
     paneId: string | null;
+}
+
+/**
+ * A line the page draws itself and the legend names beside the candle: its value at the bar under the pointer, in its
+ * own colour. It is no study of the indicator engine, so its row carries no edit or remove button.
+ */
+export interface LegendLine {
+    name: string;
+    color: string;
+    /** The value at the bar that opens at `time`, or undefined where the line has none. */
+    valueAt(time: number): number | undefined;
+}
+
+/** The trades marked on the chart, as the legend names them at a bar; `TradeMarks` is one. */
+export interface LegendTradeMarks {
+    /** The trades marked on the bar that opens at `time`; none where it has none. */
+    barTrades(time: number): readonly ChartTrade[];
+    colors(): { buy: string; sell: string; unknown: string };
 }
 
 /** The slice of the indicator engine the legend talks to — same structural reasoning as LegendChart. */
@@ -134,6 +153,10 @@ export class ChartLegend {
     // cursor made the V column appear and vanish as the mouse moved.
     _hasVolume: boolean = false;
     _indicatorEngine: LegendIndicatorEngine | null = null;
+    _title: string = '';
+    _lines: readonly LegendLine[] = [];
+    _lastLinesSignature: string | null = null;
+    _tradeMarks: LegendTradeMarks | null = null;
     _isHovered: boolean = false;
     _isDisposed: boolean = false;
     // Kept so dispose() can detach exactly what init() attached.
@@ -264,6 +287,28 @@ export class ChartLegend {
         this.refresh();
     }
 
+    /** Names what the chart shows, ahead of the candle's prices: its instrument, say. An empty title names nothing. */
+    setTitle(title: string) {
+        this._title = title;
+        this.refresh();
+    }
+
+    /** Hands the legend the lines it names beside the candle, in the order they are listed. */
+    setLines(lines: readonly LegendLine[]) {
+        this._lines = lines;
+        this.refresh();
+    }
+
+    /**
+     * Names the trades marked on the bar under the pointer in a row of their own, each side in the colour of its marks;
+     * null takes the row away. Marks that were handed other trades are read again on the next paint, or at once by
+     * `refresh()`.
+     */
+    setTradeMarks(marks: LegendTradeMarks | null) {
+        this._tradeMarks = marks;
+        this.refresh();
+    }
+
     /** Points the legend at the indicator engine whose values it prints. */
     setIndicatorEngine(engine: LegendIndicatorEngine | null) {
         this._indicatorEngine = engine;
@@ -292,17 +337,23 @@ export class ChartLegend {
         if (this._rawCandles.length > 0) {
             const last = this._rawCandles[this._rawCandles.length - 1];
             this._renderOHLCV(last);
+            this._renderTrades(last.time);
+            this._renderLines(last.time);
             this._renderIndicators(last.time);
         } else {
             // No candles yet — still put the .legend-indicators span in place
             // so _renderIndicators has something to fill when indicators arrive.
             if (!this._container.querySelector('.legend-indicators')) {
-                this._container.innerHTML = '<span class="legend-ohlcv"></span><span class="legend-indicators"></span>';
-                // Both caches describe nodes that were just thrown away; left standing, they let
+                this._container.innerHTML = '<span class="legend-ohlcv"></span><span class="legend-trades"></span>'
+                    + '<span class="legend-lines"></span><span class="legend-indicators"></span>';
+                // The caches describe nodes that were just thrown away; left standing, they let
                 // the next paint decide nothing needs rebuilding and the legend stays blank.
                 this._stripHasVolume = null;
                 this._lastIndSignature = null;
+                this._lastLinesSignature = null;
             }
+            this._renderTrades(null);
+            this._renderLines(null);
             this._renderIndicators(0);
         }
     }
@@ -315,6 +366,8 @@ export class ChartLegend {
             if (this._rawCandles.length > 0) {
                 const last = this._rawCandles[this._rawCandles.length - 1];
                 this._renderOHLCV(last);
+                this._renderTrades(last.time);
+                this._renderLines(last.time);
                 this._renderIndicators(last.time);
             }
             return;
@@ -339,6 +392,8 @@ export class ChartLegend {
         if (candle) {
             this._renderOHLCV(candle);
         }
+        this._renderTrades(time);
+        this._renderLines(time);
         this._renderIndicators(time, param.seriesData);
     }
 
@@ -360,7 +415,8 @@ export class ChartLegend {
         // about, and the hover freeze does not help here: it only gates _renderIndicators.
         let strip = this._container.querySelector('.legend-ohlcv') as HTMLElement | null;
         if (strip === null || this._stripHasVolume !== this._hasVolume) {
-            let html = '<span class="legend-item legend-time" data-ohlc="time"></span>';
+            let html = '<span class="legend-item legend-title" data-ohlc="title"></span>'
+                + '<span class="legend-item legend-time" data-ohlc="time"></span>';
             for (const key of ['o', 'h', 'l', 'c']) {
                 html += `<span class="legend-item">${key.toUpperCase()} `
                     + `<span data-ohlc="${key}"></span></span>`;
@@ -382,12 +438,13 @@ export class ChartLegend {
             if (this._container.querySelector('.legend-indicators') !== null && strip !== null) {
                 strip.innerHTML = html;
             } else {
-                this._container.innerHTML = `<span class="legend-ohlcv">${html}</span>`
-                    + '<span class="legend-indicators"></span>';
+                this._container.innerHTML = `<span class="legend-ohlcv">${html}</span><span class="legend-trades"></span>`
+                    + '<span class="legend-lines"></span><span class="legend-indicators"></span>';
                 strip = this._container.querySelector('.legend-ohlcv') as HTMLElement | null;
-                // The indicator rows went with it, so the next _renderIndicators has to rebuild
-                // rather than trust a signature describing nodes that no longer exist.
+                // The indicator and line rows went with it, so the next paint has to rebuild them
+                // rather than trust signatures describing nodes that no longer exist.
                 this._lastIndSignature = null;
+                this._lastLinesSignature = null;
             }
             this._stripHasVolume = this._hasVolume;
         }
@@ -399,6 +456,7 @@ export class ChartLegend {
             el.textContent = text;
             if (coloured) el.className = cls;
         };
+        write('title', this._title, false);
         write('time', formatters.time(candle.time), false);
         write('o', fmt(candle.open), true);
         write('h', fmt(candle.high), true);
@@ -417,6 +475,84 @@ export class ChartLegend {
             const icon = toggle.querySelector('[data-ct-icon]') as HTMLElement | null;
             if (icon !== null) icon.className = this._currentChartTypeIcon();
         }
+    }
+
+    /**
+     * The trades marked on the bar: an entry for each side that has any, in the colour of its marks, naming the volume
+     * and the price - for a side with several trades on the bar, how many, their volume and its average price.
+     */
+    _renderTrades(time: number | null) {
+        if (this._isDisposed) return;
+
+        const row = this._container.querySelector('.legend-trades') as HTMLElement | null;
+        if (row === null) return;
+
+        const marks = this._tradeMarks;
+
+        // The row keeps its line while the chart has marks, so the rows under it stay put as the pointer crosses bars
+        // without trades.
+        row.hidden = marks === null;
+
+        if (marks === null || time === null) {
+            row.replaceChildren();
+            return;
+        }
+
+        const trades = marks.barTrades(time);
+        const colors = marks.colors();
+        const { formatters } = this._host;
+        const sides = [
+            { side: 'buy', symbol: '▲', word: this._host.translate('Buy'), color: colors.buy },
+            { side: 'sell', symbol: '▼', word: this._host.translate('Sell'), color: colors.sell },
+            { side: null, symbol: '●', word: this._host.translate('Trade'), color: colors.unknown },
+        ];
+
+        row.replaceChildren(...sides.flatMap(({ side, symbol, word, color }) => {
+            const ofSide = trades.filter(trade => trade.side === side);
+
+            if (ofSide.length === 0)
+                return [];
+
+            const volume = ofSide.reduce((sum, trade) => sum + trade.volume, 0);
+            // Weighed by volume; trades that carry none count alike.
+            const price = volume > 0
+                ? ofSide.reduce((sum, trade) => sum + trade.price * trade.volume, 0) / volume
+                : ofSide.reduce((sum, trade) => sum + trade.price, 0) / ofSide.length;
+            const count = ofSide.length > 1 ? ` ×${ofSide.length}` : '';
+
+            const entry = document.createElement('span');
+            entry.className = 'legend-trades-side';
+            entry.style.color = color;
+            entry.textContent = `${symbol} ${word}${count} ${formatters.volume(volume)} @ ${formatters.price(price)}`;
+            return [entry];
+        }));
+    }
+
+    /** The page's own lines at the bar: a row of "name value" in each line's colour, built once per set of lines. */
+    _renderLines(time: number | null | undefined) {
+        if (this._isDisposed) return;
+
+        const linesEl = this._container.querySelector('.legend-lines') as HTMLElement | null;
+        if (linesEl === null) return;
+
+        const signature = this._lines.map(line => `${line.name}\u0000${line.color}`).join('\u0001');
+        if (signature !== this._lastLinesSignature) {
+            this._lastLinesSignature = signature;
+            linesEl.replaceChildren(...this._lines.map(line => {
+                const row = document.createElement('span');
+                row.className = 'legend-item legend-line';
+                row.style.color = line.color;
+                return row;
+            }));
+        }
+
+        const rows = linesEl.querySelectorAll('.legend-line');
+        this._lines.forEach((line, index) => {
+            const row = rows[index] as HTMLElement | undefined;
+            if (row === undefined) return;
+            const value = time == null ? undefined : line.valueAt(time);
+            row.textContent = `${line.name} ${value === undefined ? '--' : this._host.formatters.price(value)}`;
+        });
     }
 
     /**
